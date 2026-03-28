@@ -90,3 +90,4 @@ class TestCli:
             "--min-var", "0.0",
         ])
         assert rc == 0
+        assert out.exists()

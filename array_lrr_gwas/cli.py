@@ -163,7 +163,7 @@ def _run_correct(args: argparse.Namespace) -> int:
         if build is None:
             logger.error(
                 "Could not detect genome build from input file. "
-                "Please supply --build (GRCh37 or GRCh38)."
+                "Please supply --build (GRCh37, GRCh38, or T2T-CHM13)."
             )
             return 1
         logger.info("Using genome build: %s", build)
