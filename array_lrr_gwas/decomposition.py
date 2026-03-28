@@ -135,7 +135,11 @@ def decompose(
     if callable(backend):
         func: DecompCallable = backend
     elif backend == "rsvd":
-        func = lambda m, k_: rsvd(m, k_)  # noqa: E731
+
+        def _rsvd_wrapper(m: NDArray, k_: int) -> tuple[NDArray, NDArray, NDArray]:
+            return rsvd(m, k_)
+
+        func = _rsvd_wrapper
     elif backend == "fbpca":
         func = _fbpca_backend
     else:
