@@ -1,4 +1,4 @@
-"""Command-line interface for LRR batch-effect correction and association.
+"""Command-line interface for LRR batch-effect correction and LMM association.
 
 Usage
 -----
@@ -6,6 +6,8 @@ Usage
 
     array-lrr-gwas correct input.bcf -o corrected.bcf [--build GRCh38] [--k 5]
     array-lrr-gwas associate input.bcf --phenotype pheno.tsv -o results.tsv
+    array-lrr-gwas associate input.bcf --phenotype pheno.tsv \\
+        --sample-sheet compiled_sample_sheet.tsv -o results.tsv
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="array-lrr-gwas",
-        description="Batch-effect correction for array-based LRR values.",
+        description="Batch-effect correction and LMM GWAS for array-based LRR values.",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -111,7 +113,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- associate sub-command ----
     assoc = sub.add_parser(
         "associate",
-        help="Run LRR-based GWAS association scan.",
+        help="Run LRR-based GWAS association scan (LMM, OLS, or logistic).",
     )
     assoc.add_argument(
         "input",
@@ -138,9 +140,45 @@ def _build_parser() -> argparse.ArgumentParser:
     assoc.add_argument(
         "--method",
         type=str,
-        default="ols",
-        choices=["ols", "logistic"],
-        help="Association method (default: ols).",
+        default="lmm",
+        choices=["lmm", "ols", "logistic"],
+        help="Association method (default: lmm).",
+    )
+    assoc.add_argument(
+        "--sample-sheet",
+        type=Path,
+        default=None,
+        help=(
+            "Path to compiled_sample_sheet.tsv from illumina_idat_processing. "
+            "Global ancestry PCs and covariates are extracted automatically."
+        ),
+    )
+    assoc.add_argument(
+        "--n-pcs",
+        type=int,
+        default=20,
+        help="Number of global ancestry PCs to use from sample sheet (default: 20).",
+    )
+    assoc.add_argument(
+        "--genotype-bcf",
+        type=Path,
+        default=None,
+        help=(
+            "BCF/VCF with FORMAT/GT for GRM computation.  If omitted the "
+            "input file is used (requires GT field)."
+        ),
+    )
+    assoc.add_argument(
+        "--min-maf",
+        type=float,
+        default=0.01,
+        help="Minimum MAF for GRM genotype filtering (default: 0.01).",
+    )
+    assoc.add_argument(
+        "--min-gt-call-rate",
+        type=float,
+        default=0.90,
+        help="Minimum genotype call rate for GRM filtering (default: 0.90).",
     )
     assoc.add_argument(
         "-v",
@@ -289,15 +327,15 @@ def _run_associate(args: argparse.Namespace) -> int:
     logger.info("Reading phenotype from %s", pheno_path)
     sample_to_idx = {s: i for i, s in enumerate(samples)}
     pheno_vals = np.full(len(samples), np.nan)
-    cov_names: list[str] = []
-    cov_vals: list[list[float]] = [[] for _ in samples]
+    pheno_cov_names: list[str] = []
+    pheno_cov_vals: list[list[float]] = [[] for _ in samples]
 
     with open(pheno_path, newline="") as fh:
         reader = csv.DictReader(fh, delimiter="\t")
         if reader.fieldnames is None:
             logger.error("Phenotype file is empty or has no header")
             return 1
-        cov_names = [
+        pheno_cov_names = [
             c for c in reader.fieldnames if c not in ("sample_id", "phenotype")
         ]
         for row in reader:
@@ -306,8 +344,8 @@ def _run_associate(args: argparse.Namespace) -> int:
                 continue
             idx = sample_to_idx[sid]
             pheno_vals[idx] = float(row["phenotype"])
-            for cn in cov_names:
-                cov_vals[idx].append(float(row[cn]))
+            for cn in pheno_cov_names:
+                pheno_cov_vals[idx].append(float(row[cn]))
 
     valid_mask = ~np.isnan(pheno_vals)
     n_valid = int(valid_mask.sum())
@@ -316,15 +354,111 @@ def _run_associate(args: argparse.Namespace) -> int:
         return 1
     logger.info("%d samples with valid phenotype", n_valid)
 
+    # Build covariate matrix
+    cov_parts: list[np.ndarray] = []
+
+    # Covariates from phenotype file
+    if pheno_cov_names:
+        pheno_covs = np.array(
+            [pheno_cov_vals[i] for i in range(len(samples)) if valid_mask[i]]
+        )
+        cov_parts.append(pheno_covs)
+        logger.info(
+            "Using %d covariates from phenotype file: %s",
+            len(pheno_cov_names), pheno_cov_names,
+        )
+
+    # Covariates from sample sheet
+    if args.sample_sheet is not None:
+        if not args.sample_sheet.exists():
+            logger.error("Sample sheet not found: %s", args.sample_sheet)
+            return 1
+
+        from array_lrr_gwas.sample_sheet import read_sample_sheet, align_samples
+
+        logger.info("Reading sample sheet from %s", args.sample_sheet)
+        sheet_ids, sheet_covs, cov_names = read_sample_sheet(
+            args.sample_sheet, n_pcs=args.n_pcs,
+        )
+        logger.info(
+            "Extracted %d covariates from sample sheet: %s",
+            len(cov_names), cov_names,
+        )
+
+        # Align to BCF samples and subset to valid
+        aligned = align_samples(samples, sheet_ids, sheet_covs)
+        aligned_valid = aligned[valid_mask]
+
+        # Drop columns that are all NaN
+        col_valid = ~np.all(np.isnan(aligned_valid), axis=0)
+        if col_valid.any():
+            aligned_valid = aligned_valid[:, col_valid]
+            used_names = [n for n, v in zip(cov_names, col_valid) if v]
+            # Mean-impute any remaining NaN
+            for c in range(aligned_valid.shape[1]):
+                mask = np.isnan(aligned_valid[:, c])
+                if mask.any():
+                    aligned_valid[mask, c] = np.nanmean(aligned_valid[:, c])
+            cov_parts.append(aligned_valid)
+            logger.info(
+                "Using %d sample-sheet covariates: %s",
+                len(used_names), used_names,
+            )
+
+    # Combine covariates
+    covariates = None
+    if cov_parts:
+        covariates = np.column_stack(cov_parts)
+
     # Subset to samples with phenotype
     phenotype = pheno_vals[valid_mask]
     lrr_sub = lrr[:, valid_mask]
-    covariates = None
-    if cov_names:
-        covariates = np.array(
-            [cov_vals[i] for i in range(len(samples)) if valid_mask[i]]
+
+    # GRM for LMM
+    grm = None
+    if args.method == "lmm":
+        from array_lrr_gwas.genotypes import read_genotypes
+        from array_lrr_gwas.grm import compute_grm
+
+        gt_path = args.genotype_bcf or input_path
+        logger.info("Reading genotypes from %s for GRM", gt_path)
+        dosage, gt_samples, _ = read_genotypes(
+            gt_path,
+            min_maf=args.min_maf,
+            min_call_rate=args.min_gt_call_rate,
         )
-        logger.info("Using %d covariates: %s", len(cov_names), cov_names)
+
+        if dosage.shape[0] == 0:
+            logger.error(
+                "No genotype variants passed QC filters from %s. "
+                "Ensure FORMAT/GT field is present. "
+                "Use --method ols to skip GRM requirement.",
+                gt_path,
+            )
+            return 1
+
+        logger.info(
+            "Using %d genotype variants from %d samples for GRM",
+            dosage.shape[0], dosage.shape[1],
+        )
+
+        # Align GT samples to LRR samples
+        gt_idx = {s: i for i, s in enumerate(gt_samples)}
+        valid_samples = [samples[i] for i in range(len(samples)) if valid_mask[i]]
+        gt_order = []
+        for s in valid_samples:
+            if s in gt_idx:
+                gt_order.append(gt_idx[s])
+            else:
+                logger.error("Sample %s not found in genotype file", s)
+                return 1
+
+        dosage_aligned = dosage[:, gt_order]
+        logger.info("Computing GRM...")
+        grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
+        logger.info(
+            "GRM computed: %d × %d", grm.shape[0], grm.shape[1],
+        )
 
     # Run association
     logger.info("Running %s association scan", args.method)
@@ -332,6 +466,7 @@ def _run_associate(args: argparse.Namespace) -> int:
         lrr_sub, phenotype, variants,
         covariates=covariates,
         method=args.method,
+        grm=grm,
     )
     logger.info("Association complete for %d variants", len(result.chrom))
 

@@ -1,57 +1,11 @@
-"""GWAS Association Engine for Continuous LRR Predictors.
+"""GWAS association engine for continuous LRR predictors.
 
-Engine Evaluation
------------------
-The following engines were evaluated for compatibility with using LRR
-as a continuous predictor in genome-wide association:
+Provides LMM (default), OLS, and logistic regression association scans.
+The LMM uses spectral decomposition of a GRM with profile-REML variance
+component estimation (FaST-LMM / EMMA approach).
 
-**PLINK2**
-  Designed for discrete genotype dosages (0/1/2).  Can accept dosage
-  inputs, but continuous LRR values fall outside the expected [0, 2]
-  range and may trigger warnings or internal clipping.  Linear/logistic
-  models assume genotype coding; residualisation and standard-error
-  estimation may behave unexpectedly with unbounded continuous
-  predictors.
-  *Verdict:* Not directly suitable without non-standard workarounds.
-
-**REGENIE**
-  Two-step method (ridge regression followed by single-variant tests)
-  that explicitly assumes biallelic genotype coding (0/1/2).  Step 1
-  whole-genome model relies on LD structure and genotype assumptions
-  that do not apply to LRR.
-  *Verdict:* Incompatible with continuous LRR input.
-
-**TensorQTL**
-  Designed for cis/trans-eQTL mapping (expression ~ genotype).  Uses
-  GPU-accelerated OLS; could in principle be repurposed by swapping the
-  genotype matrix for LRR.  Adds a heavy PyTorch dependency and
-  requires GPU for performance.
-  *Verdict:* Technically adaptable but impractical dependency burden.
-
-**Hail**
-  Spark/JVM-based; ``linear_regression_rows()`` accepts continuous
-  predictors in principle.  Extremely heavy infrastructure requirement
-  for what reduces to OLS.
-  *Verdict:* Overkill; not justified for this use case.
-
-Chosen Approach: Pure NumPy/SciPy OLS
---------------------------------------
-* Frisch-Waugh-Lovell theorem enables vectorised covariate adjustment.
-* Handles missing data per-marker via complete-case masking.
-* Logistic regression via iteratively reweighted least squares (IRLS)
-  for binary phenotypes.
-* No external binary dependencies beyond NumPy and SciPy.
-* Portable, testable, and ready for containerised deployment.
-
-Limitations and Best Practices
-------------------------------
-* Population structure and relatedness are **not** modelled internally.
-  For large biobank-scale studies, pre-compute principal components or
-  a GRM externally and supply them as covariates.
-* Per-marker missing-data handling falls back to a slower loop; ensure
-  upstream QC minimises missingness for best performance.
-* Logistic regression uses IRLS with a fixed iteration cap; convergence
-  failures are silently skipped (NaN beta / p = 1).
+See ``docs/association_engine_design.md`` for the full engine evaluation
+and design rationale.
 """
 
 from __future__ import annotations
@@ -60,6 +14,8 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy import stats
+from scipy.optimize import minimize_scalar
+
 
 # Logistic IRLS: clamp linear predictor to avoid overflow in exp().
 _MAX_ETA: float = 20.0
@@ -326,6 +282,272 @@ def _logistic_scan(
 
 
 # ---------------------------------------------------------------------------
+# LMM helpers  (spectral decomposition approach)
+# ---------------------------------------------------------------------------
+
+def _reml_loglik(
+    log_delta: float,
+    y_rot: np.ndarray,
+    X_rot: np.ndarray,
+    eigenvalues: np.ndarray,
+) -> float:
+    """Negative profile REML log-likelihood for the variance ratio.
+
+    Parameters
+    ----------
+    log_delta : float
+        log10(δ) where δ = σ²_e / σ²_g.
+    y_rot, X_rot : ndarray
+        Phenotype and covariates rotated into GRM eigenbasis.
+    eigenvalues : ndarray
+        GRM eigenvalues.
+
+    Returns
+    -------
+    neg_ll : float
+        Negative REML log-likelihood (to be minimised).
+    """
+    delta = 10.0 ** log_delta
+    n = len(y_rot)
+    p = X_rot.shape[1]
+
+    D_inv = 1.0 / (eigenvalues + delta)  # weights
+
+    # Weighted least squares for covariates under null
+    XtDX = X_rot.T * D_inv[np.newaxis, :] @ X_rot
+    XtDy = X_rot.T @ (D_inv * y_rot)
+    try:
+        beta_hat = np.linalg.solve(XtDX, XtDy)
+    except np.linalg.LinAlgError:
+        return 1e30
+
+    resid = y_rot - X_rot @ beta_hat
+    sigma2_g = float(np.sum(D_inv * resid ** 2)) / (n - p)
+    if sigma2_g <= 0:
+        return 1e30
+
+    # REML log-likelihood (up to constant)
+    ll = -0.5 * (
+        np.sum(np.log(eigenvalues + delta))
+        + (n - p) * np.log(sigma2_g)
+        + np.linalg.slogdet(XtDX)[1]
+    )
+    return -ll  # negate for minimisation
+
+
+def _estimate_delta(
+    y_rot: np.ndarray,
+    X_rot: np.ndarray,
+    eigenvalues: np.ndarray,
+) -> float:
+    """Estimate δ = σ²_e / σ²_g via bounded REML optimisation."""
+    result = minimize_scalar(
+        _reml_loglik,
+        bounds=(-5.0, 5.0),
+        method="bounded",
+        args=(y_rot, X_rot, eigenvalues),
+        options={"xatol": 1e-4},
+    )
+    return 10.0 ** result.x
+
+
+def _lmm_scan(
+    lrr: np.ndarray,
+    phenotype: np.ndarray,
+    grm: np.ndarray,
+    covariates: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """LMM association scan using spectral decomposition.
+
+    Model: phenotype ~ LRR_marker + covariates + (1|GRM)
+
+    Parameters
+    ----------
+    lrr : ndarray, shape (n_markers, n_samples)
+    phenotype : ndarray, shape (n_samples,)
+    grm : ndarray, shape (n_samples, n_samples)
+    covariates : ndarray, shape (n_samples, n_covariates) or None
+
+    Returns
+    -------
+    beta, se, t_stat, p_value, n_samples : arrays of shape (n_markers,)
+    """
+    n_markers, n_samples = lrr.shape
+
+    # Build covariate matrix (with intercept)
+    if covariates is not None:
+        C = np.column_stack([np.ones(n_samples), covariates])
+    else:
+        C = np.ones((n_samples, 1))
+
+    # Eigendecompose GRM
+    eigenvalues, U = np.linalg.eigh(grm)
+    # Clamp small eigenvalues to avoid numerical issues
+    eigenvalues = np.maximum(eigenvalues, 0.0)
+
+    # Rotate into eigenbasis
+    y_rot = U.T @ phenotype
+    X_rot = U.T @ C
+    lrr_rot = lrr @ U  # shape (n_markers, n_samples)
+
+    # Estimate δ under null model (no marker effect)
+    delta = _estimate_delta(y_rot, X_rot, eigenvalues)
+
+    # Weights for WLS
+    D_inv = 1.0 / (eigenvalues + delta)
+    p = C.shape[1]
+
+    # Null model weighted least squares
+    XtDX_null = X_rot.T * D_inv[np.newaxis, :] @ X_rot
+    XtDy = X_rot.T @ (D_inv * y_rot)
+    try:
+        beta_null = np.linalg.solve(XtDX_null, XtDy)
+    except np.linalg.LinAlgError:
+        beta_null = np.zeros(p)
+
+    y_resid_null = y_rot - X_rot @ beta_null
+
+    # For each marker, test via WLS in the rotated space
+    # Build augmented design: [X_rot, z_rot_i] for each marker
+    # Use Frisch-Waugh-Lovell in the weighted space
+    has_nan = np.isnan(lrr).any()
+
+    if not has_nan:
+        return _lmm_scan_complete(
+            lrr_rot, y_rot, X_rot, eigenvalues, delta, D_inv, n_samples, p,
+        )
+
+    return _lmm_scan_missing(
+        lrr, phenotype, C, grm, eigenvalues, U, delta,
+    )
+
+
+def _lmm_scan_complete(
+    lrr_rot: np.ndarray,
+    y_rot: np.ndarray,
+    X_rot: np.ndarray,
+    eigenvalues: np.ndarray,
+    delta: float,
+    D_inv: np.ndarray,
+    n_samples: int,
+    p: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorised LMM scan when no LRR values are missing."""
+    n_markers = lrr_rot.shape[0]
+
+    # Weight-project covariates out of y and LRR in the rotated space
+    # Weighted QR: scale by sqrt(D_inv)
+    sqrt_w = np.sqrt(D_inv)
+    X_w = X_rot * sqrt_w[:, np.newaxis]
+    y_w = y_rot * sqrt_w
+    lrr_w = lrr_rot * sqrt_w[np.newaxis, :]
+
+    Q, _ = np.linalg.qr(X_w)
+    y_resid = y_w - Q @ (Q.T @ y_w)
+    z_resid = lrr_w - (lrr_w @ Q) @ Q.T
+
+    # Univariate WLS
+    ztDz = np.sum(z_resid ** 2, axis=1)
+    ztDy = z_resid @ y_resid
+
+    safe = ztDz > 0
+    beta = np.where(safe, ztDy / np.where(safe, ztDz, 1.0), 0.0)
+
+    residuals = y_resid[np.newaxis, :] - beta[:, np.newaxis] * z_resid
+    df = n_samples - p - 1
+    sigma2 = np.sum(residuals ** 2, axis=1) / max(df, 1)
+
+    se = np.where(safe, np.sqrt(sigma2 / np.where(safe, ztDz, 1.0)), np.inf)
+    t_stat = np.where(se < np.inf, beta / np.where(se > 0, se, 1.0), 0.0)
+
+    if df > 0:
+        p_value = 2.0 * stats.t.sf(np.abs(t_stat), df=df)
+    else:
+        p_value = np.ones(n_markers)
+
+    n_per_marker = np.full(n_markers, n_samples, dtype=int)
+    return beta, se, t_stat, p_value, n_per_marker
+
+
+def _lmm_scan_missing(
+    lrr: np.ndarray,
+    phenotype: np.ndarray,
+    C: np.ndarray,
+    grm: np.ndarray,
+    eigenvalues: np.ndarray,
+    U: np.ndarray,
+    delta: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per-marker LMM with complete-case analysis for missing LRR."""
+    n_markers, n_samples = lrr.shape
+    p = C.shape[1]
+
+    D_inv_full = 1.0 / (eigenvalues + delta)
+
+    beta = np.zeros(n_markers)
+    se = np.full(n_markers, np.inf)
+    t_stat = np.zeros(n_markers)
+    p_value = np.ones(n_markers)
+    n_per_marker = np.zeros(n_markers, dtype=int)
+
+    for i in range(n_markers):
+        x = lrr[i]
+        valid = ~np.isnan(x)
+        n_valid = int(valid.sum())
+        n_per_marker[i] = n_valid
+
+        min_n = p + 2
+        if n_valid < min_n:
+            continue
+
+        if n_valid == n_samples:
+            # Use full rotated space
+            x_rot = x @ U
+            sqrt_w = np.sqrt(D_inv_full)
+            X_w = (U.T @ C) * sqrt_w[:, np.newaxis]
+            y_w = (U.T @ phenotype) * sqrt_w
+            z_w = x_rot * sqrt_w
+        else:
+            # Subset and re-decompose for this marker
+            x_i = x[valid]
+            y_i = phenotype[valid]
+            C_i = C[valid]
+            grm_i = grm[np.ix_(valid, valid)]
+
+            evals_i, U_i = np.linalg.eigh(grm_i)
+            evals_i = np.maximum(evals_i, 0.0)
+            D_inv_i = 1.0 / (evals_i + delta)
+
+            sqrt_w = np.sqrt(D_inv_i)
+            X_w = (U_i.T @ C_i) * sqrt_w[:, np.newaxis]
+            y_w = (U_i.T @ y_i) * sqrt_w
+            z_w = (U_i.T @ x_i) * sqrt_w
+
+        Q, _ = np.linalg.qr(X_w)
+        y_r = y_w - Q @ (Q.T @ y_w)
+        z_r = z_w - Q @ (Q.T @ z_w)
+
+        ztDz = float(np.dot(z_r, z_r))
+        if ztDz <= 0:
+            continue
+
+        ztDy = float(np.dot(z_r, y_r))
+        beta[i] = ztDy / ztDz
+
+        resid = y_r - beta[i] * z_r
+        df = n_valid - p - 1
+        if df <= 0:
+            continue
+
+        sigma2 = float(np.sum(resid ** 2)) / df
+        se[i] = np.sqrt(sigma2 / ztDz)
+        t_stat[i] = beta[i] / se[i]
+        p_value[i] = 2.0 * stats.t.sf(abs(t_stat[i]), df=df)
+
+    return beta, se, t_stat, p_value, n_per_marker
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -334,29 +556,35 @@ def run_association(
     phenotype: np.ndarray,
     variants: list[dict[str, object]],
     covariates: np.ndarray | None = None,
-    method: str = "ols",
+    method: str = "lmm",
+    grm: np.ndarray | None = None,
 ) -> AssociationResult:
     """Run genome-wide association of phenotype on per-marker LRR.
 
     For each marker *i* the model is::
 
-        phenotype ~ LRR_i + covariates   (OLS or logistic)
+        phenotype ~ LRR_i + covariates                  (OLS)
+        phenotype ~ LRR_i + covariates + (1|GRM)        (LMM)
+        logit(P(phenotype=1)) ~ LRR_i + covariates      (logistic)
 
     Parameters
     ----------
     lrr : ndarray, shape (n_markers, n_samples)
         Batch-corrected LRR matrix (rows = markers, columns = samples).
     phenotype : ndarray, shape (n_samples,)
-        Phenotype vector.  Continuous for *method='ols'*, binary (0/1)
-        for *method='logistic'*.
+        Phenotype vector.  Continuous for *method='ols'* or *'lmm'*,
+        binary (0/1) for *method='logistic'*.
     variants : list of dict
         Per-marker metadata.  Each dict must contain ``'chrom'`` and
         ``'pos'``; ``'id'`` is used if present, otherwise
         ``'chrom:pos'`` is constructed.
     covariates : ndarray, shape (n_samples, n_covariates), optional
         Covariate matrix (**without** an intercept; one is added
-        automatically).
-    method : ``'ols'`` | ``'logistic'``
+        automatically).  For LMM, these should include genetic PCs.
+    method : ``'lmm'`` | ``'ols'`` | ``'logistic'``
+        Association method.  ``'lmm'`` (default) requires *grm*.
+    grm : ndarray, shape (n_samples, n_samples), optional
+        Genetic Relationship Matrix.  Required when *method='lmm'*.
 
     Returns
     -------
@@ -365,7 +593,8 @@ def run_association(
     Raises
     ------
     ValueError
-        If dimensions are inconsistent or *method* is unknown.
+        If dimensions are inconsistent, *method* is unknown, or
+        *grm* is missing for LMM.
     """
     n_markers, n_samples = lrr.shape
     if phenotype.ndim != 1 or phenotype.shape[0] != n_samples:
@@ -384,7 +613,18 @@ def run_association(
                 f"got {covariates.shape}"
             )
 
-    if method == "ols":
+    if method == "lmm":
+        if grm is None:
+            raise ValueError("LMM method requires a GRM (grm=...)")
+        if grm.shape != (n_samples, n_samples):
+            raise ValueError(
+                f"GRM must have shape ({n_samples}, {n_samples}), "
+                f"got {grm.shape}"
+            )
+        beta, se, stat, pval, ns = _lmm_scan(
+            lrr, phenotype, grm, covariates,
+        )
+    elif method == "ols":
         beta, se, stat, pval, ns = _ols_scan(lrr, phenotype, covariates)
     elif method == "logistic":
         unique = np.unique(phenotype[~np.isnan(phenotype)])
@@ -395,7 +635,9 @@ def run_association(
             )
         beta, se, stat, pval, ns = _logistic_scan(lrr, phenotype, covariates)
     else:
-        raise ValueError(f"Unknown method {method!r}; use 'ols' or 'logistic'")
+        raise ValueError(
+            f"Unknown method {method!r}; use 'lmm', 'ols', or 'logistic'"
+        )
 
     chroms = [v["chrom"] for v in variants]
     positions = [v["pos"] for v in variants]

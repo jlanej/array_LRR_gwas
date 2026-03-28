@@ -130,6 +130,7 @@ class TestCli:
             "associate",
             str(test_bcf_path),
             "--phenotype", str(pheno),
+            "--method", "ols",
             "-o", str(out),
         ])
         assert rc == 0
@@ -138,3 +139,28 @@ class TestCli:
         content = out.read_text().strip().split("\n")
         assert "chrom" in content[0]
         assert len(content) > 1
+
+    def test_associate_lmm_no_gt_fails(self, test_bcf_path, tmp_path):
+        """LMM with a BCF that has no GT data should fail gracefully."""
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(test_bcf_path)
+
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        pheno = tmp_path / "pheno.tsv"
+        lines = ["sample_id\tphenotype"]
+        for s in samples:
+            lines.append(f"{s}\t{rng.normal():.6f}")
+        pheno.write_text("\n".join(lines) + "\n")
+
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(test_bcf_path),
+            "--phenotype", str(pheno),
+            "--method", "lmm",
+            "-o", str(out),
+        ])
+        assert rc == 1  # Should fail: no GT data available
