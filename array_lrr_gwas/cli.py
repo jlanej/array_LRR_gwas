@@ -394,11 +394,11 @@ def _run_associate(args: argparse.Namespace) -> int:
         if col_valid.any():
             aligned_valid = aligned_valid[:, col_valid]
             used_names = [n for n, v in zip(cov_names, col_valid) if v]
-            # Mean-impute any remaining NaN
-            for c in range(aligned_valid.shape[1]):
-                mask = np.isnan(aligned_valid[:, c])
-                if mask.any():
-                    aligned_valid[mask, c] = np.nanmean(aligned_valid[:, c])
+            # Mean-impute any remaining NaN (vectorised)
+            nan_mask = np.isnan(aligned_valid)
+            if nan_mask.any():
+                col_means = np.nanmean(aligned_valid, axis=0, keepdims=True)
+                aligned_valid = np.where(nan_mask, col_means, aligned_valid)
             cov_parts.append(aligned_valid)
             logger.info(
                 "Using %d sample-sheet covariates: %s",

@@ -286,7 +286,7 @@ def _logistic_scan(
 # ---------------------------------------------------------------------------
 
 def _reml_loglik(
-    log_delta: float,
+    log10_delta: float,
     y_rot: np.ndarray,
     X_rot: np.ndarray,
     eigenvalues: np.ndarray,
@@ -295,7 +295,7 @@ def _reml_loglik(
 
     Parameters
     ----------
-    log_delta : float
+    log10_delta : float
         log10(δ) where δ = σ²_e / σ²_g.
     y_rot, X_rot : ndarray
         Phenotype and covariates rotated into GRM eigenbasis.
@@ -307,7 +307,7 @@ def _reml_loglik(
     neg_ll : float
         Negative REML log-likelihood (to be minimised).
     """
-    delta = 10.0 ** log_delta
+    delta = 10.0 ** log10_delta
     n = len(y_rot)
     p = X_rot.shape[1]
 

@@ -71,7 +71,7 @@ class TestReadSampleSheet:
         assert ids == ["S1"]
 
     def test_pc_ordering(self, tmp_path) -> None:
-        """PCs should be sorted by index, not column order."""
+        """PCs should be sorted numerically by index, not alphabetically."""
         tsv = tmp_path / "sheet.tsv"
         tsv.write_text("Sample_ID\tPC10\tPC2\tPC1\nS1\t10.0\t2.0\t1.0\n")
         _, covs, names = read_sample_sheet(tsv)

@@ -52,13 +52,12 @@ def compute_grm(
     """
     n_variants, n_samples = dosage.shape
 
-    # Mean-impute missing values per variant
+    # Mean-impute missing values per variant (vectorised)
     Z = dosage.copy()
-    for i in range(n_variants):
-        row = Z[i]
-        mask = np.isnan(row)
-        if mask.any():
-            row[mask] = np.nanmean(row)
+    nan_mask = np.isnan(Z)
+    if nan_mask.any():
+        row_means = np.nanmean(Z, axis=1, keepdims=True)
+        Z = np.where(nan_mask, row_means, Z)
 
     # Compute allele frequencies
     freq = Z.mean(axis=1) / 2.0
