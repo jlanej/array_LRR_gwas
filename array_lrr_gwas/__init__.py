@@ -4,6 +4,7 @@ from array_lrr_gwas.subsetting import subset_markers
 from array_lrr_gwas.decomposition import rsvd, decompose
 from array_lrr_gwas.correction import correct_lrr
 from array_lrr_gwas.select_k import select_k_mp, select_k_elbow
+from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
 
 __all__ = [
     "subset_markers",
@@ -12,4 +13,6 @@ __all__ = [
     "correct_lrr",
     "select_k_mp",
     "select_k_elbow",
+    "detect_build",
+    "get_exclusion_regions",
 ]
