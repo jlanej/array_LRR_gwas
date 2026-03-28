@@ -91,3 +91,50 @@ class TestCli:
         ])
         assert rc == 0
         assert out.exists()
+
+    def test_associate_help_flag(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["associate", "--help"])
+        assert exc.value.code == 0
+
+    def test_associate_missing_input(self, tmp_path):
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.5\n")
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(tmp_path / "nonexistent.bcf"),
+            "--phenotype", str(pheno),
+            "-o", str(out),
+        ])
+        assert rc == 1
+
+    def test_associate_ols(self, test_bcf_path, tmp_path):
+        """OLS association via CLI with test BCF."""
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(test_bcf_path)
+
+        # Write phenotype TSV
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        pheno = tmp_path / "pheno.tsv"
+        lines = ["sample_id\tphenotype"]
+        for s in samples:
+            lines.append(f"{s}\t{rng.normal():.6f}")
+        pheno.write_text("\n".join(lines) + "\n")
+
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(test_bcf_path),
+            "--phenotype", str(pheno),
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        # Verify output has correct header and data rows
+        content = out.read_text().strip().split("\n")
+        assert "chrom" in content[0]
+        assert len(content) > 1
