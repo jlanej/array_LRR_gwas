@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "array_lrr_gwas"
+version = "0.1.0"
+description = "Perform GWAS using LRR as quantitative CNV proxies"
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "scikit-learn>=1.1",
+    "pysam>=0.20",
+]
+
+[project.optional-dependencies]
+fbpca = ["fbpca>=0.1"]
+dev = [
+    "pytest>=7",
+    "pytest-cov>=4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
