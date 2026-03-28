@@ -57,11 +57,12 @@ Limitations and Best Practices
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
 
 import numpy as np
 from scipy import stats
 
+# Logistic IRLS: clamp linear predictor to avoid overflow in exp().
+_MAX_ETA: float = 20.0
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -71,9 +72,9 @@ from scipy import stats
 class AssociationResult:
     """Per-marker association summary statistics."""
 
-    chrom: List[str]
-    pos: List[int]
-    variant_id: List[str]
+    chrom: list[str]
+    pos: list[int]
+    variant_id: list[str]
     beta: np.ndarray
     se: np.ndarray
     stat: np.ndarray
@@ -81,9 +82,9 @@ class AssociationResult:
     n_samples: np.ndarray
     method: str
 
-    def to_records(self) -> List[Dict[str, Any]]:
+    def to_records(self) -> list[dict[str, object]]:
         """Convert to a list of dicts (one per variant)."""
-        records: List[Dict[str, Any]] = []
+        records: list[dict[str, object]] = []
         for i in range(len(self.chrom)):
             records.append({
                 "chrom": self.chrom[i],
@@ -199,7 +200,7 @@ def _ols_scan_missing(
 def _ols_scan(
     lrr: np.ndarray,
     phenotype: np.ndarray,
-    covariates: Optional[np.ndarray] = None,
+    covariates: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """OLS association scan: *phenotype ~ LRR_marker + covariates*.
 
@@ -234,7 +235,7 @@ def _ols_scan(
 def _logistic_scan(
     lrr: np.ndarray,
     phenotype: np.ndarray,
-    covariates: Optional[np.ndarray] = None,
+    covariates: np.ndarray | None = None,
     max_iter: int = 25,
     tol: float = 1e-6,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -283,7 +284,7 @@ def _logistic_scan(
         converged = False
         for _ in range(max_iter):
             eta = X @ b
-            eta = np.clip(eta, -20, 20)
+            eta = np.clip(eta, -_MAX_ETA, _MAX_ETA)
             mu = 1.0 / (1.0 + np.exp(-eta))
             w = mu * (1.0 - mu)
             w = np.maximum(w, 1e-10)
@@ -307,7 +308,7 @@ def _logistic_scan(
 
         try:
             eta = X @ b
-            eta = np.clip(eta, -20, 20)
+            eta = np.clip(eta, -_MAX_ETA, _MAX_ETA)
             mu = 1.0 / (1.0 + np.exp(-eta))
             w = mu * (1.0 - mu)
             w = np.maximum(w, 1e-10)
@@ -331,8 +332,8 @@ def _logistic_scan(
 def run_association(
     lrr: np.ndarray,
     phenotype: np.ndarray,
-    variants: List[Dict[str, Any]],
-    covariates: Optional[np.ndarray] = None,
+    variants: list[dict[str, object]],
+    covariates: np.ndarray | None = None,
     method: str = "ols",
 ) -> AssociationResult:
     """Run genome-wide association of phenotype on per-marker LRR.

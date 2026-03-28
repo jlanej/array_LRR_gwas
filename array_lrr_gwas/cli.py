@@ -338,8 +338,7 @@ def _run_associate(args: argparse.Namespace) -> int:
     # Write output
     logger.info("Writing results to %s", args.output)
     records = result.to_records()
-    header = ["chrom", "pos", "variant_id", "beta", "se", "stat",
-              "p_value", "n_samples", "method"]
+    header = list(records[0].keys()) if records else []
     with open(args.output, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
         writer.writeheader()
