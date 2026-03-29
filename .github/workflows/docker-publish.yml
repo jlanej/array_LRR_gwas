@@ -50,4 +50,5 @@ jobs:
       - name: Verify pushed image
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          docker run --rm "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" --help
+          IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          docker run --rm "${{ env.REGISTRY }}/${IMAGE_NAME_LOWER}:sha-${SHORT_SHA}" --help
