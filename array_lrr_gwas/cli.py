@@ -70,44 +70,77 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-lrr-sd",
         type=float,
         default=0.35,
-        help="Max per-sample LRR SD for HQ classification (default: 0.35).",
+        help=(
+            "Max per-sample LRR SD for HQ classification (default: 0.35). "
+            "Matches upstream illumina_idat_processing best practice. "
+            "Samples above this are classified as low-quality (LQ)."
+        ),
     )
     correct.add_argument(
         "--min-sample-call-rate",
         type=float,
-        default=0.95,
-        help="Min per-sample call rate for HQ classification (default: 0.95).",
+        default=0.97,
+        help=(
+            "Min per-sample call rate for HQ classification (default: 0.97). "
+            "Matches upstream illumina_idat_processing best practice "
+            "(Anderson et al. 2010 recommend >= 0.95-0.98)."
+        ),
     )
     correct.add_argument(
         "--min-marker-call-rate",
         type=float,
         default=0.95,
-        help="Min per-marker call rate for subsetting (default: 0.95).",
+        help=(
+            "Min per-marker call rate for batch-correction subsetting "
+            "(default: 0.95). A moderately inclusive threshold retains more "
+            "markers for the SVD decomposition."
+        ),
     )
     correct.add_argument(
         "--min-var",
         type=float,
         default=0.001,
-        help="Min per-marker variance (default: 0.001).",
+        help=(
+            "Min per-marker LRR variance (default: 0.001). "
+            "Removes near-constant (uninformative) markers from the "
+            "decomposition."
+        ),
     )
     correct.add_argument(
         "--max-var",
         type=float,
         default=None,
-        help="Max per-marker variance (default: no upper limit).",
+        help=(
+            "Max per-marker LRR variance (default: no upper limit). "
+            "Set to exclude artefactual high-variance outlier markers."
+        ),
     )
     correct.add_argument(
         "--backend",
         type=str,
         default="rsvd",
         choices=["rsvd", "fbpca"],
-        help="Decomposition backend (default: rsvd).",
+        help=(
+            "Decomposition backend (default: rsvd). "
+            "'rsvd' uses scikit-learn randomised SVD; "
+            "'fbpca' uses Facebook PCA (requires fbpca package)."
+        ),
     )
     correct.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="Enable verbose logging.",
+    )
+    correct.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "YAML configuration file for QC thresholds and correction "
+            "parameters. CLI flags override values from the config file. "
+            "See docs/upstream_qc_formats.md for field descriptions."
+        ),
     )
 
     # ---- associate sub-command ----
@@ -172,13 +205,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--min-maf",
         type=float,
         default=0.01,
-        help="Minimum MAF for GRM genotype filtering (default: 0.01).",
+        help=(
+            "Minimum MAF for GRM genotype filtering (default: 0.01). "
+            "Standard GWAS QC threshold (Marees et al. 2018)."
+        ),
     )
     assoc.add_argument(
         "--min-gt-call-rate",
         type=float,
         default=0.90,
-        help="Minimum genotype call rate for GRM filtering (default: 0.90).",
+        help=(
+            "Minimum genotype call rate for GRM filtering (default: 0.90). "
+            "A lenient threshold for GRM computation; variant-level QC "
+            "should be applied upstream."
+        ),
     )
     assoc.add_argument(
         "-v",
@@ -221,11 +261,37 @@ def _run_correct(args: argparse.Namespace) -> int:
     from array_lrr_gwas.correction import correct_lrr
     from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
     from array_lrr_gwas.io_vcf import read_lrr, write_corrected
+    from array_lrr_gwas.qc_config import defaults, load_config, apply_to_correct_args
 
     input_path = args.input
     if not input_path.exists():
         logger.error("Input file not found: %s", input_path)
         return 1
+
+    # Load QC config (YAML file + CLI overrides)
+    if args.config is not None:
+        logger.info("Loading QC config from %s", args.config)
+        cfg = load_config(args.config)
+    else:
+        cfg = defaults()
+
+    # Build CLI overrides dict (only non-default values override the config)
+    cli_overrides = {}
+    parser_defaults = {
+        "max_lrr_sd": 0.35,
+        "min_sample_call_rate": 0.97,
+        "min_marker_call_rate": 0.95,
+        "min_var": 0.001,
+        "max_var": None,
+        "k": None,
+        "backend": "rsvd",
+    }
+    for key, default_val in parser_defaults.items():
+        val = getattr(args, key, None)
+        if val != default_val:
+            cli_overrides[key] = val
+
+    correct_kwargs = apply_to_correct_args(cfg, cli_overrides)
 
     # Read input
     logger.info("Reading LRR from %s", input_path)
@@ -240,7 +306,11 @@ def _run_correct(args: argparse.Namespace) -> int:
 
     # Determine exclusion regions
     exclude_regions = None
-    if not args.no_complexity_filter:
+    no_complexity = (
+        args.no_complexity_filter
+        or cfg["correction"].get("no_complexity_filter", False)
+    )
+    if not no_complexity:
         build = args.build
         if build is None:
             build = detect_build(input_path)
@@ -262,19 +332,16 @@ def _run_correct(args: argparse.Namespace) -> int:
         )
 
     # Run correction
-    logger.info("Running batch-effect correction (k=%s)", args.k or "auto")
+    logger.info(
+        "Running batch-effect correction (k=%s)",
+        correct_kwargs.get("k") or "auto",
+    )
     corrected, info = correct_lrr(
         lrr,
         positions=positions,
         chromosomes=chromosomes,
-        k=args.k,
-        max_lrr_sd=args.max_lrr_sd,
-        min_sample_call_rate=args.min_sample_call_rate,
-        min_marker_call_rate=args.min_marker_call_rate,
-        min_var=args.min_var,
-        max_var=args.max_var,
         exclude_regions=exclude_regions,
-        backend=args.backend,
+        **correct_kwargs,
     )
     logger.info(
         "Correction complete: k=%d, %d HQ samples, %d markers used",
