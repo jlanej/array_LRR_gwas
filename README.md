@@ -389,14 +389,14 @@ pipeline.  Required FORMAT fields:
 
 Tab-separated file with a header row.  The first column must be the sample
 identifier; the second column is the phenotype (continuous or binary 0/1).
-Additional columns are treated as covariates.
+Additional columns are treated as covariates.  Columns **must** be separated
+by literal tab characters (`\t`).
 
-```
-sample_id	phenotype	age	sex
-SAMPLE_001	0.52	45	1
-SAMPLE_002	-0.13	62	0
-SAMPLE_003	1.00	38	1
-```
+| sample\_id | phenotype | age | sex |
+|------------|-----------|-----|-----|
+| SAMPLE\_001 | 0.52 | 45 | 1 |
+| SAMPLE\_002 | -0.13 | 62 | 0 |
+| SAMPLE\_003 | 1.00 | 38 | 1 |
 
 ### Compiled Sample Sheet
 

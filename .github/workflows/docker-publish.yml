@@ -48,4 +48,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Verify pushed image
-        run: docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7} --help
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          docker run --rm "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" --help
