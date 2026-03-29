@@ -67,8 +67,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Number of batch-effect components to remove. "
+            "Number of batch-effect components to remove from LRR. "
             "Auto-selected via Marchenko–Pastur heuristic if omitted."
+        ),
+    )
+    correct.add_argument(
+        "--n-components",
+        type=int,
+        default=None,
+        help=(
+            "Number of components to compute in the pilot truncated "
+            "decomposition used for auto-selection of --k. "
+            "Default: 5%% of HQ sample size. Ignored when --k is provided."
         ),
     )
     correct.add_argument(
@@ -479,6 +489,7 @@ def _run_correct(args: argparse.Namespace) -> int:
         "min_var": 0.001,
         "max_var": None,
         "k": None,
+        "n_components": None,
         "backend": "rsvd",
     }
     for key, default_val in parser_defaults.items():
@@ -554,8 +565,9 @@ def _run_correct(args: argparse.Namespace) -> int:
 
     # Run correction
     logger.info(
-        "Running batch-effect correction (k=%s)",
+        "Running batch-effect correction (k=%s, n_components=%s)",
         correct_kwargs.get("k") or "auto",
+        correct_kwargs.get("n_components") or "auto(5% of HQ samples)",
     )
     corrected, info = correct_lrr(
         lrr,

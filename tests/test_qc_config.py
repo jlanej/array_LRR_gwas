@@ -27,6 +27,7 @@ class TestDefaults:
         assert cfg["marker_qc"]["min_var"] == 0.001
         assert cfg["marker_qc"]["max_var"] is None
         assert cfg["correction"]["k"] is None
+        assert cfg["correction"]["n_components"] is None
         assert cfg["correction"]["backend"] == "rsvd"
         assert cfg["upstream_qc"]["variant_qc_path"] is None
 
@@ -123,6 +124,7 @@ class TestApplyToCorrectArgs:
         assert args["min_var"] == 0.001
         assert args["max_var"] is None
         assert args["k"] is None
+        assert args["n_components"] is None
         assert args["backend"] == "rsvd"
 
     def test_cli_overrides_take_precedence(self):
@@ -156,3 +158,17 @@ class TestApplyToCorrectArgs:
         args = apply_to_correct_args(cfg, cli)
         assert args["max_lrr_sd"] == 0.30  # from YAML
         assert args["k"] == 10  # from CLI
+
+    def test_n_components_config_and_cli_override(self, tmp_path):
+        cfg_file = tmp_path / "qc.yaml"
+        cfg_file.write_text(
+            "correction:\n"
+            "  n_components: 25\n"
+        )
+        cfg = load_config(cfg_file)
+        args = apply_to_correct_args(cfg)
+        assert args["n_components"] == 25
+
+        cli = {"n_components": 40}
+        args_cli = apply_to_correct_args(cfg, cli)
+        assert args_cli["n_components"] == 40

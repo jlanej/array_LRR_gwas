@@ -30,6 +30,9 @@ Best-Practice Default Thresholds
 
 * ``k``: **None** — Number of batch-effect components to remove.
   ``None`` triggers automatic selection via the Marchenko–Pastur heuristic.
+* ``n_components``: **None** — Number of components to compute in the pilot
+  truncated decomposition used for automatic ``k`` selection. ``None``
+  defaults to 5% of HQ sample count.
 * ``backend``: **"rsvd"** — Decomposition backend.  Options: ``rsvd``
   (scikit-learn randomised SVD) or ``fbpca`` (Facebook PCA, optional).
 * ``no_complexity_filter``: **False** — When True, skips the default
@@ -51,6 +54,7 @@ Example YAML
 
     correction:
       k: 5                     # fix number of batch components
+      n_components: 50         # pilot decomposition size for auto-k
       backend: rsvd
 """
 
@@ -91,6 +95,8 @@ _DEFAULTS: dict[str, Any] = {
     "correction": {
         # Number of batch PCs to remove; None = auto (Marchenko-Pastur).
         "k": None,
+        # Pilot decomposition component count for auto-k; None = 5% of HQ n.
+        "n_components": None,
         # Decomposition backend: "rsvd" or "fbpca".
         "backend": "rsvd",
         # Skip genomic-complexity region exclusion if True.
@@ -207,6 +213,7 @@ def apply_to_correct_args(
         "min_var": cfg["marker_qc"]["min_var"],
         "max_var": cfg["marker_qc"]["max_var"],
         "k": cfg["correction"]["k"],
+        "n_components": cfg["correction"]["n_components"],
         "backend": cfg["correction"]["backend"],
     }
 

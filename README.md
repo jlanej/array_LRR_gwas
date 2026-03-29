@@ -299,7 +299,8 @@ array-lrr-gwas correct INPUT -o OUTPUT [OPTIONS]
 | `INPUT` | path | *required* | BCF/VCF with `FORMAT/LRR` |
 | `-o, --output` | path | *required* | Output BCF/VCF with corrected LRR |
 | `--build` | str | auto-detect | Genome build: `GRCh37`, `GRCh38`, `T2T-CHM13` (aliases: `hg19`, `hg38`, `hs1`) |
-| `--k` | int | auto (Marchenko-Pastur) | Number of batch PCs to remove |
+| `--k` | int | auto (Marchenko-Pastur) | Number of batch PCs to remove from LRR |
+| `--n-components` | int | auto (5% of HQ samples) | Number of PCs to compute in pilot decomposition for auto-`k` |
 | `--no-complexity-filter` | flag | `False` | Skip centromere / segdup / MHC exclusion |
 | `--max-lrr-sd` | float | `0.35` | Max LRR-SD for HQ sample classification |
 | `--min-sample-call-rate` | float | `0.97` | Min call rate for HQ samples |
@@ -383,7 +384,8 @@ marker_qc:
   max_var: null                # No upper limit
 
 correction:
-  k: null                      # Auto via Marchenko-Pastur
+  k: null                      # Auto via Marchenko-Pastur (PCs removed)
+  n_components: null           # Auto = 5% of HQ sample count (PCs computed for auto-k)
   backend: rsvd                # scikit-learn randomised SVD
   no_complexity_filter: false   # Apply centromere/segdup exclusion
 
@@ -405,6 +407,7 @@ marker_qc:
 
 correction:
   k: 5
+  n_components: 50             # Optional; only used when k is null
   backend: rsvd
 ```
 
