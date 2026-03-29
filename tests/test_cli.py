@@ -5,10 +5,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from array_lrr_gwas.cli import _build_parser, main
+from array_lrr_gwas.cli import _build_parser, _variant_id, main
 
 
 class TestCli:
+    def test_variant_id_handles_none_alts(self):
+        vid = _variant_id({"chrom": "chr1", "pos": 123, "id": ".", "ref": "A", "alts": None})
+        assert vid == "chr1:123:A:"
+
     def test_associate_ld_backend_default_is_plink2(self):
         args = _build_parser().parse_args([
             "associate",
@@ -53,6 +57,16 @@ class TestCli:
             "-o", "out.tsv",
         ])
         assert args.variant_qc is None
+
+    def test_associate_config_arg_parsed(self):
+        args = _build_parser().parse_args([
+            "associate",
+            "in.bcf",
+            "--phenotype", "pheno.tsv",
+            "-o", "out.tsv",
+            "--config", "/data/qc.yaml",
+        ])
+        assert args.config == Path("/data/qc.yaml")
 
     def test_no_args_returns_1(self):
         assert main([]) == 1
@@ -490,6 +504,67 @@ class TestCli:
         assert rc == 0
         assert out.exists()
         assert "Upstream variant QC (GRM)" in caplog.text
+
+    def test_associate_lmm_variant_qc_from_config(self, tmp_path, monkeypatch):
+        """When --variant-qc is unset, associate reads upstream_qc.variant_qc_path from --config."""
+        from array_lrr_gwas import association
+
+        qc_tsv = tmp_path / "collated_variant_qc.tsv"
+        qc_tsv.write_text(
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass\n"
+            "v1\tTrue\tTrue\tTrue\n"
+            "v2\tTrue\tTrue\tFalse\n"
+            "v3\tTrue\tTrue\tTrue\n"
+        )
+        cfg = tmp_path / "qc.yaml"
+        cfg.write_text(f"upstream_qc:\n  variant_qc_path: {qc_tsv}\n")
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [{"chrom": "chr1", "pos": 100, "id": "a1"}, {"chrom": "chr1", "pos": 200, "id": "a2"}]
+        monkeypatch.setattr("array_lrr_gwas.io_vcf.read_lrr", lambda _p: (lrr, samples, assoc_variants))
+
+        dosage = np.array([[0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [2.0, 1.0, 0.0]], dtype=float)
+        gt_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 110, "id": "v2", "ref": "A", "alts": ("G",)},
+            {"chrom": "chr1", "pos": 120, "id": "v3", "ref": "A", "alts": ("T",)},
+        ]
+        monkeypatch.setattr("array_lrr_gwas.genotypes.read_genotypes", lambda *_a, **_k: (dosage.copy(), samples, list(gt_variants)))
+        monkeypatch.setattr("array_lrr_gwas.ld_prune.ld_prune", lambda d, **_k: np.ones(d.shape[0], dtype=bool))
+        monkeypatch.setattr("array_lrr_gwas.grm.compute_grm", lambda d, **_k: np.eye(d.shape[1], dtype=float))
+
+        class _FakeResult:
+            chrom = ["chr1"]
+
+            @staticmethod
+            def to_records():
+                return [{
+                    "chrom": "chr1", "pos": 100, "variant_id": "a1",
+                    "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                    "n_samples": 3, "method": "lmm",
+                }]
+
+        monkeypatch.setattr(association, "run_association", lambda *_a, **_k: _FakeResult())
+
+        rc = main([
+            "associate",
+            str(fake_bcf),
+            "--phenotype", str(pheno),
+            "--method", "lmm",
+            "--ld-backend", "numpy",
+            "--config", str(cfg),
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
 
     def test_segment_help_flag(self):
         with pytest.raises(SystemExit) as exc:

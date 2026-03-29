@@ -26,7 +26,8 @@ def _variant_id(v: dict) -> str:
     vid = v.get("id")
     if vid is not None and vid != ".":
         return vid
-    return f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}"
+    alts = v.get("alts") or ()
+    return f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(alts)}"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -290,6 +291,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "When provided, genotype markers failing cross-ancestry "
             "call rate, HWE, or MAF are excluded before LD pruning "
             "for GRM computation."
+        ),
+    )
+    assoc.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "YAML configuration file. For association, this is currently used "
+            "to read upstream_qc.variant_qc_path when --variant-qc is not set."
         ),
     )
     assoc.add_argument(
@@ -564,6 +574,7 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     from array_lrr_gwas.association import run_association
     from array_lrr_gwas.io_vcf import read_lrr
+    from array_lrr_gwas.qc_config import defaults, load_config
 
     input_path = args.input
     if not input_path.exists():
@@ -574,6 +585,13 @@ def _run_associate(args: argparse.Namespace) -> int:
     if not pheno_path.exists():
         logger.error("Phenotype file not found: %s", pheno_path)
         return 1
+
+    # Optional config (currently used for upstream_qc.variant_qc_path).
+    if args.config is not None:
+        logger.info("Loading config from %s", args.config)
+        cfg = load_config(args.config)
+    else:
+        cfg = defaults()
 
     # Read LRR
     logger.info("Reading LRR from %s", input_path)
@@ -704,7 +722,7 @@ def _run_associate(args: argparse.Namespace) -> int:
         )
 
         # Apply upstream variant QC mask (call rate + HWE + MAF)
-        variant_qc_path = getattr(args, "variant_qc", None)
+        variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
         if variant_qc_path is not None:
             logger.info(
                 "Loading upstream variant QC from %s for GRM", variant_qc_path,
