@@ -10,15 +10,22 @@ and design rationale.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
 from scipy import stats
 from scipy.optimize import minimize_scalar
 
+logger = logging.getLogger(__name__)
+
 
 # Logistic IRLS: clamp linear predictor to avoid overflow in exp().
 _MAX_ETA: float = 20.0
+
+# LMM: number of markers to rotate into the eigenbasis at once.
+# Keeps peak memory bounded for biobank-scale LRR matrices.
+_LMM_CHUNK_SIZE: int = 10_000
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -356,10 +363,15 @@ def _lmm_scan(
     phenotype: np.ndarray,
     grm: np.ndarray,
     covariates: np.ndarray | None = None,
+    chunk_size: int = _LMM_CHUNK_SIZE,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """LMM association scan using spectral decomposition.
 
     Model: phenotype ~ LRR_marker + covariates + (1|GRM)
+
+    The LRR rotation into the eigenbasis (``lrr @ U``) is performed in
+    chunks of *chunk_size* markers at a time to keep memory bounded for
+    biobank-scale matrices.
 
     Parameters
     ----------
@@ -367,6 +379,8 @@ def _lmm_scan(
     phenotype : ndarray, shape (n_samples,)
     grm : ndarray, shape (n_samples, n_samples)
     covariates : ndarray, shape (n_samples, n_covariates) or None
+    chunk_size : int
+        Number of markers to rotate at once (default: 10 000).
 
     Returns
     -------
@@ -385,10 +399,9 @@ def _lmm_scan(
     # Clamp small eigenvalues to avoid numerical issues
     eigenvalues = np.maximum(eigenvalues, 0.0)
 
-    # Rotate into eigenbasis
+    # Rotate phenotype and covariates (small: n_samples-sized)
     y_rot = U.T @ phenotype
     X_rot = U.T @ C
-    lrr_rot = lrr @ U  # shape (n_markers, n_samples)
 
     # Estimate δ under null model (no marker effect)
     delta = _estimate_delta(y_rot, X_rot, eigenvalues)
@@ -397,29 +410,35 @@ def _lmm_scan(
     D_inv = 1.0 / (eigenvalues + delta)
     p = C.shape[1]
 
-    # Null model weighted least squares
-    XtDX_null = X_rot.T * D_inv[np.newaxis, :] @ X_rot
-    XtDy = X_rot.T @ (D_inv * y_rot)
-    try:
-        beta_null = np.linalg.solve(XtDX_null, XtDy)
-    except np.linalg.LinAlgError:
-        beta_null = np.zeros(p)
-
-    y_resid_null = y_rot - X_rot @ beta_null
-
-    # For each marker, test via WLS in the rotated space
-    # Build augmented design: [X_rot, z_rot_i] for each marker
-    # Use Frisch-Waugh-Lovell in the weighted space
     has_nan = np.isnan(lrr).any()
 
-    if not has_nan:
-        return _lmm_scan_complete(
-            lrr_rot, y_rot, X_rot, eigenvalues, delta, D_inv, n_samples, p,
+    if has_nan:
+        # Missing-data path doesn't benefit from chunking (per-marker loop)
+        return _lmm_scan_missing(
+            lrr, phenotype, C, grm, eigenvalues, U, delta,
         )
 
-    return _lmm_scan_missing(
-        lrr, phenotype, C, grm, eigenvalues, U, delta,
-    )
+    # Complete-data path: rotate and scan in chunks
+    beta_all = np.empty(n_markers)
+    se_all = np.empty(n_markers)
+    t_all = np.empty(n_markers)
+    p_all = np.empty(n_markers)
+    n_all = np.empty(n_markers, dtype=int)
+
+    for start in range(0, n_markers, chunk_size):
+        end = min(start + chunk_size, n_markers)
+        lrr_rot_chunk = lrr[start:end] @ U  # shape (chunk, n_samples)
+        b, s, t, pv, ns = _lmm_scan_complete(
+            lrr_rot_chunk, y_rot, X_rot, eigenvalues, delta, D_inv,
+            n_samples, p,
+        )
+        beta_all[start:end] = b
+        se_all[start:end] = s
+        t_all[start:end] = t
+        p_all[start:end] = pv
+        n_all[start:end] = ns
+
+    return beta_all, se_all, t_all, p_all, n_all
 
 
 def _lmm_scan_complete(
@@ -632,6 +651,13 @@ def run_association(
             raise ValueError(
                 "Logistic regression requires binary phenotype (0/1); "
                 f"got unique values {unique}"
+            )
+        if grm is not None:
+            logger.warning(
+                "Logistic regression does not use the GRM for relatedness "
+                "correction. Only fixed-effect covariates (e.g. PCs) are "
+                "applied. Consider pre-filtering highly related individuals "
+                "or using --method lmm with a continuous phenotype proxy."
             )
         beta, se, stat, pval, ns = _logistic_scan(lrr, phenotype, covariates)
     else:

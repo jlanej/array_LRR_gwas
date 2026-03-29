@@ -227,6 +227,107 @@ class TestLmmScan:
         beta_ols, _, _, p_ols, _ = _ols_scan(lrr, phenotype)
         np.testing.assert_allclose(beta_lmm, beta_ols, atol=0.1)
 
+    def test_chunked_matches_unchunked(self) -> None:
+        """Chunked and unchunked LMM scans should produce identical results."""
+        rng = np.random.default_rng(200)
+        n_markers, n_samples = 25, 60
+        lrr = rng.normal(size=(n_markers, n_samples))
+        phenotype = rng.normal(size=n_samples)
+        grm = _make_grm(n_samples, rng)
+
+        # chunk_size larger than n_markers -> single chunk (no splitting)
+        b1, s1, t1, p1, n1 = _lmm_scan(lrr, phenotype, grm, chunk_size=100)
+        # chunk_size = 7 -> multiple chunks with remainder
+        b2, s2, t2, p2, n2 = _lmm_scan(lrr, phenotype, grm, chunk_size=7)
+
+        np.testing.assert_allclose(b1, b2, atol=1e-12)
+        np.testing.assert_allclose(s1, s2, atol=1e-12)
+        np.testing.assert_allclose(p1, p2, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Logistic warning
+# ---------------------------------------------------------------------------
+
+class TestLogisticWarning:
+    """Logistic regression should warn when GRM is provided."""
+
+    def test_logistic_warns_when_grm_provided(self, caplog) -> None:
+        """run_association should warn when logistic is used with a GRM."""
+        import logging
+
+        rng = np.random.default_rng(42)
+        n_markers, n_samples = 3, 50
+        lrr = rng.normal(size=(n_markers, n_samples))
+        phenotype = (rng.random(n_samples) > 0.5).astype(float)
+        grm = _make_grm(n_samples, rng)
+        variants = _make_variants(n_markers)
+
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.association"):
+            result = run_association(
+                lrr, phenotype, variants, method="logistic", grm=grm,
+            )
+        assert "does not use the GRM" in caplog.text
+        assert result.method == "logistic"
+
+
+# ---------------------------------------------------------------------------
+# AssociationResult output contract
+# ---------------------------------------------------------------------------
+
+class TestOutputContract:
+    """Verify the output schema for downstream segmentation (Issue #5)."""
+
+    def test_to_records_schema(self) -> None:
+        """Every record has the required fields for segmentation."""
+        rng = np.random.default_rng(42)
+        n_markers, n_samples = 5, 30
+        lrr = rng.normal(size=(n_markers, n_samples))
+        phenotype = rng.normal(size=n_samples)
+        variants = _make_variants(n_markers)
+
+        result = run_association(lrr, phenotype, variants, method="ols")
+        records = result.to_records()
+        required_keys = {
+            "chrom", "pos", "variant_id", "beta", "se",
+            "stat", "p_value", "n_samples", "method",
+        }
+        for rec in records:
+            assert required_keys.issubset(rec.keys())
+
+    def test_coordinate_order_preserved(self) -> None:
+        """Records must be in the same order as input variants."""
+        rng = np.random.default_rng(42)
+        n_markers, n_samples = 10, 30
+        lrr = rng.normal(size=(n_markers, n_samples))
+        phenotype = rng.normal(size=n_samples)
+        # Two chromosomes, each with ascending positions
+        variants = [
+            {"chrom": "chr1", "pos": 100 + i * 50, "id": f"v{i}"}
+            for i in range(5)
+        ] + [
+            {"chrom": "chr2", "pos": 200 + i * 50, "id": f"v{5 + i}"}
+            for i in range(5)
+        ]
+        result = run_association(lrr, phenotype, variants, method="ols")
+        records = result.to_records()
+        for i, (rec, var) in enumerate(zip(records, variants)):
+            assert rec["chrom"] == var["chrom"], f"chrom mismatch at index {i}"
+            assert rec["pos"] == var["pos"], f"pos mismatch at index {i}"
+
+    def test_numeric_types(self) -> None:
+        """Numeric fields should be plain Python float/int, not numpy."""
+        rng = np.random.default_rng(42)
+        lrr = rng.normal(size=(3, 20))
+        phenotype = rng.normal(size=20)
+        variants = _make_variants(3)
+        result = run_association(lrr, phenotype, variants, method="ols")
+        for rec in result.to_records():
+            assert isinstance(rec["beta"], float)
+            assert isinstance(rec["se"], float)
+            assert isinstance(rec["p_value"], float)
+            assert isinstance(rec["n_samples"], int)
+
 
 # ---------------------------------------------------------------------------
 # run_association (public API)
