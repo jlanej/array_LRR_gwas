@@ -107,7 +107,7 @@ def autosome_mask(
         ``True`` for autosomal markers.
     """
     chroms = np.asarray(chromosomes, dtype=str)
-    return np.array([c not in _NON_AUTOSOMAL for c in chroms], dtype=bool)
+    return ~np.isin(chroms, list(_NON_AUTOSOMAL))
 
 
 def complexity_mask(
