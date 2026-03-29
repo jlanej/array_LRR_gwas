@@ -21,6 +21,15 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _variant_id(v: dict) -> str:
+    """Build a canonical variant ID string from a variant metadata dict."""
+    vid = v.get("id")
+    if vid is not None and vid != ".":
+        return vid
+    alts = v.get("alts") or ()
+    return f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(alts)}"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="array-lrr-gwas",
@@ -143,6 +152,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "See docs/upstream_qc_formats.md for field descriptions."
         ),
     )
+    correct.add_argument(
+        "--variant-qc",
+        type=Path,
+        default=None,
+        help=(
+            "Path to collated_variant_qc.tsv from upstream pipeline. "
+            "When provided, markers failing cross-ancestry call rate or "
+            "HWE are excluded from the RSVD decomposition (MAF is not "
+            "required for batch correction). Also configurable via "
+            "upstream_qc.variant_qc_path in the YAML config."
+        ),
+    )
 
     # ---- associate sub-command ----
     assoc = sub.add_parser(
@@ -259,6 +280,26 @@ def _build_parser() -> argparse.ArgumentParser:
             "'plink2' shells out to plink2 --indep-pairwise for "
             "faster pruning on large datasets; if unavailable, the "
             "CLI falls back to the NumPy backend with a warning."
+        ),
+    )
+    assoc.add_argument(
+        "--variant-qc",
+        type=Path,
+        default=None,
+        help=(
+            "Path to collated_variant_qc.tsv from upstream pipeline. "
+            "When provided, genotype markers failing cross-ancestry "
+            "call rate, HWE, or MAF are excluded before LD pruning "
+            "for GRM computation."
+        ),
+    )
+    assoc.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "YAML configuration file. For association, this is currently used "
+            "to read upstream_qc.variant_qc_path when --variant-qc is not set."
         ),
     )
     assoc.add_argument(
@@ -402,6 +443,7 @@ def _run_correct(args: argparse.Namespace) -> int:
     from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
     from array_lrr_gwas.io_vcf import read_lrr, write_corrected
     from array_lrr_gwas.qc_config import defaults, load_config, apply_to_correct_args
+    from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
     input_path = args.input
     if not input_path.exists():
@@ -471,6 +513,25 @@ def _run_correct(args: argparse.Namespace) -> int:
             build,
         )
 
+    # Load upstream variant QC mask for RSVD marker selection
+    variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
+    upstream_qc_mask = None
+    if variant_qc_path is not None:
+        variant_qc_path = Path(variant_qc_path)
+        logger.info("Loading upstream variant QC from %s", variant_qc_path)
+        qc_data = read_collated_variant_qc(variant_qc_path)
+        variant_ids = [_variant_id(v) for v in variants]
+        upstream_qc_mask = variant_qc_mask(
+            variant_ids, qc_data,
+            require_call_rate=True, require_hwe=True, require_maf=False,
+        )
+        n_pass = int(upstream_qc_mask.sum())
+        logger.info(
+            "Upstream variant QC (RSVD): %d / %d markers pass "
+            "(call rate + HWE; MAF not required)",
+            n_pass, len(upstream_qc_mask),
+        )
+
     # Run correction
     logger.info(
         "Running batch-effect correction (k=%s)",
@@ -481,6 +542,7 @@ def _run_correct(args: argparse.Namespace) -> int:
         positions=positions,
         chromosomes=chromosomes,
         exclude_regions=exclude_regions,
+        upstream_qc_mask=upstream_qc_mask,
         **correct_kwargs,
     )
     logger.info(
@@ -512,6 +574,7 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     from array_lrr_gwas.association import run_association
     from array_lrr_gwas.io_vcf import read_lrr
+    from array_lrr_gwas.qc_config import defaults, load_config
 
     input_path = args.input
     if not input_path.exists():
@@ -522,6 +585,13 @@ def _run_associate(args: argparse.Namespace) -> int:
     if not pheno_path.exists():
         logger.error("Phenotype file not found: %s", pheno_path)
         return 1
+
+    # Optional config (currently used for upstream_qc.variant_qc_path).
+    if args.config is not None:
+        logger.info("Loading config from %s", args.config)
+        cfg = load_config(args.config)
+    else:
+        cfg = defaults()
 
     # Read LRR
     logger.info("Reading LRR from %s", input_path)
@@ -626,6 +696,7 @@ def _run_associate(args: argparse.Namespace) -> int:
     if args.method == "lmm":
         from array_lrr_gwas.genotypes import read_genotypes
         from array_lrr_gwas.grm import compute_grm
+        from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
         gt_path = args.genotype_bcf or input_path
         logger.info("Reading genotypes from %s for GRM", gt_path)
@@ -644,10 +715,42 @@ def _run_associate(args: argparse.Namespace) -> int:
             )
             return 1
 
+        n_initial = dosage.shape[0]
         logger.info(
-            "%d genotype variants from %d samples passed QC",
-            dosage.shape[0], dosage.shape[1],
+            "%d genotype variants from %d samples passed initial QC",
+            n_initial, dosage.shape[1],
         )
+
+        # Apply upstream variant QC mask (call rate + HWE + MAF)
+        variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
+        if variant_qc_path is not None:
+            logger.info(
+                "Loading upstream variant QC from %s for GRM", variant_qc_path,
+            )
+            qc_data = read_collated_variant_qc(variant_qc_path)
+            gt_variant_ids = [_variant_id(v) for v in gt_variants]
+            qc_keep = variant_qc_mask(
+                gt_variant_ids, qc_data,
+                require_call_rate=True, require_hwe=True, require_maf=True,
+            )
+            n_before_qc = dosage.shape[0]
+            dosage = dosage[qc_keep]
+            gt_variants = [v for v, k in zip(gt_variants, qc_keep) if k]
+            logger.info(
+                "Upstream variant QC (GRM): %d → %d variants "
+                "(call rate + HWE + MAF required)",
+                n_before_qc, dosage.shape[0],
+            )
+
+            if dosage.shape[0] == 0:
+                logger.error(
+                    "No genotype variants remain after upstream QC mask "
+                    "(%d before filtering, file: %s). Check that variant "
+                    "IDs match between the genotype file and "
+                    "collated_variant_qc.tsv.",
+                    n_before_qc, variant_qc_path,
+                )
+                return 1
 
         # LD prune GRM markers
         if not args.no_ld_prune:
