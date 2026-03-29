@@ -662,7 +662,7 @@ def _run_associate(args: argparse.Namespace) -> int:
             return "NA"
         return f"{(100.0 * numer / denom):.2f}%"
 
-    def _is_binary(vals: np.ndarray) -> bool:
+    def _is_binary_phenotype(vals: np.ndarray) -> bool:
         finite = vals[~np.isnan(vals)]
         if finite.size == 0:
             return False
@@ -743,7 +743,7 @@ def _run_associate(args: argparse.Namespace) -> int:
     if n_hq_in_lrr is not None:
         logger.info(
             "Association HQ intersection: hq_in_lrr=%d, "
-            "valid_pheno∩hq=%d, dropped_lq_with_valid_pheno=%d",
+            "valid_pheno_and_hq=%d, dropped_lq_with_valid_pheno=%d",
             n_hq_in_lrr, n_analyzed, n_dropped_lq,
         )
     else:
@@ -751,7 +751,7 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     pre_vals = pheno_vals[valid_mask]
     analyzed_vals = pheno_vals[analyzed_mask]
-    if _is_binary(pre_vals):
+    if _is_binary_phenotype(pre_vals):
         pre_cases = int(np.sum(pre_vals == 1.0))
         pre_controls = int(np.sum(pre_vals == 0.0))
         post_cases = int(np.sum(analyzed_vals == 1.0))
