@@ -327,6 +327,7 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `-o, --output` | path | *required* | Output TSV of per-marker association results |
 | `--method` | str | `lmm` | `lmm` (default), `ols`, or `logistic` |
 | `--sample-sheet` | path | `None` | `compiled_sample_sheet.tsv` for ancestry PCs |
+| `--hq-samples` | path | `None` | Optional HQ sample list; analyzes only `valid phenotype ∩ HQ` samples (drops LQ samples) |
 | `--n-pcs` | int | `20` | Number of PCs to include as covariates |
 | `--genotype-bcf` | path | `INPUT` | BCF/VCF for GRM computation (if different from input) |
 | `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; variants failing call rate/HWE/MAF are excluded before GRM |
