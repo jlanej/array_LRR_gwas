@@ -91,3 +91,107 @@ class TestCli:
         ])
         assert rc == 0
         assert out.exists()
+
+    def test_associate_help_flag(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["associate", "--help"])
+        assert exc.value.code == 0
+
+    def test_associate_missing_input(self, tmp_path):
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.5\n")
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(tmp_path / "nonexistent.bcf"),
+            "--phenotype", str(pheno),
+            "-o", str(out),
+        ])
+        assert rc == 1
+
+    def test_associate_ols(self, test_bcf_path, tmp_path):
+        """OLS association via CLI with test BCF."""
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(test_bcf_path)
+
+        # Write phenotype TSV
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        pheno = tmp_path / "pheno.tsv"
+        lines = ["sample_id\tphenotype"]
+        for s in samples:
+            lines.append(f"{s}\t{rng.normal():.6f}")
+        pheno.write_text("\n".join(lines) + "\n")
+
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(test_bcf_path),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        # Verify output has correct header and data rows
+        content = out.read_text().strip().split("\n")
+        assert "chrom" in content[0]
+        assert len(content) > 1
+
+    def test_associate_lmm_no_gt_fails(self, test_bcf_path, tmp_path):
+        """LMM with a BCF that has no GT data should fail gracefully."""
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(test_bcf_path)
+
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        pheno = tmp_path / "pheno.tsv"
+        lines = ["sample_id\tphenotype"]
+        for s in samples:
+            lines.append(f"{s}\t{rng.normal():.6f}")
+        pheno.write_text("\n".join(lines) + "\n")
+
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(test_bcf_path),
+            "--phenotype", str(pheno),
+            "--method", "lmm",
+            "-o", str(out),
+        ])
+        assert rc == 1  # Should fail: no GT data available
+
+    def test_associate_cli_warns_when_logistic_ignores_grm(
+        self, test_bcf_path, tmp_path, caplog
+    ):
+        """CLI should warn that logistic does not use the GRM random effect."""
+        import logging
+        import numpy as np
+
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(test_bcf_path)
+        rng = np.random.default_rng(42)
+        pheno = tmp_path / "pheno.tsv"
+        lines = ["sample_id\tphenotype"]
+        for s in samples:
+            y = 1 if rng.random() > 0.5 else 0
+            lines.append(f"{s}\t{y}")
+        pheno.write_text("\n".join(lines) + "\n")
+
+        out = tmp_path / "results.tsv"
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(test_bcf_path),
+                "--phenotype", str(pheno),
+                "--method", "logistic",
+                "-o", str(out),
+            ])
+        assert rc == 0
+        assert out.exists()
+        assert "does not use the GRM random effect" in caplog.text
