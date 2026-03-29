@@ -63,9 +63,9 @@ def select_k_mp(
     """
     s2 = singular_values ** 2
 
-    # Robust noise estimate: use the smallest singular value squared,
+    # Robust noise estimate: use the median squared singular value,
     # normalised to an eigenvalue of the covariance matrix.
-    noise_eigenvalue = s2[-1] / n_samples
+    noise_eigenvalue = float(np.median(s2)) / n_samples
     upper = _mp_upper_edge(n_markers, n_samples, noise_eigenvalue)
 
     # Eigenvalues of the covariance matrix = s^2 / n_samples

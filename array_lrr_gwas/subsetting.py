@@ -2,6 +2,9 @@
 
 Provides filters to select high-quality markers from an LRR matrix based on
 scientifically defensible criteria:
+- **Autosomal filter**: restricts to autosomal chromosomes, excluding sex
+  chromosomes (X, Y) and mitochondrial markers (MT/M) that would otherwise
+  drive PCA to capture sex-based rather than technical batch variation.
 - **Call-rate filter**: removes markers with excessive missingness.
 - **Variance filter**: removes markers with near-zero variance (uninformative)
   or extremely high variance (likely artefactual).
@@ -77,6 +80,36 @@ def variance_mask(
     return mask
 
 
+# Non-autosomal chromosome labels (chr-prefixed and bare).
+_NON_AUTOSOMAL: frozenset[str] = frozenset({
+    "chrX", "chrY", "chrM", "chrMT",
+    "X", "Y", "M", "MT",
+})
+
+
+def autosome_mask(
+    chromosomes: NDArray | Sequence[str],
+) -> NDArray[np.bool_]:
+    """Return a boolean mask that keeps only autosomal markers.
+
+    Sex chromosomes (X, Y) and mitochondrial markers (M, MT) are excluded
+    because their intensity signals encode biological sex rather than
+    technical batch effects, which would confound PCA-based correction.
+
+    Parameters
+    ----------
+    chromosomes : array-like of str, shape (n_markers,)
+        Chromosome label for each marker.
+
+    Returns
+    -------
+    mask : ndarray of bool, shape (n_markers,)
+        ``True`` for autosomal markers.
+    """
+    chroms = np.asarray(chromosomes, dtype=str)
+    return ~np.isin(chroms, list(_NON_AUTOSOMAL))
+
+
 def complexity_mask(
     positions: NDArray[np.intp],
     chromosomes: NDArray | Sequence[str],
@@ -122,6 +155,7 @@ def subset_markers(
     min_var: float = 0.001,
     max_var: float | None = None,
     exclude_regions: dict[str, list[tuple[int, int]]] | None = None,
+    autosomes_only: bool = True,
 ) -> NDArray[np.bool_]:
     """Combine QC filters to produce a single marker-keep mask.
 
@@ -131,6 +165,11 @@ def subset_markers(
     positions, chromosomes : optional arrays for complexity filtering.
     min_call_rate, min_var, max_var : QC thresholds (see individual filters).
     exclude_regions : see :func:`complexity_mask`.
+    autosomes_only : bool
+        If ``True`` (default) and *chromosomes* is provided, non-autosomal
+        markers (X, Y, MT) are excluded.  These markers carry sex-linked
+        intensity signals that would cause top PCs to capture sex rather
+        than technical batch effects.
 
     Returns
     -------
@@ -139,6 +178,9 @@ def subset_markers(
     """
     mask = call_rate_mask(lrr, min_call_rate=min_call_rate)
     mask &= variance_mask(lrr, min_var=min_var, max_var=max_var)
-    if positions is not None and chromosomes is not None:
-        mask &= complexity_mask(positions, chromosomes, exclude_regions)
+    if chromosomes is not None:
+        if autosomes_only:
+            mask &= autosome_mask(chromosomes)
+        if positions is not None:
+            mask &= complexity_mask(positions, chromosomes, exclude_regions)
     return mask

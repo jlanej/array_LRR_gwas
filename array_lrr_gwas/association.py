@@ -11,6 +11,7 @@ and design rationale.
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -19,6 +20,9 @@ from scipy.optimize import minimize_scalar
 
 logger = logging.getLogger(__name__)
 
+
+# OLS: number of markers to residualise at once (same concept as LMM chunks).
+_OLS_CHUNK_SIZE: int = 10_000
 
 # Logistic IRLS: clamp linear predictor to avoid overflow in exp().
 _MAX_ETA: float = 20.0
@@ -82,32 +86,51 @@ def _ols_scan_complete(
     Uses the Frisch-Waugh-Lovell theorem: project covariates out of
     both the phenotype and the LRR rows, then run univariate regression
     on the residuals.
+
+    LRR residualisation is performed in chunks of ``_OLS_CHUNK_SIZE``
+    markers to keep peak memory bounded for biobank-scale matrices.
     """
     n_markers, n_samples = lrr.shape
 
     Q, _ = np.linalg.qr(C)
     Y_resid = phenotype - Q @ (Q.T @ phenotype)
-    X_resid = lrr - (lrr @ Q) @ Q.T
 
-    xty = X_resid @ Y_resid
-    xtx = np.sum(X_resid ** 2, axis=1)
-
-    safe = xtx > 0
-    beta = np.where(safe, xty / np.where(safe, xtx, 1.0), 0.0)
-
-    residuals = Y_resid[np.newaxis, :] - beta[:, np.newaxis] * X_resid
-    df = n_samples - df_cov - 1
-    sigma2 = np.sum(residuals ** 2, axis=1) / max(df, 1)
-
-    se = np.where(safe, np.sqrt(sigma2 / np.where(safe, xtx, 1.0)), np.inf)
-    t_stat = np.where(se < np.inf, beta / np.where(se > 0, se, 1.0), 0.0)
-
-    if df > 0:
-        p_value = 2.0 * stats.t.sf(np.abs(t_stat), df=df)
-    else:
-        p_value = np.ones(n_markers)
-
+    beta = np.empty(n_markers)
+    se = np.empty(n_markers)
+    t_stat = np.empty(n_markers)
+    p_value = np.empty(n_markers)
     n_per_marker = np.full(n_markers, n_samples, dtype=int)
+
+    df = n_samples - df_cov - 1
+
+    for start in range(0, n_markers, _OLS_CHUNK_SIZE):
+        end = min(start + _OLS_CHUNK_SIZE, n_markers)
+        chunk = lrr[start:end]
+
+        X_resid = chunk - (chunk @ Q) @ Q.T
+
+        xty = X_resid @ Y_resid
+        xtx = np.sum(X_resid ** 2, axis=1)
+
+        safe = xtx > 0
+        b = np.where(safe, xty / np.where(safe, xtx, 1.0), 0.0)
+
+        residuals = Y_resid[np.newaxis, :] - b[:, np.newaxis] * X_resid
+        sigma2 = np.sum(residuals ** 2, axis=1) / max(df, 1)
+
+        s = np.where(safe, np.sqrt(sigma2 / np.where(safe, xtx, 1.0)), np.inf)
+        t = np.where(s < np.inf, b / np.where(s > 0, s, 1.0), 0.0)
+
+        if df > 0:
+            pv = 2.0 * stats.t.sf(np.abs(t), df=df)
+        else:
+            pv = np.ones(end - start)
+
+        beta[start:end] = b
+        se[start:end] = s
+        t_stat[start:end] = t
+        p_value[start:end] = pv
+
     return beta, se, t_stat, p_value, n_per_marker
 
 
@@ -362,6 +385,37 @@ def _estimate_delta(
     return 10.0 ** result.x
 
 
+def _mean_impute_lrr(lrr: np.ndarray) -> np.ndarray:
+    """Replace per-marker NaN values with the marker's mean.
+
+    This allows the full-sample GRM eigenbasis to be reused for all
+    markers, avoiding a costly O(N³) eigendecomposition per marker with
+    missing data.  Mean-imputation is the standard approach in EMMA,
+    SAIGE, and fastGWA.
+
+    Parameters
+    ----------
+    lrr : ndarray, shape (n_markers, n_samples)
+
+    Returns
+    -------
+    lrr_imputed : ndarray, shape (n_markers, n_samples)
+        A copy of *lrr* with NaN values replaced by per-marker means.
+    """
+    lrr = lrr.copy()
+    nan_mask = np.isnan(lrr)
+    if not nan_mask.any():
+        return lrr
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        row_means = np.nanmean(lrr, axis=1)
+    # Markers that are entirely NaN get mean = NaN; replace with 0.
+    row_means = np.where(np.isnan(row_means), 0.0, row_means)
+    inds = np.where(nan_mask)
+    lrr[inds] = row_means[inds[0]]
+    return lrr
+
+
 def _lmm_scan(
     lrr: np.ndarray,
     phenotype: np.ndarray,
@@ -417,10 +471,11 @@ def _lmm_scan(
     has_nan = np.isnan(lrr).any()
 
     if has_nan:
-        # Missing-data path doesn't benefit from chunking (per-marker loop)
-        return _lmm_scan_missing(
-            lrr, phenotype, C, grm, eigenvalues, U, delta,
-        )
+        # Mean-impute missing LRR values per marker so the full-sample
+        # GRM eigenbasis can be reused for all markers.  This avoids an
+        # O(N³) eigendecomposition per marker with missing data and is
+        # the standard approach in EMMA, SAIGE, and fastGWA.
+        lrr = _mean_impute_lrr(lrr)
 
     # Complete-data path: rotate and scan in chunks
     beta_all = np.empty(n_markers)
@@ -491,83 +546,6 @@ def _lmm_scan_complete(
     n_per_marker = np.full(n_markers, n_samples, dtype=int)
     return beta, se, t_stat, p_value, n_per_marker
 
-
-def _lmm_scan_missing(
-    lrr: np.ndarray,
-    phenotype: np.ndarray,
-    C: np.ndarray,
-    grm: np.ndarray,
-    eigenvalues: np.ndarray,
-    U: np.ndarray,
-    delta: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Per-marker LMM with complete-case analysis for missing LRR."""
-    n_markers, n_samples = lrr.shape
-    p = C.shape[1]
-
-    D_inv_full = 1.0 / (eigenvalues + delta)
-
-    beta = np.zeros(n_markers)
-    se = np.full(n_markers, np.inf)
-    t_stat = np.zeros(n_markers)
-    p_value = np.ones(n_markers)
-    n_per_marker = np.zeros(n_markers, dtype=int)
-
-    for i in range(n_markers):
-        x = lrr[i]
-        valid = ~np.isnan(x)
-        n_valid = int(valid.sum())
-        n_per_marker[i] = n_valid
-
-        min_n = p + 2
-        if n_valid < min_n:
-            continue
-
-        if n_valid == n_samples:
-            # Use full rotated space
-            x_rot = x @ U
-            sqrt_w = np.sqrt(D_inv_full)
-            X_w = (U.T @ C) * sqrt_w[:, np.newaxis]
-            y_w = (U.T @ phenotype) * sqrt_w
-            z_w = x_rot * sqrt_w
-        else:
-            # Subset and re-decompose for this marker
-            x_i = x[valid]
-            y_i = phenotype[valid]
-            C_i = C[valid]
-            grm_i = grm[np.ix_(valid, valid)]
-
-            evals_i, U_i = np.linalg.eigh(grm_i)
-            evals_i = np.maximum(evals_i, 0.0)
-            D_inv_i = 1.0 / (evals_i + delta)
-
-            sqrt_w = np.sqrt(D_inv_i)
-            X_w = (U_i.T @ C_i) * sqrt_w[:, np.newaxis]
-            y_w = (U_i.T @ y_i) * sqrt_w
-            z_w = (U_i.T @ x_i) * sqrt_w
-
-        Q, _ = np.linalg.qr(X_w)
-        y_r = y_w - Q @ (Q.T @ y_w)
-        z_r = z_w - Q @ (Q.T @ z_w)
-
-        ztDz = float(np.dot(z_r, z_r))
-        if ztDz <= 0:
-            continue
-
-        ztDy = float(np.dot(z_r, y_r))
-        beta[i] = ztDy / ztDz
-
-        resid = y_r - beta[i] * z_r
-        df = n_valid - p - 1
-        if df <= 0:
-            continue
-
-        sigma2 = float(np.sum(resid ** 2)) / df
-        se[i] = np.sqrt(sigma2 / ztDz)
-        t_stat[i] = beta[i] / se[i]
-        p_value[i] = 2.0 * stats.t.sf(abs(t_stat[i]), df=df)
-
-    return beta, se, t_stat, p_value, n_per_marker
 
 
 # ---------------------------------------------------------------------------

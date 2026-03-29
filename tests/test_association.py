@@ -7,6 +7,7 @@ import pytest
 
 from array_lrr_gwas.association import (
     AssociationResult,
+    _mean_impute_lrr,
     _ols_scan,
     _logistic_scan,
     _lmm_scan,
@@ -116,6 +117,31 @@ class TestOlsScan:
         np.testing.assert_allclose(s1, s2, atol=1e-10)
         np.testing.assert_allclose(p1, p2, atol=1e-10)
 
+    def test_ols_chunked_matches_unchunked(self) -> None:
+        """OLS scan results should be identical regardless of chunk size."""
+        import array_lrr_gwas.association as assoc
+
+        rng = np.random.default_rng(222)
+        n_markers, n_samples = 25, 60
+        lrr = rng.normal(size=(n_markers, n_samples))
+        phenotype = rng.normal(size=n_samples)
+
+        # Run with large chunk (all at once)
+        old_chunk = assoc._OLS_CHUNK_SIZE
+        try:
+            assoc._OLS_CHUNK_SIZE = 100_000
+            b1, s1, t1, p1, n1 = _ols_scan(lrr, phenotype)
+
+            # Run with small chunk (multiple chunks)
+            assoc._OLS_CHUNK_SIZE = 7
+            b2, s2, t2, p2, n2 = _ols_scan(lrr, phenotype)
+        finally:
+            assoc._OLS_CHUNK_SIZE = old_chunk
+
+        np.testing.assert_allclose(b1, b2, atol=1e-10)
+        np.testing.assert_allclose(s1, s2, atol=1e-10)
+        np.testing.assert_allclose(p1, p2, atol=1e-10)
+
 
 # ---------------------------------------------------------------------------
 # Logistic scan
@@ -205,7 +231,7 @@ class TestLmmScan:
         assert beta.shape == (n_markers,)
 
     def test_handles_nan(self) -> None:
-        """LMM scan should handle missing LRR per-marker."""
+        """LMM scan should handle missing LRR via mean-imputation."""
         rng = np.random.default_rng(33)
         n_markers, n_samples = 5, 50
         lrr = rng.normal(size=(n_markers, n_samples))
@@ -213,8 +239,9 @@ class TestLmmScan:
         phenotype = rng.normal(size=n_samples)
         grm = _make_grm(n_samples, rng)
         beta, se, t, p, ns = _lmm_scan(lrr, phenotype, grm)
-        assert ns[0] == 40
-        assert ns[1] == 50
+        # After mean-imputation, all samples are used for every marker.
+        assert ns[0] == n_samples
+        assert ns[1] == n_samples
 
     def test_identity_grm_matches_ols(self) -> None:
         """With identity GRM, LMM should closely match OLS."""
@@ -243,6 +270,37 @@ class TestLmmScan:
         np.testing.assert_allclose(b1, b2, atol=1e-12)
         np.testing.assert_allclose(s1, s2, atol=1e-12)
         np.testing.assert_allclose(p1, p2, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Mean imputation helper
+# ---------------------------------------------------------------------------
+
+class TestMeanImputeLrr:
+    """Tests for the LMM mean-imputation helper."""
+
+    def test_no_nan_unchanged(self):
+        lrr = np.array([[1.0, 2.0, 3.0]])
+        result = _mean_impute_lrr(lrr)
+        np.testing.assert_array_equal(lrr, result)
+
+    def test_replaces_nan_with_row_mean(self):
+        lrr = np.array([[1.0, np.nan, 3.0]])
+        result = _mean_impute_lrr(lrr)
+        assert not np.isnan(result).any()
+        assert result[0, 1] == pytest.approx(2.0)
+
+    def test_all_nan_row_fills_zero(self):
+        lrr = np.array([[np.nan, np.nan, np.nan], [1.0, 2.0, 3.0]])
+        result = _mean_impute_lrr(lrr)
+        assert not np.isnan(result).any()
+        np.testing.assert_array_equal(result[0], [0.0, 0.0, 0.0])
+        np.testing.assert_array_equal(result[1], [1.0, 2.0, 3.0])
+
+    def test_does_not_modify_input(self):
+        lrr = np.array([[1.0, np.nan, 3.0]])
+        _ = _mean_impute_lrr(lrr)
+        assert np.isnan(lrr[0, 1])  # original unchanged
 
 
 # ---------------------------------------------------------------------------

@@ -85,21 +85,21 @@ alternatives when no GRM is provided.
   For very strong signals this is slightly conservative.
 * Population stratification is controlled via genetic PCs from the
   upstream `compiled_sample_sheet.tsv` (fixed effects).
-* Per-marker missing-data handling falls back to a slower loop; ensure
-  upstream QC minimises missingness for best performance.
+* Missing LRR values are mean-imputed per marker so that the full-sample
+  GRM eigenbasis can be reused for all markers.  This avoids an O(N³)
+  eigendecomposition per marker and is the standard approach in EMMA,
+  SAIGE, and fastGWA.  Ensure upstream QC minimises missingness for best
+  accuracy.
 * Logistic regression uses IRLS with a fixed iteration cap; convergence
-  failures are silently skipped (NaN beta / p = 1).
+  failures are silently skipped (NaN beta / p = 1).  The per-marker
+  Python loop is a known bottleneck for very large marker counts.
 
 ## Scalability
 
-The LRR rotation into the GRM eigenbasis (`lrr @ U`) is the most
-memory-intensive step.  For a biobank-scale matrix with millions of
-markers, materialising the full rotated matrix would cause OOM.
-
-The implementation processes markers in chunks (default: 10 000) so that
-only `chunk_size × n_samples` floats are ever resident at once.  The
-eigendecomposition and null-model REML fit are performed once; only the
-per-marker WLS scan is chunked.
+Both the OLS and LMM association scans process markers in chunks
+(default: 10 000) so that only `chunk_size × n_samples` floats are
+ever resident at once.  For LMM, the eigendecomposition and null-model
+REML fit are performed once; only the per-marker WLS scan is chunked.
 
 ## Logistic Regression and Relatedness
 
