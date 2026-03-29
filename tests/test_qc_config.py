@@ -17,6 +17,7 @@ class TestDefaults:
         assert "sample_qc" in cfg
         assert "marker_qc" in cfg
         assert "correction" in cfg
+        assert "upstream_qc" in cfg
 
     def test_default_values(self):
         cfg = defaults()
@@ -27,6 +28,7 @@ class TestDefaults:
         assert cfg["marker_qc"]["max_var"] is None
         assert cfg["correction"]["k"] is None
         assert cfg["correction"]["backend"] == "rsvd"
+        assert cfg["upstream_qc"]["variant_qc_path"] is None
 
     def test_deep_copy(self):
         """Mutating the returned dict does not affect future calls."""
@@ -100,6 +102,15 @@ class TestLoadConfig:
         cfg_file.write_text("- item1\n- item2\n")
         with pytest.raises(ValueError, match="Expected a YAML mapping"):
             load_config(cfg_file)
+
+    def test_upstream_qc_section(self, tmp_path):
+        cfg_file = tmp_path / "qc.yaml"
+        cfg_file.write_text(
+            "upstream_qc:\n"
+            "  variant_qc_path: /data/collated_variant_qc.tsv\n"
+        )
+        cfg = load_config(cfg_file)
+        assert cfg["upstream_qc"]["variant_qc_path"] == "/data/collated_variant_qc.tsv"
 
 
 class TestApplyToCorrectArgs:

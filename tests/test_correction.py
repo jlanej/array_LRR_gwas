@@ -120,3 +120,50 @@ class TestCorrectLrr:
         )
         assert info["n_hq_samples"] < synthetic_lrr.shape[1]
         assert corrected.shape == synthetic_lrr.shape
+
+    def test_upstream_qc_mask_reduces_markers(self, synthetic_lrr):
+        """upstream_qc_mask excludes additional markers from the decomposition."""
+        # Baseline without QC mask
+        _, info_base = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+        # QC mask that excludes half the markers
+        n_markers = synthetic_lrr.shape[0]
+        qc_mask = np.array([i % 2 == 0 for i in range(n_markers)], dtype=bool)
+        corrected, info_qc = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+            upstream_qc_mask=qc_mask,
+        )
+        assert corrected.shape == synthetic_lrr.shape
+        assert info_qc["n_markers_used"] < info_base["n_markers_used"]
+
+    def test_upstream_qc_mask_none_unchanged(self, synthetic_lrr):
+        """upstream_qc_mask=None does not change the marker count."""
+        _, info_none = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+            upstream_qc_mask=None,
+        )
+        _, info_no_arg = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+        assert info_none["n_markers_used"] == info_no_arg["n_markers_used"]

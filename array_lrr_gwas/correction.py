@@ -120,6 +120,7 @@ def correct_lrr(
     max_var: float | None = None,
     exclude_regions: dict[str, list[tuple[int, int]]] | None = None,
     backend: str | DecompCallable = "rsvd",
+    upstream_qc_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[NDArray[np.floating], dict]:
     """End-to-end batch-effect correction for an LRR matrix.
 
@@ -141,6 +142,11 @@ def correct_lrr(
         Marker variance thresholds.
     exclude_regions : see :func:`~array_lrr_gwas.subsetting.complexity_mask`.
     backend : decomposition backend (see :func:`~array_lrr_gwas.decomposition.decompose`).
+    upstream_qc_mask : ndarray of bool or None
+        Pre-computed upstream variant QC mask (e.g. from
+        :func:`~array_lrr_gwas.variant_qc.variant_qc_mask` with
+        ``require_call_rate=True, require_hwe=True, require_maf=False``).
+        When provided, the mask is AND-ed with the subsetting filters.
 
     Returns
     -------
@@ -169,6 +175,7 @@ def correct_lrr(
         min_var=min_var,
         max_var=max_var,
         exclude_regions=exclude_regions,
+        upstream_qc_mask=upstream_qc_mask,
     )
     if not np.any(marker_mask):
         raise ValueError(

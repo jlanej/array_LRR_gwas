@@ -147,3 +147,25 @@ class TestSubsetMarkers:
             autosomes_only=False,
         )
         assert mask.all()
+
+    def test_upstream_qc_mask_applied(self):
+        """upstream_qc_mask is AND-ed with the other filters."""
+        rng = np.random.default_rng(0)
+        lrr = rng.normal(0, 0.1, (4, 20))
+        upstream = np.array([True, False, True, True], dtype=bool)
+        mask = subset_markers(
+            lrr, min_call_rate=0.0, min_var=0.0, upstream_qc_mask=upstream,
+        )
+        assert mask[0]
+        assert not mask[1]  # excluded by upstream QC
+        assert mask[2]
+        assert mask[3]
+
+    def test_upstream_qc_mask_none_is_noop(self):
+        """When upstream_qc_mask is None, behaviour is unchanged."""
+        rng = np.random.default_rng(0)
+        lrr = rng.normal(0, 0.1, (3, 20))
+        mask = subset_markers(
+            lrr, min_call_rate=0.0, min_var=0.0, upstream_qc_mask=None,
+        )
+        assert mask.all()

@@ -96,6 +96,11 @@ _DEFAULTS: dict[str, Any] = {
         # Skip genomic-complexity region exclusion if True.
         "no_complexity_filter": False,
     },
+    "upstream_qc": {
+        # Path to collated_variant_qc.tsv for ancestry-informed marker QC.
+        # None = no upstream QC mask applied (with warning).
+        "variant_qc_path": None,
+    },
 }
 
 _VALID_SECTIONS = frozenset(_DEFAULTS.keys())

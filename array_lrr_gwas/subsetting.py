@@ -156,6 +156,7 @@ def subset_markers(
     max_var: float | None = None,
     exclude_regions: dict[str, list[tuple[int, int]]] | None = None,
     autosomes_only: bool = True,
+    upstream_qc_mask: NDArray[np.bool_] | None = None,
 ) -> NDArray[np.bool_]:
     """Combine QC filters to produce a single marker-keep mask.
 
@@ -170,6 +171,10 @@ def subset_markers(
         markers (X, Y, MT) are excluded.  These markers carry sex-linked
         intensity signals that would cause top PCs to capture sex rather
         than technical batch effects.
+    upstream_qc_mask : ndarray of bool or None
+        Pre-computed upstream variant QC mask (e.g. from
+        :func:`~array_lrr_gwas.variant_qc.variant_qc_mask`).  When
+        provided, the mask is AND-ed with the other filters.
 
     Returns
     -------
@@ -183,4 +188,6 @@ def subset_markers(
             mask &= autosome_mask(chromosomes)
         if positions is not None:
             mask &= complexity_mask(positions, chromosomes, exclude_regions)
+    if upstream_qc_mask is not None:
+        mask &= upstream_qc_mask
     return mask
