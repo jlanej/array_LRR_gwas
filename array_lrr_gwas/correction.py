@@ -113,6 +113,7 @@ def correct_lrr(
     chromosomes: NDArray | None = None,
     *,
     k: int | None = None,
+    n_components: int | None = None,
     max_lrr_sd: float = 0.35,
     min_sample_call_rate: float = 0.95,
     min_marker_call_rate: float = 0.95,
@@ -132,6 +133,11 @@ def correct_lrr(
     k : int or None
         Number of batch components to remove.  If ``None``, chosen
         automatically via the Marchenko–Pastur heuristic.
+    n_components : int or None
+        Number of components to compute in the pilot truncated decomposition
+        used for automatic ``k`` selection. If ``None``, defaults to 5% of HQ
+        sample count (minimum 1, capped by feasibility). Ignored when ``k`` is
+        provided explicitly.
     max_lrr_sd : float
         HQ-sample threshold on per-sample LRR standard deviation.
     min_sample_call_rate : float
@@ -194,8 +200,13 @@ def correct_lrr(
             "Sub-matrix too small for decomposition after filtering."
         )
     if k is None:
-        # Use a generous pilot decomposition to determine k
-        pilot_k = min(max_possible_k, max(10, max_possible_k // 2))
+        if n_components is None:
+            pilot_k = max(1, int(np.ceil(0.05 * sub.shape[1])))
+        else:
+            if n_components < 1:
+                raise ValueError("n_components must be >= 1.")
+            pilot_k = n_components
+        pilot_k = min(max_possible_k, pilot_k)
         _, s_pilot, _ = decompose(sub, pilot_k, backend=backend)
         k = select_k_mp(s_pilot, sub.shape[0], sub.shape[1])
         k = min(k, max_possible_k)

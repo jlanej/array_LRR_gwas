@@ -135,6 +135,7 @@ marker_qc:
 # correction: SVD decomposition parameters.
 correction:
   k: null                    # Batch PCs to remove (null = auto via Marchenko-Pastur)
+  n_components: null         # Pilot decomposition size for auto-k (null = 5% of HQ sample count)
   backend: rsvd              # "rsvd" (scikit-learn) or "fbpca" (Facebook PCA)
   no_complexity_filter: false # Skip centromere / segdup exclusion regions
 
@@ -157,6 +158,7 @@ marker_qc:
 
 correction:
   k: 5                     # fix number of batch components
+  n_components: 50         # optional pilot decomposition size used only when k is null
   backend: rsvd
 ```
 

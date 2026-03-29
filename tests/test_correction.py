@@ -78,6 +78,31 @@ class TestCorrectLrr:
         assert info["k"] >= 1
         assert corrected.shape == synthetic_lrr.shape
 
+    def test_auto_k_accepts_n_components(self, synthetic_lrr):
+        corrected, info = correct_lrr(
+            synthetic_lrr,
+            k=None,
+            n_components=3,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+        assert info["k"] >= 1
+        assert corrected.shape == synthetic_lrr.shape
+
+    def test_auto_k_invalid_n_components_raises(self, synthetic_lrr):
+        with pytest.raises(ValueError, match="n_components must be >= 1"):
+            correct_lrr(
+                synthetic_lrr,
+                k=None,
+                n_components=0,
+                max_lrr_sd=10.0,
+                min_sample_call_rate=0.0,
+                min_marker_call_rate=0.5,
+                min_var=0.0,
+            )
+
     def test_variance_reduced(self, synthetic_lrr):
         corrected, _ = correct_lrr(
             synthetic_lrr,

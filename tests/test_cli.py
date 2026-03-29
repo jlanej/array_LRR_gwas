@@ -39,6 +39,15 @@ class TestCli:
         ])
         assert args.variant_qc is None
 
+    def test_correct_n_components_arg_parsed(self):
+        args = _build_parser().parse_args([
+            "correct",
+            "in.bcf",
+            "-o", "out.bcf",
+            "--n-components", "12",
+        ])
+        assert args.n_components == 12
+
     def test_associate_variant_qc_arg_parsed(self):
         args = _build_parser().parse_args([
             "associate",
