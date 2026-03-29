@@ -24,7 +24,7 @@ import csv
 import logging
 import warnings
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -76,7 +76,7 @@ class VariantQCRecord:
 
 def read_collated_variant_qc(
     path: str | Path,
-) -> Dict[str, VariantQCRecord]:
+) -> dict[str, VariantQCRecord]:
     """Parse an upstream ``collated_variant_qc.tsv`` file.
 
     Parameters
@@ -100,7 +100,7 @@ def read_collated_variant_qc(
     if not path.exists():
         raise FileNotFoundError(f"Variant QC file not found: {path}")
 
-    records: Dict[str, VariantQCRecord] = {}
+    records: dict[str, VariantQCRecord] = {}
     duplicates: list[str] = []
 
     with open(path, newline="") as fh:
@@ -148,7 +148,7 @@ def read_collated_variant_qc(
 
 def variant_qc_mask(
     variant_ids: Sequence[str] | NDArray,
-    qc_data: Dict[str, VariantQCRecord] | None = None,
+    qc_data: dict[str, VariantQCRecord] | None = None,
     *,
     require_call_rate: bool = True,
     require_hwe: bool = True,
@@ -197,7 +197,7 @@ def variant_qc_mask(
     missing_ids: list[str] = []
 
     for i, vid in enumerate(ids):
-        rec = qc_data.get(vid)  # type: ignore[arg-type]
+        rec = qc_data.get(str(vid))
         if rec is None:
             missing_ids.append(vid)
             # Treat missing QC data as failing — conservative default.
