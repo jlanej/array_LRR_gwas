@@ -1,4 +1,4 @@
-"""Command-line interface for LRR batch-effect correction and LMM association.
+"""Command-line interface for LRR batch-effect correction, association, and segmentation.
 
 Usage
 -----
@@ -8,6 +8,7 @@ Usage
     array-lrr-gwas associate input.bcf --phenotype pheno.tsv -o results.tsv
     array-lrr-gwas associate input.bcf --phenotype pheno.tsv \\
         --sample-sheet compiled_sample_sheet.tsv -o results.tsv
+    array-lrr-gwas segment results.tsv -o regions.bed [--strategy hmm]
 """
 
 from __future__ import annotations
@@ -227,6 +228,102 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Enable verbose logging.",
     )
 
+    # ---- segment sub-command ----
+    seg = sub.add_parser(
+        "segment",
+        help="Segment association results into CNV-associated intervals.",
+    )
+    seg.add_argument(
+        "input",
+        type=Path,
+        help="Input TSV file from the associate sub-command.",
+    )
+    seg.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        required=True,
+        help="Output BED file for segmented intervals.",
+    )
+    seg.add_argument(
+        "--strategy",
+        type=str,
+        default="hmm",
+        choices=["hmm", "threshold"],
+        help=(
+            "Segmentation strategy (default: hmm).  'hmm' uses a two-state "
+            "Hidden Markov Model; 'threshold' uses p-value thresholding with "
+            "distance-based merging."
+        ),
+    )
+    seg.add_argument(
+        "--p-threshold",
+        type=float,
+        default=5e-8,
+        help=(
+            "(threshold strategy) Significance threshold for flagging "
+            "markers (default: 5e-8)."
+        ),
+    )
+    seg.add_argument(
+        "--max-gap",
+        type=int,
+        default=1_000_000,
+        help=(
+            "(threshold strategy) Maximum gap in bp between markers to "
+            "merge into one segment (default: 1000000)."
+        ),
+    )
+    seg.add_argument(
+        "--min-markers",
+        type=int,
+        default=1,
+        help="Minimum number of markers to keep a segment (default: 1).",
+    )
+    seg.add_argument(
+        "--null-rate",
+        type=float,
+        default=None,
+        help=(
+            "(HMM) Exponential rate for null-state emission on -log10(p) "
+            "(default: ln(10) ≈ 2.303)."
+        ),
+    )
+    seg.add_argument(
+        "--signal-rate",
+        type=float,
+        default=None,
+        help=(
+            "(HMM) Exponential rate for associated-state emission on "
+            "-log10(p).  Smaller values expect stronger signals "
+            "(default: 0.1)."
+        ),
+    )
+    seg.add_argument(
+        "--prior-assoc",
+        type=float,
+        default=None,
+        help=(
+            "(HMM) Prior probability a marker is in the associated "
+            "state (default: 0.001)."
+        ),
+    )
+    seg.add_argument(
+        "--transition-prob",
+        type=float,
+        default=None,
+        help=(
+            "(HMM) Per-marker state-transition probability "
+            "(default: 1e-4)."
+        ),
+    )
+    seg.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging.",
+    )
+
     return parser
 
 
@@ -249,6 +346,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "associate":
         return _run_associate(args)
+
+    if args.command == "segment":
+        return _run_segment(args)
 
     parser.print_help()
     return 1
@@ -554,6 +654,43 @@ def _run_associate(args: argparse.Namespace) -> int:
         writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
         writer.writeheader()
         writer.writerows(records)
+
+    logger.info("Done.")
+    return 0
+
+
+def _run_segment(args: argparse.Namespace) -> int:
+    """Execute the ``segment`` sub-command."""
+    from array_lrr_gwas.segmentation import read_association_tsv, segment_associations
+
+    if not args.input.exists():
+        logger.error("Input file not found: %s", args.input)
+        return 1
+
+    logger.info("Reading association results from %s", args.input)
+    records = read_association_tsv(args.input)
+    logger.info("Loaded %d marker records", len(records))
+
+    # Build keyword arguments, only passing HMM params that were explicitly set.
+    kwargs: dict[str, object] = dict(
+        strategy=args.strategy,
+        p_threshold=args.p_threshold,
+        max_gap=args.max_gap,
+        min_markers=args.min_markers,
+    )
+    if args.null_rate is not None:
+        kwargs["null_rate"] = args.null_rate
+    if args.signal_rate is not None:
+        kwargs["signal_rate"] = args.signal_rate
+    if args.prior_assoc is not None:
+        kwargs["prior_assoc"] = args.prior_assoc
+    if args.transition_prob is not None:
+        kwargs["transition_prob"] = args.transition_prob
+
+    result = segment_associations(records, **kwargs)
+
+    logger.info("Writing %d segments to %s", len(result.chrom), args.output)
+    result.write_bed(args.output)
 
     logger.info("Done.")
     return 0
