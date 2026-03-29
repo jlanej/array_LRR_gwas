@@ -663,8 +663,11 @@ def _run_associate(args: argparse.Namespace) -> int:
                     r2_thresh=args.ld_r2_thresh,
                     min_maf=args.min_maf,
                 )
+                # plink2 uses the VCF ID column; when ID is '.' it
+                # constructs chrom:pos:ref:alt.  Match on both forms.
                 ld_keep = np.array([
-                    v.get("id") in keep_ids or f"{v['chrom']}:{v['pos']}" in keep_ids
+                    v.get("id") in keep_ids
+                    or f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}" in keep_ids
                     for v in gt_variants
                 ], dtype=bool)
             else:

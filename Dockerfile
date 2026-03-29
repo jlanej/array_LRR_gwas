@@ -18,11 +18,11 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install plink2 (used by --ld-backend plink2 for fast LD pruning)
-RUN wget -qO /usr/local/bin/plink2 \
+RUN wget -qO /tmp/plink2.zip \
     "https://s3.amazonaws.com/plink2-assets/alpha6/plink2_linux_x86_64_20250109.zip" \
     && apt-get update && apt-get install -y --no-install-recommends unzip \
-    && cd /tmp && unzip /usr/local/bin/plink2 \
-    && mv /tmp/plink2 /usr/local/bin/plink2 \
+    && unzip /tmp/plink2.zip -d /tmp/plink2_dir \
+    && mv /tmp/plink2_dir/plink2 /usr/local/bin/plink2 \
     && chmod +x /usr/local/bin/plink2 \
     && apt-get purge -y unzip wget && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* /tmp/*
