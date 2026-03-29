@@ -11,6 +11,7 @@ from array_lrr_gwas.genotypes import read_genotypes
 from array_lrr_gwas.grm import compute_grm
 from array_lrr_gwas.sample_sheet import read_sample_sheet, align_samples
 from array_lrr_gwas.qc_config import load_config as load_qc_config
+from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
 __all__ = [
     "subset_markers",
@@ -30,4 +31,6 @@ __all__ = [
     "read_sample_sheet",
     "align_samples",
     "load_qc_config",
+    "read_collated_variant_qc",
+    "variant_qc_mask",
 ]
