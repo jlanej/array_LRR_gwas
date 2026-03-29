@@ -185,3 +185,12 @@ Records are emitted in the same order as the input `variants` list,
 preserving the physical coordinate ordering required by the
 segmentation HMM.  The TSV written by the CLI uses tab-delimited
 output with headers matching the field names above.
+
+When `--variant-qc` is provided, three additional boolean columns are
+appended for provenance tracking:
+
+| Field | Type | Description |
+|---|---|---|
+| `all_ancestries_call_rate_pass` | `bool` | Cross-ancestry call-rate QC flag |
+| `all_ancestries_hwe_pass` | `bool` | Cross-ancestry HWE QC flag |
+| `all_ancestries_maf_pass` | `bool` | Cross-ancestry MAF QC flag |

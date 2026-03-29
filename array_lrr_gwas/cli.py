@@ -907,7 +907,7 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     # Optionally load upstream variant QC flags for output provenance
     variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
-    qc_provenance: dict[str, "VariantQCRecord"] | None = None  # noqa: F821
+    qc_provenance = None
     if variant_qc_path is not None:
         from array_lrr_gwas.variant_qc import read_collated_variant_qc as _read_vqc
 

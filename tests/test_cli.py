@@ -708,7 +708,7 @@ class TestCli:
     def test_associate_logs_warning_when_no_variant_qc(
         self, tmp_path, monkeypatch, caplog
     ):
-        """When no --variant-qc is set, a warning is logged for GRM path."""
+        """When no --variant-qc is set, a warning is logged about missing upstream variant QC."""
         import logging
 
         from array_lrr_gwas import association
