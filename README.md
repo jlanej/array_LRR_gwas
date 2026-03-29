@@ -273,7 +273,7 @@ apptainer run --bind /data "${SIF}" segment \
 > **Note:** Use `--bind` to make host file systems visible inside the
 > container. Adjust paths to match your cluster's storage layout. For
 > multiple directories, use comma-separated paths (for example,
-> `--bind /data:/data,/scratch:/scratch`).
+> `--bind /data,/scratch`).
 
 ### Per-Chromosome Parallelisation
 
