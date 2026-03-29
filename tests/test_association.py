@@ -498,6 +498,62 @@ class TestRunAssociation:
 
         assert "unbalanced case fraction" not in caplog.text
 
+    @pytest.mark.parametrize("case_fraction", [0.10, 0.90])
+    def test_lmm_no_warning_at_binary_balance_boundaries(
+        self, caplog, case_fraction: float
+    ) -> None:
+        """Boundary fractions [0.10, 0.90] should not trigger warning."""
+        import logging
+
+        rng = np.random.default_rng(323)
+        n_markers, n_samples = 4, 100
+        lrr = rng.normal(size=(n_markers, n_samples))
+        n_cases = int(case_fraction * n_samples)
+        phenotype = np.zeros(n_samples, dtype=float)
+        phenotype[:n_cases] = 1.0
+        variants = _make_variants(n_markers)
+        grm = _make_grm(n_samples, rng)
+
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.association"):
+            run_association(lrr, phenotype, variants, method="lmm", grm=grm)
+
+        assert "unbalanced case fraction" not in caplog.text
+
+    def test_lmm_warns_for_all_cases_binary_trait(self, caplog) -> None:
+        """All-case binary phenotype should trigger unbalanced warning."""
+        import logging
+
+        rng = np.random.default_rng(324)
+        n_markers, n_samples = 4, 100
+        lrr = rng.normal(size=(n_markers, n_samples))
+        phenotype = np.ones(n_samples, dtype=float)
+        variants = _make_variants(n_markers)
+        grm = _make_grm(n_samples, rng)
+
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.association"):
+            run_association(lrr, phenotype, variants, method="lmm", grm=grm)
+
+        assert "unbalanced case fraction" in caplog.text
+
+    def test_lmm_case_fraction_ignores_nan_values(self, caplog) -> None:
+        """Case-fraction warning should be based only on non-missing phenotypes."""
+        import logging
+
+        rng = np.random.default_rng(325)
+        n_markers, n_samples = 4, 100
+        lrr = rng.normal(size=(n_markers, n_samples))
+        phenotype = np.zeros(n_samples, dtype=float)
+        phenotype[:8] = 1.0
+        phenotype[-10:] = np.nan
+        variants = _make_variants(n_markers)
+        grm = _make_grm(n_samples, rng)
+
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.association"):
+            run_association(lrr, phenotype, variants, method="lmm", grm=grm)
+
+        # Valid samples: 90; cases: 8; fraction: 0.089 < 0.10
+        assert "unbalanced case fraction" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Integration: real BCF data
