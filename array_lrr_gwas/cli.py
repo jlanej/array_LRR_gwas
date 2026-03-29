@@ -21,6 +21,14 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _variant_id(v: dict) -> str:
+    """Build a canonical variant ID string from a variant metadata dict."""
+    vid = v.get("id")
+    if vid is not None and vid != ".":
+        return vid
+    return f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="array-lrr-gwas",
@@ -502,12 +510,7 @@ def _run_correct(args: argparse.Namespace) -> int:
         variant_qc_path = Path(variant_qc_path)
         logger.info("Loading upstream variant QC from %s", variant_qc_path)
         qc_data = read_collated_variant_qc(variant_qc_path)
-        variant_ids = [
-            f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}"
-            if v.get("id") is None or v.get("id") == "."
-            else v.get("id")
-            for v in variants
-        ]
+        variant_ids = [_variant_id(v) for v in variants]
         upstream_qc_mask = variant_qc_mask(
             variant_ids, qc_data,
             require_call_rate=True, require_hwe=True, require_maf=False,
@@ -707,12 +710,7 @@ def _run_associate(args: argparse.Namespace) -> int:
                 "Loading upstream variant QC from %s for GRM", variant_qc_path,
             )
             qc_data = read_collated_variant_qc(variant_qc_path)
-            gt_variant_ids = [
-                v.get("id")
-                if v.get("id") is not None and v.get("id") != "."
-                else f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}"
-                for v in gt_variants
-            ]
+            gt_variant_ids = [_variant_id(v) for v in gt_variants]
             qc_keep = variant_qc_mask(
                 gt_variant_ids, qc_data,
                 require_call_rate=True, require_hwe=True, require_maf=True,
@@ -728,9 +726,11 @@ def _run_associate(args: argparse.Namespace) -> int:
 
             if dosage.shape[0] == 0:
                 logger.error(
-                    "No genotype variants remain after upstream QC mask. "
-                    "Check that variant IDs match between the genotype file "
-                    "and collated_variant_qc.tsv."
+                    "No genotype variants remain after upstream QC mask "
+                    "(%d before filtering, file: %s). Check that variant "
+                    "IDs match between the genotype file and "
+                    "collated_variant_qc.tsv.",
+                    n_before_qc, variant_qc_path,
                 )
                 return 1
 
