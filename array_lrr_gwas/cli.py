@@ -460,14 +460,6 @@ def _run_associate(args: argparse.Namespace) -> int:
             "GRM computed: %d × %d", grm.shape[0], grm.shape[1],
         )
 
-    if args.method == "logistic":
-        logger.warning(
-            "Logistic regression does not use the GRM for relatedness "
-            "correction.  Only fixed-effect covariates (e.g. PCs) are "
-            "applied.  Consider pre-filtering highly related individuals "
-            "or using --method lmm with a continuous phenotype proxy."
-        )
-
     # Run association
     logger.info("Running %s association scan", args.method)
     result = run_association(
