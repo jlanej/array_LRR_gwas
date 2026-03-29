@@ -463,6 +463,41 @@ class TestRunAssociation:
                 lrr, phenotype, _make_variants(3), method="logistic"
             )
 
+    def test_lmm_warns_for_unbalanced_binary_trait(self, caplog) -> None:
+        """LMM should warn for highly unbalanced binary phenotypes."""
+        import logging
+
+        rng = np.random.default_rng(321)
+        n_markers, n_samples = 4, 100
+        lrr = rng.normal(size=(n_markers, n_samples))
+        phenotype = np.zeros(n_samples, dtype=float)
+        phenotype[:5] = 1.0  # case fraction = 0.05
+        variants = _make_variants(n_markers)
+        grm = _make_grm(n_samples, rng)
+
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.association"):
+            run_association(lrr, phenotype, variants, method="lmm", grm=grm)
+
+        assert "unbalanced case fraction" in caplog.text
+        assert "(MAF * number_of_cases) > 100" in caplog.text
+
+    def test_lmm_no_warning_for_balanced_binary_trait(self, caplog) -> None:
+        """Balanced binary phenotypes should not trigger LMM warning."""
+        import logging
+
+        rng = np.random.default_rng(322)
+        n_markers, n_samples = 4, 100
+        lrr = rng.normal(size=(n_markers, n_samples))
+        phenotype = np.zeros(n_samples, dtype=float)
+        phenotype[:50] = 1.0  # case fraction = 0.5
+        variants = _make_variants(n_markers)
+        grm = _make_grm(n_samples, rng)
+
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.association"):
+            run_association(lrr, phenotype, variants, method="lmm", grm=grm)
+
+        assert "unbalanced case fraction" not in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Integration: real BCF data

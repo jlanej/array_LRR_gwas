@@ -27,6 +27,10 @@ _MAX_ETA: float = 20.0
 # Keeps peak memory bounded for biobank-scale LRR matrices.
 _LMM_CHUNK_SIZE: int = 10_000
 
+# LMM heuristic for binary phenotypes treated as continuous.
+_LMM_BINARY_CASE_FRAC_WARN_MIN: float = 0.10
+_LMM_BINARY_CASE_FRAC_WARN_MAX: float = 0.90
+
 # ---------------------------------------------------------------------------
 # Result container
 # ---------------------------------------------------------------------------
@@ -640,6 +644,26 @@ def run_association(
                 f"GRM must have shape ({n_samples}, {n_samples}), "
                 f"got {grm.shape}"
             )
+        y_valid = phenotype[~np.isnan(phenotype)]
+        unique = np.unique(y_valid)
+        if unique.size > 0 and np.all(np.isin(unique, np.array([0.0, 1.0]))):
+            case_fraction = float(np.mean(y_valid))
+            if (
+                case_fraction < _LMM_BINARY_CASE_FRAC_WARN_MIN
+                or case_fraction > _LMM_BINARY_CASE_FRAC_WARN_MAX
+            ):
+                n_cases = int(round(case_fraction * y_valid.size))
+                logger.warning(
+                    "LMM selected with a binary phenotype and an unbalanced "
+                    "case fraction (%.3f; %d cases / %d samples). Treating "
+                    "a highly unbalanced binary trait as continuous can "
+                    "inflate Type I error, especially for lower-frequency "
+                    "variants. Consider (a) pre-filtering related "
+                    "individuals and using --method logistic, or (b) "
+                    "focusing interpretation on variants where "
+                    "(MAF * number_of_cases) > 100.",
+                    case_fraction, n_cases, y_valid.size,
+                )
         beta, se, stat, pval, ns = _lmm_scan(
             lrr, phenotype, grm, covariates,
         )

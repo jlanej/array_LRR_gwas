@@ -118,6 +118,16 @@ Both the API (`run_association`, when a GRM is provided) and the CLI
 emit warnings that logistic regression does not apply the GRM random
 effect.
 
+When users intentionally run `--method lmm` with a binary phenotype
+(0/1) as a continuous-trait approximation, the engine applies a safety
+heuristic based on case fraction. If `#cases / #valid_samples` falls
+outside `[0.10, 0.90]`, it emits a strong warning that continuous LMM
+on a highly unbalanced binary trait can inflate Type I error,
+particularly for lower-frequency variants. In that setting, users
+should either pre-filter related individuals and use logistic
+regression, or focus interpretation on variants satisfying
+`(MAF × #cases) > 100`.
+
 ## Output Contract for Downstream Segmentation
 
 `AssociationResult.to_records()` returns one dict per variant with a
