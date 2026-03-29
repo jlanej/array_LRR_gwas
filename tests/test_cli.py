@@ -196,7 +196,7 @@ class TestCli:
         assert out.exists()
         assert "does not use the GRM random effect" in caplog.text
 
-    def test_segment_help_flag(self, capsys):
+    def test_segment_help_flag(self):
         with pytest.raises(SystemExit) as exc:
             main(["segment", "--help"])
         assert exc.value.code == 0

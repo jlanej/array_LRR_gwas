@@ -180,7 +180,7 @@ class TestThresholdSegment:
         recs = _make_records(10, step=100, p_value=0.5)
         _inject_signal(recs, [1, 2])
         _inject_signal(recs, [5, 6])
-        # Gap between pos=1200 and pos=1500 is 300 bp < max_gap.
+        # Gap between marker 2 (pos 1200) and marker 5 (pos 1500) is 300 bp.
         segs = _threshold_segment(recs, 5e-8, 1_000_000)
         assert len(segs) == 1
 

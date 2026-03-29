@@ -369,14 +369,12 @@ def _threshold_segment(
             prev = merged[-1]
             # Merge: expand interval, combine stats.
             prev.end = seg.end
+            old_n = prev.n_markers
             prev.n_markers += seg.n_markers
             prev.min_p = min(prev.min_p, seg.min_p)
-            combined_n = prev.n_markers  # already updated
-            # Weighted mean beta.
-            old_n = combined_n - seg.n_markers
             prev.mean_beta = (
                 (prev.mean_beta * old_n + seg.mean_beta * seg.n_markers)
-                / combined_n
+                / prev.n_markers
             )
             prev.max_abs_stat = max(prev.max_abs_stat, seg.max_abs_stat)
         else:
