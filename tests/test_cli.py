@@ -77,6 +77,16 @@ class TestCli:
         ])
         assert args.config == Path("/data/qc.yaml")
 
+    def test_associate_hq_samples_arg_parsed(self):
+        args = _build_parser().parse_args([
+            "associate",
+            "in.bcf",
+            "--phenotype", "pheno.tsv",
+            "-o", "out.tsv",
+            "--hq-samples", "/data/hq_samples.txt",
+        ])
+        assert args.hq_samples == Path("/data/hq_samples.txt")
+
     def test_no_args_returns_1(self):
         assert main([]) == 1
 
@@ -790,6 +800,151 @@ class TestCli:
 
         assert rc == 0
         assert "No upstream variant QC file provided" in caplog.text
+
+    def test_associate_hq_intersection_and_binary_reporting(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """--hq-samples keeps only valid phenotype ∩ HQ and logs binary summary."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t1\n"
+            "S2\t0\n"
+            "S3\tmissing\n"
+            "S4\t1\n"
+        )
+        hq = tmp_path / "hq_samples.tsv"
+        hq.write_text("sample_id\nS1\nS3\n")
+
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3, 0.4], [0.0, 0.1, 0.2, 0.3]], dtype=float)
+        samples = ["S1", "S2", "S3", "S4"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 1, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 1, "method": "ols"},
+                ]
+
+        def _fake_run_association(lrr_sub, phenotype, variants, **_kwargs):
+            assert lrr_sub.shape == (2, 1)
+            assert phenotype.shape == (1,)
+            assert float(phenotype[0]) == 1.0
+            return _FakeResult()
+
+        monkeypatch.setattr(association, "run_association", _fake_run_association)
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--hq-samples", str(hq),
+                "--method", "ols",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert out.exists()
+        assert "Association HQ intersection" in caplog.text
+        assert "dropped_lq_with_valid_pheno=2" in caplog.text
+        assert "Phenotype summary (binary analyzed)" in caplog.text
+
+    def test_associate_hq_intersection_and_quantitative_reporting(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Quantitative phenotype logs pre/post summaries with HQ filtering."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t1\n"
+            "S2\t2\n"
+            "S3\t3\n"
+            "S4\t4\n"
+        )
+        hq = tmp_path / "hq_samples.tsv"
+        hq.write_text("S1\nS2\n")
+
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3, 0.4], [0.0, 0.1, 0.2, 0.3]], dtype=float)
+        samples = ["S1", "S2", "S3", "S4"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                ]
+
+        def _fake_run_association(lrr_sub, phenotype, variants, **_kwargs):
+            assert lrr_sub.shape == (2, 2)
+            assert phenotype.shape == (2,)
+            assert np.array_equal(phenotype, np.array([1.0, 2.0]))
+            return _FakeResult()
+
+        monkeypatch.setattr(association, "run_association", _fake_run_association)
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--hq-samples", str(hq),
+                "--method", "ols",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert out.exists()
+        assert "Phenotype summary (quantitative pre-filter)" in caplog.text
+        assert "n=4, mean=2.5" in caplog.text
+        assert "Phenotype summary (quantitative analyzed)" in caplog.text
+        assert "n=2, mean=1.5" in caplog.text
 
     def test_associate_logs_ld_prune_disabled(
         self, tmp_path, monkeypatch, caplog

@@ -222,6 +222,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     assoc.add_argument(
+        "--hq-samples",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to HQ sample list (one sample ID per line, or "
+            "tab-separated with sample ID in column 1). When provided, "
+            "association uses only the intersection of non-missing phenotype "
+            "samples and this HQ list (LQ samples are dropped)."
+        ),
+    )
+    assoc.add_argument(
         "--n-pcs",
         type=int,
         default=20,
@@ -634,8 +645,37 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     # Read phenotype TSV
     logger.info("Reading phenotype from %s", pheno_path)
+
+    def _parse_float(raw: str | None) -> float:
+        if raw is None:
+            return np.nan
+        txt = raw.strip()
+        if txt == "" or txt.lower() in {"na", "nan", "null", "none", "missing", "."}:
+            return np.nan
+        try:
+            return float(txt)
+        except (TypeError, ValueError):
+            return np.nan
+
+    def _fmt_pct(numer: int, denom: int) -> str:
+        if denom == 0:
+            return "NA"
+        return f"{(100.0 * numer / denom):.2f}%"
+
+    def _is_binary_phenotype(vals: np.ndarray) -> bool:
+        finite = vals[~np.isnan(vals)]
+        if finite.size == 0:
+            return False
+        uniq = np.unique(finite)
+        return bool(np.all(np.isin(uniq, [0.0, 1.0])))
+
+    def _mad(vals: np.ndarray) -> float:
+        med = float(np.median(vals))
+        return float(np.median(np.abs(vals - med)))
+
     sample_to_idx = {s: i for i, s in enumerate(samples)}
     pheno_vals = np.full(len(samples), np.nan)
+    pheno_seen = np.zeros(len(samples), dtype=bool)
     pheno_cov_names: list[str] = []
     pheno_cov_vals: list[list[float]] = [[] for _ in samples]
 
@@ -652,16 +692,106 @@ def _run_associate(args: argparse.Namespace) -> int:
             if sid not in sample_to_idx:
                 continue
             idx = sample_to_idx[sid]
-            pheno_vals[idx] = float(row["phenotype"])
+            pheno_seen[idx] = True
+            pheno_vals[idx] = _parse_float(row["phenotype"])
             for cn in pheno_cov_names:
-                pheno_cov_vals[idx].append(float(row[cn]))
+                pheno_cov_vals[idx].append(_parse_float(row[cn]))
 
     valid_mask = ~np.isnan(pheno_vals)
-    n_valid = int(valid_mask.sum())
-    if n_valid == 0:
+    n_samples_total = len(samples)
+    n_pheno_matched = int(pheno_seen.sum())
+    n_valid_pre = int(valid_mask.sum())
+    n_missing_pre = n_pheno_matched - n_valid_pre
+    if n_valid_pre == 0:
         logger.error("No valid phenotype values matched to samples")
         return 1
-    logger.info("%d samples with valid phenotype", n_valid)
+
+    analyzed_mask = valid_mask.copy()
+    n_hq_in_lrr = None
+    n_dropped_lq = 0
+    if args.hq_samples is not None:
+        if not args.hq_samples.exists():
+            logger.error("HQ sample list not found: %s", args.hq_samples)
+            return 1
+        hq_samples: set[str] = set()
+        with open(args.hq_samples, newline="") as fh:
+            reader = csv.reader(fh, delimiter="\t")
+            for row in reader:
+                if not row:
+                    continue
+                sid = row[0].strip()
+                if not sid:
+                    continue
+                if sid.lower() in {"sample_id", "sample", "sampleid"}:
+                    continue
+                hq_samples.add(sid)
+        hq_mask = np.array([s in hq_samples for s in samples], dtype=bool)
+        n_hq_in_lrr = int(hq_mask.sum())
+        n_dropped_lq = int((valid_mask & ~hq_mask).sum())
+        analyzed_mask = valid_mask & hq_mask
+
+    n_analyzed = int(analyzed_mask.sum())
+    if n_analyzed == 0:
+        logger.error("No analyzable samples remain after filtering")
+        return 1
+
+    logger.info(
+        "Association sample breakdown: total_lrr=%d, phenotype_matched=%d, "
+        "phenotype_valid=%d, phenotype_missing=%d",
+        n_samples_total, n_pheno_matched, n_valid_pre, n_missing_pre,
+    )
+    if n_hq_in_lrr is not None:
+        logger.info(
+            "Association HQ intersection: hq_in_lrr=%d, "
+            "valid_pheno_and_hq=%d, dropped_lq_with_valid_pheno=%d",
+            n_hq_in_lrr, n_analyzed, n_dropped_lq,
+        )
+    else:
+        logger.info("Association analyzed samples: %d", n_analyzed)
+
+    pre_vals = pheno_vals[valid_mask]
+    analyzed_vals = pheno_vals[analyzed_mask]
+    if _is_binary_phenotype(pre_vals):
+        pre_cases = int(np.sum(pre_vals == 1.0))
+        pre_controls = int(np.sum(pre_vals == 0.0))
+        post_cases = int(np.sum(analyzed_vals == 1.0))
+        post_controls = int(np.sum(analyzed_vals == 0.0))
+        logger.info(
+            "Phenotype summary (binary pre-filter): cases=%d (%s of valid, %s of total), "
+            "controls=%d (%s of valid, %s of total), missing=%d (%s of matched)",
+            pre_cases, _fmt_pct(pre_cases, n_valid_pre), _fmt_pct(pre_cases, n_samples_total),
+            pre_controls, _fmt_pct(pre_controls, n_valid_pre), _fmt_pct(pre_controls, n_samples_total),
+            n_missing_pre, _fmt_pct(n_missing_pre, n_pheno_matched),
+        )
+        logger.info(
+            "Phenotype summary (binary analyzed): cases=%d (%s of analyzed, %s of total), "
+            "controls=%d (%s of analyzed, %s of total)",
+            post_cases, _fmt_pct(post_cases, n_analyzed), _fmt_pct(post_cases, n_samples_total),
+            post_controls, _fmt_pct(post_controls, n_analyzed), _fmt_pct(post_controls, n_samples_total),
+        )
+    else:
+        logger.info(
+            "Phenotype summary (quantitative pre-filter): n=%d, mean=%.6g, median=%.6g, "
+            "sd=%.6g, mad=%.6g, min=%.6g, max=%.6g",
+            n_valid_pre,
+            float(np.mean(pre_vals)),
+            float(np.median(pre_vals)),
+            float(np.std(pre_vals)),
+            _mad(pre_vals),
+            float(np.min(pre_vals)),
+            float(np.max(pre_vals)),
+        )
+        logger.info(
+            "Phenotype summary (quantitative analyzed): n=%d, mean=%.6g, median=%.6g, "
+            "sd=%.6g, mad=%.6g, min=%.6g, max=%.6g",
+            n_analyzed,
+            float(np.mean(analyzed_vals)),
+            float(np.median(analyzed_vals)),
+            float(np.std(analyzed_vals)),
+            _mad(analyzed_vals),
+            float(np.min(analyzed_vals)),
+            float(np.max(analyzed_vals)),
+        )
 
     # Build covariate matrix
     cov_parts: list[np.ndarray] = []
@@ -669,7 +799,7 @@ def _run_associate(args: argparse.Namespace) -> int:
     # Covariates from phenotype file
     if pheno_cov_names:
         pheno_covs = np.array(
-            [pheno_cov_vals[i] for i in range(len(samples)) if valid_mask[i]]
+            [pheno_cov_vals[i] for i in range(len(samples)) if analyzed_mask[i]]
         )
         cov_parts.append(pheno_covs)
         logger.info(
@@ -696,7 +826,7 @@ def _run_associate(args: argparse.Namespace) -> int:
 
         # Align to BCF samples and subset to valid
         aligned = align_samples(samples, sheet_ids, sheet_covs)
-        aligned_valid = aligned[valid_mask]
+        aligned_valid = aligned[analyzed_mask]
 
         # Drop columns that are all NaN
         col_valid = ~np.all(np.isnan(aligned_valid), axis=0)
@@ -720,8 +850,8 @@ def _run_associate(args: argparse.Namespace) -> int:
         covariates = np.column_stack(cov_parts)
 
     # Subset to samples with phenotype
-    phenotype = pheno_vals[valid_mask]
-    lrr_sub = lrr[:, valid_mask]
+    phenotype = pheno_vals[analyzed_mask]
+    lrr_sub = lrr[:, analyzed_mask]
 
     # GRM for LMM
     grm = None
@@ -882,7 +1012,7 @@ def _run_associate(args: argparse.Namespace) -> int:
 
         # Align GT samples to LRR samples
         gt_idx = {s: i for i, s in enumerate(gt_samples)}
-        valid_samples = [samples[i] for i in range(len(samples)) if valid_mask[i]]
+        valid_samples = [samples[i] for i in range(len(samples)) if analyzed_mask[i]]
         gt_order = []
         for s in valid_samples:
             if s in gt_idx:
