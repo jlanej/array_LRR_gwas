@@ -179,6 +179,27 @@ array-lrr-gwas correct input.bcf -o corrected.bcf --build GRCh38 -v
 array-lrr-gwas associate corrected.bcf \
     --phenotype pheno.tsv \
     --sample-sheet compiled_sample_sheet.tsv \
+    --genotype-bcf genotypes.bcf \
+    --method lmm \
+    -o results.tsv -v
+
+# Step 3 — Segment into CNV regions
+array-lrr-gwas segment results.tsv -o regions.bed -v
+```
+
+**Best-practice workflow with upstream QC filtering:**
+
+```bash
+# Step 1 — Remove batch effects with upstream variant QC
+array-lrr-gwas correct input.bcf -o corrected.bcf --build GRCh38 \
+    --variant-qc collated_variant_qc.tsv -v
+
+# Step 2 — Run LMM association with QC-filtered GRM
+array-lrr-gwas associate corrected.bcf \
+    --phenotype pheno.tsv \
+    --sample-sheet compiled_sample_sheet.tsv \
+    --genotype-bcf genotypes.bcf \
+    --variant-qc collated_variant_qc.tsv \
     --method lmm \
     -o results.tsv -v
 
@@ -214,6 +235,7 @@ apptainer pull /path/to/containers/array_lrr_gwas.sif \
 SIF=/path/to/containers/array_lrr_gwas.sif
 
 INPUT_BCF=/data/project/genotypes.bcf
+VARIANT_QC=/data/project/collated_variant_qc.tsv
 PHENO=/data/project/phenotype.tsv
 SAMPLE_SHEET=/data/project/compiled_sample_sheet.tsv
 GT_BCF=/data/project/genotypes.bcf
@@ -225,14 +247,17 @@ apptainer run --bind /data "${SIF}" correct \
     "${INPUT_BCF}" \
     -o "${OUTDIR}/corrected.bcf" \
     --build GRCh38 \
+    --variant-qc "${VARIANT_QC}" \
     -v
 
 # Step 2: Association (LMM with GRM and 20 ancestry PCs)
+# LD pruning is enabled by default for GRM computation.
 apptainer run --bind /data "${SIF}" associate \
     "${OUTDIR}/corrected.bcf" \
     --phenotype "${PHENO}" \
     --sample-sheet "${SAMPLE_SHEET}" \
     --genotype-bcf "${GT_BCF}" \
+    --variant-qc "${VARIANT_QC}" \
     --method lmm \
     --n-pcs 20 \
     -o "${OUTDIR}/association_results.tsv" \
@@ -246,7 +271,9 @@ apptainer run --bind /data "${SIF}" segment \
 ```
 
 > **Note:** Use `--bind` to make host file systems visible inside the
-> container.  Adjust paths to match your cluster's storage layout.
+> container. Adjust paths to match your cluster's storage layout. For
+> multiple directories, use comma-separated paths (for example,
+> `--bind /data:/data,/scratch:/scratch`).
 
 ### Per-Chromosome Parallelisation
 
@@ -280,6 +307,7 @@ array-lrr-gwas correct INPUT -o OUTPUT [OPTIONS]
 | `--min-var` | float | `0.001` | Min LRR variance for markers |
 | `--max-var` | float | `None` | Max LRR variance for markers |
 | `--backend` | str | `rsvd` | SVD backend: `rsvd` (scikit-learn) or `fbpca` |
+| `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; markers failing cross-ancestry call rate or HWE are excluded before decomposition |
 | `--config` | path | `None` | YAML QC config file (see [QC Configuration](#qc-configuration)) |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
 
@@ -300,8 +328,14 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--sample-sheet` | path | `None` | `compiled_sample_sheet.tsv` for ancestry PCs |
 | `--n-pcs` | int | `20` | Number of PCs to include as covariates |
 | `--genotype-bcf` | path | `INPUT` | BCF/VCF for GRM computation (if different from input) |
+| `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; variants failing call rate/HWE/MAF are excluded before GRM |
 | `--min-maf` | float | `0.01` | Min MAF for genotypes used in GRM |
 | `--min-gt-call-rate` | float | `0.90` | Min call rate for genotypes used in GRM |
+| `--no-ld-prune` | flag | `False` | Disable LD pruning of GRM markers |
+| `--ld-window-bp` | int | `1000000` | LD-pruning window size in base pairs |
+| `--ld-r2-thresh` | float | `0.2` | r² threshold for LD pruning |
+| `--ld-backend` | str | `plink2` | LD-pruning backend: `plink2` (default, fast) or `numpy` (fallback) |
+| `--config` | path | `None` | YAML config file used to read `upstream_qc.variant_qc_path` when `--variant-qc` is not provided |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
 
 ### `segment`
@@ -330,9 +364,11 @@ array-lrr-gwas segment INPUT -o OUTPUT [OPTIONS]
 
 ## QC Configuration
 
-All sample and marker QC thresholds can be set via a YAML configuration file
-passed with `--config` to the `correct` sub-command.  CLI flags take precedence
-over YAML values, which take precedence over built-in defaults.
+Sample and marker QC thresholds can be set via a YAML configuration file
+passed with `--config` to `correct`. The same config can be passed to
+`associate` to provide `upstream_qc.variant_qc_path` for GRM marker filtering.
+CLI flags take precedence over YAML values, which take precedence over
+built-in defaults.
 
 ### Default Configuration
 
@@ -350,6 +386,9 @@ correction:
   k: null                      # Auto via Marchenko-Pastur
   backend: rsvd                # scikit-learn randomised SVD
   no_complexity_filter: false   # Apply centromere/segdup exclusion
+
+upstream_qc:
+  variant_qc_path: null        # Optional path to collated_variant_qc.tsv
 ```
 
 ### Stricter Thresholds Example
@@ -556,6 +595,12 @@ random effect, following the FaST-LMM / EMMA approach:
 
 The GRM is computed using the Yang et al. (2011) standardised estimator from
 genotype dosages (FORMAT/GT), with markers filtered at MAF ≥ 0.01.
+
+Before GRM computation, markers are LD-pruned by default (r² threshold 0.2
+within a 1 Mb window) so that highly linked regions do not dominate the GRM
+eigenstructure. Use `--no-ld-prune` to disable pruning, or tune
+`--ld-r2-thresh` / `--ld-window-bp`. The default backend is `plink2`, with
+automatic fallback to `numpy` if `plink2` is unavailable.
 
 For scalability, the LRR × eigenvector rotation is processed in chunks of
 10,000 markers to bound peak memory.
