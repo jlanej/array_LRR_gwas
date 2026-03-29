@@ -566,6 +566,295 @@ class TestCli:
         assert rc == 0
         assert out.exists()
 
+    def test_associate_qc_provenance_columns_in_output(self, tmp_path, monkeypatch):
+        """When --variant-qc is set, output TSV includes QC provenance columns."""
+        import csv
+
+        from array_lrr_gwas import association
+
+        # QC TSV with flags for the LRR variant IDs
+        qc_tsv = tmp_path / "collated_variant_qc.tsv"
+        qc_tsv.write_text(
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass\n"
+            "a1\tTrue\tTrue\tFalse\n"
+            "a2\tFalse\tTrue\tTrue\n"
+        )
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "ols"},
+                ]
+
+        monkeypatch.setattr(
+            association, "run_association",
+            lambda *_a, **_k: _FakeResult(),
+        )
+
+        rc = main([
+            "associate",
+            str(fake_bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "--variant-qc", str(qc_tsv),
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+
+        with open(out, newline="") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+
+        # Check QC columns are present
+        assert "all_ancestries_call_rate_pass" in reader.fieldnames
+        assert "all_ancestries_hwe_pass" in reader.fieldnames
+        assert "all_ancestries_maf_pass" in reader.fieldnames
+
+        # Check values for a1
+        assert rows[0]["all_ancestries_call_rate_pass"] == "True"
+        assert rows[0]["all_ancestries_hwe_pass"] == "True"
+        assert rows[0]["all_ancestries_maf_pass"] == "False"
+
+        # Check values for a2
+        assert rows[1]["all_ancestries_call_rate_pass"] == "False"
+        assert rows[1]["all_ancestries_hwe_pass"] == "True"
+        assert rows[1]["all_ancestries_maf_pass"] == "True"
+
+    def test_associate_no_qc_provenance_without_variant_qc(self, tmp_path, monkeypatch):
+        """Without --variant-qc, output TSV should NOT include QC columns."""
+        import csv
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "ols"},
+                ]
+
+        monkeypatch.setattr(
+            association, "run_association",
+            lambda *_a, **_k: _FakeResult(),
+        )
+
+        rc = main([
+            "associate",
+            str(fake_bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+
+        with open(out, newline="") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            list(reader)
+
+        assert "all_ancestries_call_rate_pass" not in reader.fieldnames
+
+    def test_associate_logs_warning_when_no_variant_qc(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """When no --variant-qc is set, a warning is logged about missing upstream variant QC."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        dosage = np.array(
+            [[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]], dtype=float,
+        )
+        gt_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 120, "id": "v3", "ref": "A", "alts": ("T",)},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.genotypes.read_genotypes",
+            lambda *_a, **_k: (dosage.copy(), samples, list(gt_variants)),
+        )
+        monkeypatch.setattr(
+            "array_lrr_gwas.ld_prune.ld_prune",
+            lambda d, **_k: np.ones(d.shape[0], dtype=bool),
+        )
+        monkeypatch.setattr(
+            "array_lrr_gwas.grm.compute_grm",
+            lambda d, **_k: np.eye(d.shape[1], dtype=float),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "lmm"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "lmm"},
+                ]
+
+        monkeypatch.setattr(
+            association, "run_association",
+            lambda *_a, **_k: _FakeResult(),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--method", "lmm",
+                "--ld-backend", "numpy",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert "No upstream variant QC file provided" in caplog.text
+
+    def test_associate_logs_ld_prune_disabled(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """When --no-ld-prune is set, a log message is emitted."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        dosage = np.array(
+            [[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]], dtype=float,
+        )
+        gt_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 120, "id": "v3", "ref": "A", "alts": ("T",)},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.genotypes.read_genotypes",
+            lambda *_a, **_k: (dosage.copy(), samples, list(gt_variants)),
+        )
+        monkeypatch.setattr(
+            "array_lrr_gwas.grm.compute_grm",
+            lambda d, **_k: np.eye(d.shape[1], dtype=float),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "lmm"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "lmm"},
+                ]
+
+        monkeypatch.setattr(
+            association, "run_association",
+            lambda *_a, **_k: _FakeResult(),
+        )
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--method", "lmm",
+                "--no-ld-prune",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert "LD pruning disabled" in caplog.text
+
     def test_segment_help_flag(self):
         with pytest.raises(SystemExit) as exc:
             main(["segment", "--help"])

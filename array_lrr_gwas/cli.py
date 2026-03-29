@@ -160,8 +160,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "Path to collated_variant_qc.tsv from upstream pipeline. "
             "When provided, markers failing cross-ancestry call rate or "
             "HWE are excluded from the RSVD decomposition (MAF is not "
-            "required for batch correction). Also configurable via "
-            "upstream_qc.variant_qc_path in the YAML config."
+            "required for batch correction). Sequence: load TSV → build "
+            "QC mask (call rate + HWE) → apply to marker subsetting. "
+            "Also configurable via upstream_qc.variant_qc_path in the "
+            "YAML config. If neither is set, no upstream filtering is "
+            "applied and a warning is logged."
         ),
     )
 
@@ -248,8 +251,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "Disable LD pruning of GRM markers.  By default, markers "
-            "are LD-pruned so that highly linked regions do not "
-            "disproportionately dominate the GRM eigenstructure."
+            "are LD-pruned (after any --variant-qc filtering) so that "
+            "highly linked regions do not disproportionately dominate "
+            "the GRM eigenstructure.  When --variant-qc is also set, "
+            "the QC mask is still applied even if LD pruning is disabled."
         ),
     )
     assoc.add_argument(
@@ -290,7 +295,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "Path to collated_variant_qc.tsv from upstream pipeline. "
             "When provided, genotype markers failing cross-ancestry "
             "call rate, HWE, or MAF are excluded before LD pruning "
-            "for GRM computation."
+            "for GRM computation. Sequence: load TSV → QC mask "
+            "(call rate + HWE + MAF) → LD prune (unless --no-ld-prune) "
+            "→ GRM. Also configurable via upstream_qc.variant_qc_path "
+            "in the YAML config. If neither is set, no upstream "
+            "filtering is applied and a warning is logged. When present, "
+            "per-marker QC flags are propagated to the output TSV for "
+            "provenance tracking."
         ),
     )
     assoc.add_argument(
@@ -298,8 +309,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "YAML configuration file. For association, this is currently used "
-            "to read upstream_qc.variant_qc_path when --variant-qc is not set."
+            "YAML configuration file. For association, this is used "
+            "to read upstream_qc.variant_qc_path when --variant-qc is "
+            "not set.  See docs/upstream_qc_formats.md for the full "
+            "configuration schema and examples."
         ),
     )
     assoc.add_argument(
@@ -531,6 +544,13 @@ def _run_correct(args: argparse.Namespace) -> int:
             "(call rate + HWE; MAF not required)",
             n_pass, len(upstream_qc_mask),
         )
+    else:
+        logger.warning(
+            "No upstream variant QC file provided (--variant-qc or "
+            "upstream_qc.variant_qc_path).  Skipping ancestry-informed "
+            "marker filtering for RSVD.  Provide collated_variant_qc.tsv "
+            "for best-practice QC."
+        )
 
     # Run correction
     logger.info(
@@ -751,6 +771,13 @@ def _run_associate(args: argparse.Namespace) -> int:
                     n_before_qc, variant_qc_path,
                 )
                 return 1
+        else:
+            logger.warning(
+                "No upstream variant QC file provided (--variant-qc or "
+                "upstream_qc.variant_qc_path).  Skipping ancestry-informed "
+                "marker filtering for GRM.  Provide collated_variant_qc.tsv "
+                "for best-practice QC."
+            )
 
         # LD prune GRM markers
         if not args.no_ld_prune:
@@ -829,6 +856,12 @@ def _run_associate(args: argparse.Namespace) -> int:
                     "relaxing --ld-r2-thresh or using --no-ld-prune."
                 )
                 return 1
+        else:
+            logger.info(
+                "LD pruning disabled (--no-ld-prune).  All %d GRM markers "
+                "retained without LD filtering.",
+                dosage.shape[0],
+            )
 
         logger.info(
             "Using %d genotype variants from %d samples for GRM",
@@ -872,9 +905,47 @@ def _run_associate(args: argparse.Namespace) -> int:
     )
     logger.info("Association complete for %d variants", len(result.chrom))
 
+    # Optionally load upstream variant QC flags for output provenance
+    variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
+    qc_provenance = None
+    if variant_qc_path is not None:
+        from array_lrr_gwas.variant_qc import read_collated_variant_qc as _read_vqc
+
+        try:
+            qc_provenance = _read_vqc(variant_qc_path)
+            logger.info(
+                "Propagating upstream QC flags to output TSV "
+                "(%d QC records loaded)",
+                len(qc_provenance),
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            logger.warning(
+                "Could not load variant QC for output provenance: %s", exc,
+            )
+
     # Write output
     logger.info("Writing results to %s", args.output)
     records = result.to_records()
+
+    # Append QC provenance columns when upstream data is available
+    _QC_COLS = (
+        "all_ancestries_call_rate_pass",
+        "all_ancestries_hwe_pass",
+        "all_ancestries_maf_pass",
+    )
+    if qc_provenance is not None:
+        lrr_variant_ids = [_variant_id(v) for v in variants]
+        for rec, vid in zip(records, lrr_variant_ids):
+            qc_rec = qc_provenance.get(vid)
+            if qc_rec is not None:
+                rec["all_ancestries_call_rate_pass"] = qc_rec.call_rate_pass
+                rec["all_ancestries_hwe_pass"] = qc_rec.hwe_pass
+                rec["all_ancestries_maf_pass"] = qc_rec.maf_pass
+            else:
+                rec["all_ancestries_call_rate_pass"] = ""
+                rec["all_ancestries_hwe_pass"] = ""
+                rec["all_ancestries_maf_pass"] = ""
+
     header = list(records[0].keys()) if records else []
     with open(args.output, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
