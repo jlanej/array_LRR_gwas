@@ -17,6 +17,16 @@ where *Z* is the *n × M* matrix of standardised genotypes:
     z_{ij} = \\frac{x_{ij} - 2 p_j}{\\sqrt{2 p_j (1 - p_j)}}
 
 Missing genotypes are mean-imputed *before* standardisation.
+
+.. note::
+
+   For best-practice GRM estimation, the input dosage matrix should be
+   **LD-pruned** prior to calling :func:`compute_grm`.  Highly linked
+   regions can otherwise disproportionately dominate the GRM
+   eigenstructure.  See :mod:`array_lrr_gwas.ld_prune` for a
+   sliding-window r²-based pruning implementation, and the CLI
+   ``--no-ld-prune`` / ``--ld-r2-thresh`` flags on the ``associate``
+   sub-command.
 """
 
 from __future__ import annotations

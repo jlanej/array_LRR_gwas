@@ -94,6 +94,40 @@ alternatives when no GRM is provided.
   failures are silently skipped (NaN beta / p = 1).  The per-marker
   Python loop is a known bottleneck for very large marker counts.
 
+## GRM Marker Selection and LD Pruning
+
+The GRM aims to model neutral background relatedness between samples.
+Markers used for GRM construction are filtered by MAF (default ≥ 0.01)
+and genotype call rate (default ≥ 0.90), then **LD-pruned** so that
+highly linked genomic regions do not disproportionately dominate the
+GRM eigenstructure.
+
+LD pruning uses a greedy forward algorithm: for each retained variant
+in genomic order, any subsequent variant within a sliding window
+(default 1 Mb) whose r² exceeds the threshold (default 0.2) is removed.
+This mirrors the logic of PLINK's `--indep-pairwise` and follows the
+standard practice recommended by Yang *et al.* (2011, GCTA) and Privé
+*et al.* (2020, *Bioinformatics*).
+
+Two backends are available:
+
+| Backend  | When to use                              |
+|----------|------------------------------------------|
+| `numpy`  | Default.  No external tools.             |
+| `plink2` | Large datasets (>500 k markers).  Faster |
+|          | via `plink2 --indep-pairwise`.  Requires |
+|          | `plink2` on `$PATH` (included in Docker  |
+|          | image).                                  |
+
+CLI flags:
+
+| Flag              | Default     | Description                          |
+|-------------------|-------------|--------------------------------------|
+| `--no-ld-prune`   | off         | Disable LD pruning entirely          |
+| `--ld-window-bp`  | 1 000 000   | Window size in bp                    |
+| `--ld-r2-thresh`  | 0.2         | r² threshold                         |
+| `--ld-backend`    | `numpy`     | Backend (`numpy` or `plink2`)        |
+
 ## Scalability
 
 Both the OLS and LMM association scans process markers in chunks
