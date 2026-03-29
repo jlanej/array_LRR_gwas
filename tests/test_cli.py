@@ -164,3 +164,34 @@ class TestCli:
             "-o", str(out),
         ])
         assert rc == 1  # Should fail: no GT data available
+
+    def test_associate_cli_warns_when_logistic_ignores_grm(
+        self, test_bcf_path, tmp_path, caplog
+    ):
+        """CLI should warn that logistic does not use the GRM random effect."""
+        import logging
+        import numpy as np
+
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(test_bcf_path)
+        rng = np.random.default_rng(42)
+        pheno = tmp_path / "pheno.tsv"
+        lines = ["sample_id\tphenotype"]
+        for s in samples:
+            y = 1 if rng.random() > 0.5 else 0
+            lines.append(f"{s}\t{y}")
+        pheno.write_text("\n".join(lines) + "\n")
+
+        out = tmp_path / "results.tsv"
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(test_bcf_path),
+                "--phenotype", str(pheno),
+                "--method", "logistic",
+                "-o", str(out),
+            ])
+        assert rc == 0
+        assert out.exists()
+        assert "does not use the GRM random effect" in caplog.text

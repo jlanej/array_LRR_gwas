@@ -110,10 +110,13 @@ random effect.  This means:
 * Only fixed-effect covariates (PCs) control for population structure.
 * Cryptic relatedness is **not** accounted for.
 * Users should pre-filter highly related individuals (e.g. one from
-  each pair with kinship > 0.125) before running logistic regression.
+  each pair with kinship > 0.125) before running logistic regression,
+  or consider `--method lmm` as a common continuous-trait approximation
+  for binary phenotypes.
 
-Both the API (`run_association`) and the CLI emit a warning when
-logistic regression is selected with a GRM present.
+Both the API (`run_association`, when a GRM is provided) and the CLI
+emit warnings that logistic regression does not apply the GRM random
+effect.
 
 ## Output Contract for Downstream Segmentation
 
