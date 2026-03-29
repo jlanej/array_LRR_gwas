@@ -137,6 +137,10 @@ correction:
   k: null                    # Batch PCs to remove (null = auto via Marchenko-Pastur)
   backend: rsvd              # "rsvd" (scikit-learn) or "fbpca" (Facebook PCA)
   no_complexity_filter: false # Skip centromere / segdup exclusion regions
+
+# upstream_qc: Ancestry-informed variant QC (see "Upstream Variant QC Integration").
+upstream_qc:
+  variant_qc_path: null      # Path to collated_variant_qc.tsv (null = no upstream filter)
 ```
 
 ### Example: Stricter Thresholds
@@ -157,6 +161,114 @@ correction:
 ```
 
 CLI flags always take precedence over values in the YAML file.
+
+---
+
+## Upstream Variant QC Integration
+
+`array_lrr_gwas` can consume the ancestry-aware variant QC output
+(`collated_variant_qc.tsv`) produced by the upstream
+`jlanej/illumina_idat_processing` pipeline.  This section explains the
+logic, thresholds, and the order of operations.
+
+### Ancestry-Aware QC Logic
+
+The upstream pipeline computes per-variant QC metrics **within each
+ancestry stratum** and collapses the results into three cross-ancestry
+boolean flags:
+
+| TSV column | Upstream threshold | Interpretation |
+|---|---|---|
+| `all_ancestries_call_rate_pass` | call rate ≥ 0.98 per ancestry | Marker has adequate genotyping across **all** ancestries |
+| `all_ancestries_hwe_pass` | HWE *p* ≥ 1 × 10⁻⁶ per ancestry | Marker is in Hardy-Weinberg equilibrium in **all** ancestries |
+| `all_ancestries_maf_pass` | MAF ≥ 0.01 per ancestry | Marker is polymorphic in **all** ancestries |
+
+A variant **must pass a flag in every ancestry** for that flag to be
+`True`.  This conservative intersection ensures that included markers
+are well-behaved across the full multi-ancestry cohort.
+
+### Integration Sequence
+
+When a `collated_variant_qc.tsv` file is supplied (via `--variant-qc`
+or `upstream_qc.variant_qc_path` in the YAML config), `array_lrr_gwas`
+applies the following processing sequence:
+
+1. **Load** — Parse the TSV via
+   `variant_qc.read_collated_variant_qc()`.
+2. **Build QC mask** — For each marker in the input BCF/VCF, build a
+   boolean keep-mask using the flags above.  The required flags differ
+   by context:
+   - **RSVD batch correction**: call rate + HWE (MAF **not** required).
+   - **GRM construction**: call rate + HWE + MAF (all three required).
+3. **LD prune (GRM only)** — After the QC mask is applied, GRM markers
+   are LD-pruned (default: r² < 0.2, 1 Mb window) to prevent highly
+   linked regions from dominating the GRM eigenstructure.
+4. **Downstream analysis** — The filtered (and optionally LD-pruned)
+   marker set is used for batch correction or GRM computation, and
+   the association scan runs on the full set of input markers.
+
+If the TSV file is **not** provided, `array_lrr_gwas` logs a warning
+and falls back to an all-pass mask (no upstream filtering).
+
+### YAML Configuration with `variant_qc_path`
+
+Add the `upstream_qc` section to point at the collated TSV:
+
+```yaml
+# Full example config showing all sections including upstream QC.
+sample_qc:
+  max_lrr_sd: 0.35
+  min_call_rate: 0.97
+
+marker_qc:
+  min_call_rate: 0.95
+  min_var: 0.001
+  max_var: null
+
+correction:
+  k: null
+  backend: rsvd
+  no_complexity_filter: false
+
+# upstream_qc: Ancestry-informed variant QC from illumina_idat_processing.
+upstream_qc:
+  variant_qc_path: /path/to/collated_variant_qc.tsv
+```
+
+The `--variant-qc` CLI flag overrides `upstream_qc.variant_qc_path`
+from the YAML config.
+
+### CLI Interaction: `--variant-qc` and LD Pruning
+
+The `--variant-qc` flag and the LD pruning flags work together in
+the `associate` sub-command:
+
+1. Markers are first filtered by `--variant-qc` (call rate + HWE +
+   MAF pass required for GRM).
+2. The surviving markers are then LD-pruned unless `--no-ld-prune` is
+   set.
+3. LD pruning uses `--ld-window-bp` (default 1 000 000) and
+   `--ld-r2-thresh` (default 0.2).
+
+For the `correct` sub-command, `--variant-qc` applies call rate + HWE
+filters (MAF not required) to the RSVD marker selection; LD pruning
+is not performed during batch correction.
+
+### Provenance in Association Output
+
+When `--variant-qc` is provided for the `associate` sub-command, the
+output TSV includes three additional boolean columns for each marker:
+
+| Column | Description |
+|---|---|
+| `all_ancestries_call_rate_pass` | Whether the marker passed the cross-ancestry call-rate filter |
+| `all_ancestries_hwe_pass` | Whether the marker passed the cross-ancestry HWE filter |
+| `all_ancestries_maf_pass` | Whether the marker passed the cross-ancestry MAF filter |
+
+Markers that are **not** present in the upstream QC file receive
+empty values in these columns.  This allows downstream users and
+auditors to trace exactly which markers were included or excluded
+by which filters.
 
 ---
 
