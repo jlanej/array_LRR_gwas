@@ -87,6 +87,36 @@ class TestCli:
         ])
         assert args.hq_samples == Path("/data/hq_samples.txt")
 
+    def test_associate_max_lrr_sd_arg_parsed(self):
+        args = _build_parser().parse_args([
+            "associate",
+            "in.bcf",
+            "--phenotype", "pheno.tsv",
+            "-o", "out.tsv",
+            "--max-lrr-sd", "0.30",
+        ])
+        assert args.max_lrr_sd == 0.30
+
+    def test_associate_min_sample_call_rate_arg_parsed(self):
+        args = _build_parser().parse_args([
+            "associate",
+            "in.bcf",
+            "--phenotype", "pheno.tsv",
+            "-o", "out.tsv",
+            "--min-sample-call-rate", "0.98",
+        ])
+        assert args.min_sample_call_rate == 0.98
+
+    def test_associate_max_lrr_sd_default_none(self):
+        args = _build_parser().parse_args([
+            "associate",
+            "in.bcf",
+            "--phenotype", "pheno.tsv",
+            "-o", "out.tsv",
+        ])
+        assert args.max_lrr_sd is None
+        assert args.min_sample_call_rate is None
+
     def test_no_args_returns_1(self):
         assert main([]) == 1
 
@@ -945,6 +975,160 @@ class TestCli:
         assert "n=4, mean=2.5" in caplog.text
         assert "Phenotype summary (quantitative analyzed)" in caplog.text
         assert "n=2, mean=1.5" in caplog.text
+
+    def test_associate_hq_derived_from_sample_sheet(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """When --hq-samples is omitted, HQ is derived from --sample-sheet."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t1\n"
+            "S2\t0\n"
+            "S3\t1\n"
+            "S4\t0\n"
+        )
+        # S1, S4 are HQ; S2 (low call_rate), S3 (high lrr_sd) are LQ
+        sheet = tmp_path / "sheet.tsv"
+        sheet.write_text(
+            "Sample_ID\tcall_rate\tlrr_sd\tPC1\tPC2\n"
+            "S1\t0.99\t0.10\t0.1\t0.2\n"
+            "S2\t0.80\t0.10\t0.3\t0.4\n"
+            "S3\t0.99\t0.50\t0.5\t0.6\n"
+            "S4\t0.98\t0.34\t0.7\t0.8\n"
+        )
+
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array(
+            [[0.1, 0.2, 0.3, 0.4], [0.0, 0.1, 0.2, 0.3]], dtype=float,
+        )
+        samples = ["S1", "S2", "S3", "S4"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                ]
+
+        def _fake_run_association(lrr_sub, phenotype, variants, **_kwargs):
+            # S1 and S4 are HQ with valid phenotypes → 2 samples
+            assert lrr_sub.shape == (2, 2)
+            assert phenotype.shape == (2,)
+            return _FakeResult()
+
+        monkeypatch.setattr(association, "run_association", _fake_run_association)
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--sample-sheet", str(sheet),
+                "--method", "ols",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert out.exists()
+        assert "Deriving HQ samples from sample sheet" in caplog.text
+        assert "Association HQ intersection (source=sample_sheet)" in caplog.text
+        assert "dropped_lq_with_valid_pheno=2" in caplog.text
+
+    def test_associate_hq_derived_custom_thresholds(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """CLI --max-lrr-sd / --min-sample-call-rate override config defaults."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t1\n"
+            "S2\t0\n"
+        )
+        # S1 passes strict thresholds; S2 fails the stricter max_lrr_sd=0.05
+        sheet = tmp_path / "sheet.tsv"
+        sheet.write_text(
+            "Sample_ID\tcall_rate\tlrr_sd\tPC1\n"
+            "S1\t0.99\t0.04\t0.1\n"
+            "S2\t0.99\t0.10\t0.2\n"
+        )
+
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2], [0.0, 0.1]], dtype=float)
+        samples = ["S1", "S2"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 1, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 1, "method": "ols"},
+                ]
+
+        def _fake_run_association(lrr_sub, phenotype, variants, **_kwargs):
+            assert lrr_sub.shape == (2, 1)  # only S1
+            assert phenotype.shape == (1,)
+            return _FakeResult()
+
+        monkeypatch.setattr(association, "run_association", _fake_run_association)
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--sample-sheet", str(sheet),
+                "--max-lrr-sd", "0.05",
+                "--method", "ols",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert "max_lrr_sd=0.0500" in caplog.text
+        assert "dropped_lq_with_valid_pheno=1" in caplog.text
 
     def test_associate_logs_ld_prune_disabled(
         self, tmp_path, monkeypatch, caplog

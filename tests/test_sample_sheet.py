@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from array_lrr_gwas.sample_sheet import read_sample_sheet, align_samples
+from array_lrr_gwas.sample_sheet import (
+    read_sample_sheet,
+    align_samples,
+    classify_samples_from_sheet,
+)
 
 
 class TestReadSampleSheet:
@@ -96,3 +100,71 @@ class TestAlignSamples:
         aligned = align_samples(target, sheet, covs)
         assert aligned.shape == (3, 1)
         assert np.isnan(aligned[2, 0])
+
+
+class TestClassifySamplesFromSheet:
+    """Tests for ``classify_samples_from_sheet``."""
+
+    def test_basic_classification(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "Sample_ID\tcall_rate\tlrr_sd\tPC1\n"
+            "S1\t0.99\t0.10\t0.1\n"  # HQ
+            "S2\t0.80\t0.10\t0.2\n"  # LQ: low call rate
+            "S3\t0.99\t0.50\t0.3\n"  # LQ: high lrr_sd
+            "S4\t0.98\t0.34\t0.4\n"  # HQ
+        )
+        hq = classify_samples_from_sheet(tsv)
+        assert hq == {"S1", "S4"}
+
+    def test_custom_thresholds(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "Sample_ID\tcall_rate\tlrr_sd\n"
+            "S1\t0.99\t0.10\n"
+            "S2\t0.96\t0.10\n"  # passes default but fails stricter
+            "S3\t0.99\t0.30\n"  # passes default but fails stricter
+        )
+        hq_strict = classify_samples_from_sheet(
+            tsv, max_lrr_sd=0.20, min_call_rate=0.98,
+        )
+        assert hq_strict == {"S1"}
+
+    def test_boundary_values(self, tmp_path) -> None:
+        """Samples exactly at threshold are included."""
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "Sample_ID\tcall_rate\tlrr_sd\n"
+            "S1\t0.97\t0.35\n"  # exactly at defaults
+        )
+        hq = classify_samples_from_sheet(tsv)
+        assert hq == {"S1"}
+
+    def test_missing_columns_raises(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("Sample_ID\tPC1\nS1\t0.1\n")
+        with pytest.raises(ValueError, match="missing required columns"):
+            classify_samples_from_sheet(tsv)
+
+    def test_non_numeric_values_skipped(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "Sample_ID\tcall_rate\tlrr_sd\n"
+            "S1\t0.99\t0.10\n"
+            "S2\tNA\t0.10\n"   # non-numeric call_rate
+            "S3\t0.99\tNA\n"   # non-numeric lrr_sd
+        )
+        hq = classify_samples_from_sheet(tsv)
+        assert hq == {"S1"}
+
+    def test_empty_sample_sheet(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("Sample_ID\tcall_rate\tlrr_sd\n")
+        hq = classify_samples_from_sheet(tsv)
+        assert hq == set()
+
+    def test_empty_file_raises(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("")
+        with pytest.raises(ValueError, match="empty"):
+            classify_samples_from_sheet(tsv)

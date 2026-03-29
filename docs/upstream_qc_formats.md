@@ -55,6 +55,23 @@ LQ samples are still included in the corrected output — their batch PCs
 are estimated by projection onto the HQ-derived loadings (see
 `correction.extrapolate_pcs`).
 
+### Deriving HQ Samples for Association
+
+For the `associate` sub-command, HQ sample filtering can be specified in
+three ways (in order of precedence):
+
+1. **`--hq-samples`** — Explicit file of sample IDs (one per line or
+   tab-separated with the ID in column 1).
+2. **Automatic derivation from `--sample-sheet`** — When `--hq-samples`
+   is omitted but `--sample-sheet` is provided, HQ samples are derived
+   from the `call_rate` and `lrr_sd` columns of the compiled sample
+   sheet using `--max-lrr-sd` (default 0.35) and
+   `--min-sample-call-rate` (default 0.97).  These thresholds can also
+   be set via the `sample_qc` section in the YAML `--config` file;
+   CLI flags take precedence over YAML values.
+3. **No filtering** — When neither `--hq-samples` nor `--sample-sheet`
+   is provided, all samples with valid phenotype values are analysed.
+
 ---
 
 ## Marker-Level QC
