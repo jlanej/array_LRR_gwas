@@ -287,7 +287,7 @@ def _run_correct(args: argparse.Namespace) -> int:
         "backend": "rsvd",
     }
     for key, default_val in parser_defaults.items():
-        val = getattr(args, key.replace("-", "_"), None)
+        val = getattr(args, key, None)
         if val != default_val:
             cli_overrides[key] = val
 

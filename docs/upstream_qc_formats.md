@@ -47,7 +47,7 @@ in a single streaming pass over autosomal variants.
 The upstream `scripts/filter_qc_samples.py` and `array_lrr_gwas.correction.classify_samples`
 both use the same two metrics for high-quality classification:
 
-1. **`call_rate ≥ min_call_rate`** (upstream default: 0.97, `array_lrr_gwas` default: 0.95)
+1. **`call_rate ≥ min_call_rate`** (upstream default: 0.97, `array_lrr_gwas` default: 0.97)
 2. **`lrr_sd ≤ max_lrr_sd`** (upstream default: 0.35, `array_lrr_gwas` default: 0.35)
 
 Samples failing either threshold are classified as **low-quality (LQ)**.
