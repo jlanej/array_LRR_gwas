@@ -4,10 +4,11 @@ Provides sliding-window LD pruning to prevent highly correlated genomic
 regions from disproportionately dominating the GRM eigenstructure.  Two
 backends are available:
 
-- **numpy** (default): Pure-Python greedy r²-based pruning.  No external
-  tools required.
-- **plink2**: Shells out to ``plink2 --indep-pairwise`` for faster
-  pruning on large datasets.  Requires ``plink2`` on ``$PATH``.
+- **plink2** (default in CLI): Shells out to ``plink2 --indep-pairwise``
+  for faster pruning on large datasets.  Requires ``plink2`` on
+  ``$PATH``.
+- **numpy**: Pure-Python greedy r²-based pruning.  Used when explicitly
+  selected or as a fallback if plink2 is unavailable.
 
 Default parameters (``window_bp=1_000_000``, ``r2_thresh=0.2``) follow
 established best practice for GRM estimation (Yang *et al.* 2011, GCTA;

@@ -113,11 +113,12 @@ Two backends are available:
 
 | Backend  | When to use                              |
 |----------|------------------------------------------|
-| `numpy`  | Default.  No external tools.             |
-| `plink2` | Large datasets (>500 k markers).  Faster |
-|          | via `plink2 --indep-pairwise`.  Requires |
+| `plink2` | Default. Fastest on large datasets; uses |
+|          | `plink2 --indep-pairwise`. Requires      |
 |          | `plink2` on `$PATH` (included in Docker  |
 |          | image).                                  |
+| `numpy`  | No external tools; fallback backend when |
+|          | plink2 is unavailable or not desired.    |
 
 CLI flags:
 
@@ -126,7 +127,7 @@ CLI flags:
 | `--no-ld-prune`   | off         | Disable LD pruning entirely          |
 | `--ld-window-bp`  | 1 000 000   | Window size in bp                    |
 | `--ld-r2-thresh`  | 0.2         | r² threshold                         |
-| `--ld-backend`    | `numpy`     | Backend (`numpy` or `plink2`)        |
+| `--ld-backend`    | `plink2`    | Backend (`numpy` or `plink2`)        |
 
 ## Scalability
 

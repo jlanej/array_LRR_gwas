@@ -42,3 +42,6 @@ jobs:
 
       - name: Verify CLI in container
         run: docker run --rm array-lrr-gwas:test --help
+
+      - name: Verify plink2 in container
+        run: docker run --rm --entrypoint sh array-lrr-gwas:test -lc "command -v plink2 && plink2 --version"

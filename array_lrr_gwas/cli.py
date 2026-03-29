@@ -252,12 +252,13 @@ def _build_parser() -> argparse.ArgumentParser:
     assoc.add_argument(
         "--ld-backend",
         type=str,
-        default="numpy",
+        default="plink2",
         choices=["numpy", "plink2"],
         help=(
-            "Backend for LD pruning (default: numpy). "
+            "Backend for LD pruning (default: plink2). "
             "'plink2' shells out to plink2 --indep-pairwise for "
-            "faster pruning on large datasets (requires plink2 on PATH)."
+            "faster pruning on large datasets; if unavailable, the "
+            "CLI falls back to the NumPy backend with a warning."
         ),
     )
     assoc.add_argument(
@@ -651,25 +652,44 @@ def _run_associate(args: argparse.Namespace) -> int:
         # LD prune GRM markers
         if not args.no_ld_prune:
             if args.ld_backend == "plink2":
-                from array_lrr_gwas.ld_prune import ld_prune_plink2
+                from array_lrr_gwas.ld_prune import ld_prune, ld_prune_plink2
 
                 logger.info(
                     "LD pruning with plink2 (window=%dkb, r²=%.2f)",
-                    args.ld_window_bp // 1000, args.ld_r2_thresh,
+                    max(1, args.ld_window_bp // 1000), args.ld_r2_thresh,
                 )
-                keep_ids = ld_prune_plink2(
-                    gt_path,
-                    window_kb=args.ld_window_bp // 1000,
-                    r2_thresh=args.ld_r2_thresh,
-                    min_maf=args.min_maf,
-                )
-                # plink2 uses the VCF ID column; when ID is '.' it
-                # constructs chrom:pos:ref:alt.  Match on both forms.
-                ld_keep = np.array([
-                    v.get("id") in keep_ids
-                    or f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}" in keep_ids
-                    for v in gt_variants
-                ], dtype=bool)
+                try:
+                    keep_ids = ld_prune_plink2(
+                        gt_path,
+                        window_kb=max(1, args.ld_window_bp // 1000),
+                        r2_thresh=args.ld_r2_thresh,
+                        min_maf=args.min_maf,
+                    )
+                    # plink2 uses the VCF ID column; when ID is '.' it
+                    # constructs chrom:pos:ref:alt.  Match on both forms.
+                    ld_keep = np.array([
+                        v.get("id") in keep_ids
+                        or f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}" in keep_ids
+                        for v in gt_variants
+                    ], dtype=bool)
+                except FileNotFoundError:
+                    logger.warning(
+                        "plink2 backend requested but plink2 is not on PATH; "
+                        "falling back to NumPy LD pruning."
+                    )
+                    gt_positions = np.array(
+                        [v["pos"] for v in gt_variants], dtype=np.intp
+                    )
+                    gt_chroms = np.array(
+                        [v["chrom"] for v in gt_variants], dtype=str
+                    )
+                    ld_keep = ld_prune(
+                        dosage,
+                        positions=gt_positions,
+                        chromosomes=gt_chroms,
+                        window_bp=args.ld_window_bp,
+                        r2_thresh=args.ld_r2_thresh,
+                    )
             else:
                 from array_lrr_gwas.ld_prune import ld_prune
 
