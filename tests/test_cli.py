@@ -251,9 +251,12 @@ class TestCli:
             lambda *_a, **_k: (dosage, samples, gt_variants),
         )
 
+        def _raise_plink2_missing(*_a, **_k):
+            raise FileNotFoundError("plink2")
+
         monkeypatch.setattr(
             "array_lrr_gwas.ld_prune.ld_prune_plink2",
-            lambda *_a, **_k: (_ for _ in ()).throw(FileNotFoundError("plink2")),
+            _raise_plink2_missing,
         )
         monkeypatch.setattr(
             "array_lrr_gwas.ld_prune.ld_prune",

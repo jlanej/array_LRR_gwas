@@ -654,14 +654,15 @@ def _run_associate(args: argparse.Namespace) -> int:
             if args.ld_backend == "plink2":
                 from array_lrr_gwas.ld_prune import ld_prune, ld_prune_plink2
 
+                ld_window_kb = max(1, args.ld_window_bp // 1000)
                 logger.info(
                     "LD pruning with plink2 (window=%dkb, r²=%.2f)",
-                    max(1, args.ld_window_bp // 1000), args.ld_r2_thresh,
+                    ld_window_kb, args.ld_r2_thresh,
                 )
                 try:
                     keep_ids = ld_prune_plink2(
                         gt_path,
-                        window_kb=max(1, args.ld_window_bp // 1000),
+                        window_kb=ld_window_kb,
                         r2_thresh=args.ld_r2_thresh,
                         min_maf=args.min_maf,
                     )
