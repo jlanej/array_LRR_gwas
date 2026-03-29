@@ -72,6 +72,7 @@ For `array_lrr_gwas` batch-effect correction, marker subsetting uses:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
+| `autosomes_only` | Restrict to autosomal chromosomes (excludes X, Y, MT) | True |
 | `min_call_rate` | Marker call-rate filter | 0.95 |
 | `min_var`       | Minimum per-marker LRR variance (removes uninformative markers) | 0.001 |
 | `max_var`       | Maximum per-marker LRR variance (removes artefactual markers) | None |

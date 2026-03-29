@@ -25,6 +25,16 @@ class TestSelectKMp:
         k = select_k_mp(s, n_markers=200, n_samples=100)
         assert k >= 1
 
+    def test_uses_median_not_minimum(self):
+        # With a near-zero smallest SV, the old code (using min) would
+        # set noise ≈ 0, causing upper ≈ 0, retaining all components.
+        # The fixed code (using median) should give a meaningful threshold.
+        s = np.array([100.0, 10.0, 5.0, 4.0, 3.0, 0.001])
+        k = select_k_mp(s, n_markers=500, n_samples=100)
+        # With median-based noise, the threshold is not near-zero;
+        # noise components below the threshold should be excluded.
+        assert k < len(s)
+
 
 class TestSelectKElbow:
     def test_clear_elbow(self):
