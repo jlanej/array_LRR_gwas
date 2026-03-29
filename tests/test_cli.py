@@ -2,12 +2,22 @@
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from array_lrr_gwas.cli import main
+from array_lrr_gwas.cli import _build_parser, main
 
 
 class TestCli:
+    def test_associate_ld_backend_default_is_plink2(self):
+        args = _build_parser().parse_args([
+            "associate",
+            "in.bcf",
+            "--phenotype", "pheno.tsv",
+            "-o", "out.tsv",
+        ])
+        assert args.ld_backend == "plink2"
+
     def test_no_args_returns_1(self):
         assert main([]) == 1
 
@@ -195,6 +205,118 @@ class TestCli:
         assert rc == 0
         assert out.exists()
         assert "does not use the GRM random effect" in caplog.text
+
+    def test_associate_lmm_plink2_fallbacks_to_numpy(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """If plink2 is unavailable, CLI should fall back to NumPy pruning."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        # Minimal phenotype file
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t0.1\nS2\t0.2\nS3\t0.3\n"
+        )
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        # LRR input for association
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        # GT input for GRM
+        dosage = np.array(
+            [[0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [2.0, 1.0, 0.0]],
+            dtype=float,
+        )
+        gt_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 110, "id": "v2", "ref": "A", "alts": ("G",)},
+            {"chrom": "chr1", "pos": 120, "id": "v3", "ref": "A", "alts": ("T",)},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.genotypes.read_genotypes",
+            lambda *_a, **_k: (dosage, samples, gt_variants),
+        )
+
+        def _raise_plink2_missing(*_a, **_k):
+            raise FileNotFoundError("plink2")
+
+        monkeypatch.setattr(
+            "array_lrr_gwas.ld_prune.ld_prune_plink2",
+            _raise_plink2_missing,
+        )
+        monkeypatch.setattr(
+            "array_lrr_gwas.ld_prune.ld_prune",
+            lambda *_a, **_k: np.array([True, False, True], dtype=bool),
+        )
+
+        def _fake_grm(d, *, min_maf=0.01):
+            assert d.shape[0] == 2  # pruned from 3 to 2
+            return np.eye(d.shape[1], dtype=float)
+
+        monkeypatch.setattr("array_lrr_gwas.grm.compute_grm", _fake_grm)
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {
+                        "chrom": "chr1",
+                        "pos": 100,
+                        "variant_id": "a1",
+                        "beta": 0.0,
+                        "se": 1.0,
+                        "stat": 0.0,
+                        "p_value": 1.0,
+                        "n_samples": 3,
+                        "method": "lmm",
+                    },
+                    {
+                        "chrom": "chr1",
+                        "pos": 200,
+                        "variant_id": "a2",
+                        "beta": 0.0,
+                        "se": 1.0,
+                        "stat": 0.0,
+                        "p_value": 1.0,
+                        "n_samples": 3,
+                        "method": "lmm",
+                    },
+                ]
+
+        monkeypatch.setattr(
+            association,
+            "run_association",
+            lambda *_a, **_k: _FakeResult(),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--method", "lmm",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert out.exists()
+        assert "falling back to NumPy LD pruning" in caplog.text
 
     def test_segment_help_flag(self):
         with pytest.raises(SystemExit) as exc:

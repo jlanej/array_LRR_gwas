@@ -222,6 +222,46 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     assoc.add_argument(
+        "--no-ld-prune",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable LD pruning of GRM markers.  By default, markers "
+            "are LD-pruned so that highly linked regions do not "
+            "disproportionately dominate the GRM eigenstructure."
+        ),
+    )
+    assoc.add_argument(
+        "--ld-window-bp",
+        type=int,
+        default=1_000_000,
+        help=(
+            "LD-pruning window size in base pairs (default: 1000000). "
+            "Variant pairs within this distance are evaluated for LD."
+        ),
+    )
+    assoc.add_argument(
+        "--ld-r2-thresh",
+        type=float,
+        default=0.2,
+        help=(
+            "r² threshold for LD pruning (default: 0.2). "
+            "Variant pairs with r² above this are pruned."
+        ),
+    )
+    assoc.add_argument(
+        "--ld-backend",
+        type=str,
+        default="plink2",
+        choices=["numpy", "plink2"],
+        help=(
+            "Backend for LD pruning (default: plink2). "
+            "'plink2' shells out to plink2 --indep-pairwise for "
+            "faster pruning on large datasets; if unavailable, the "
+            "CLI falls back to the NumPy backend with a warning."
+        ),
+    )
+    assoc.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -589,7 +629,7 @@ def _run_associate(args: argparse.Namespace) -> int:
 
         gt_path = args.genotype_bcf or input_path
         logger.info("Reading genotypes from %s for GRM", gt_path)
-        dosage, gt_samples, _ = read_genotypes(
+        dosage, gt_samples, gt_variants = read_genotypes(
             gt_path,
             min_maf=args.min_maf,
             min_call_rate=args.min_gt_call_rate,
@@ -603,6 +643,89 @@ def _run_associate(args: argparse.Namespace) -> int:
                 gt_path,
             )
             return 1
+
+        logger.info(
+            "%d genotype variants from %d samples passed QC",
+            dosage.shape[0], dosage.shape[1],
+        )
+
+        # LD prune GRM markers
+        if not args.no_ld_prune:
+            if args.ld_backend == "plink2":
+                from array_lrr_gwas.ld_prune import ld_prune, ld_prune_plink2
+
+                ld_window_kb = max(1, args.ld_window_bp // 1000)
+                logger.info(
+                    "LD pruning with plink2 (window=%dkb, r²=%.2f)",
+                    ld_window_kb, args.ld_r2_thresh,
+                )
+                try:
+                    keep_ids = ld_prune_plink2(
+                        gt_path,
+                        window_kb=ld_window_kb,
+                        r2_thresh=args.ld_r2_thresh,
+                        min_maf=args.min_maf,
+                    )
+                    # plink2 uses the VCF ID column; when ID is '.' it
+                    # constructs chrom:pos:ref:alt.  Match on both forms.
+                    ld_keep = np.array([
+                        v.get("id") in keep_ids
+                        or f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}" in keep_ids
+                        for v in gt_variants
+                    ], dtype=bool)
+                except FileNotFoundError:
+                    logger.warning(
+                        "plink2 backend requested but plink2 is not on PATH; "
+                        "falling back to NumPy LD pruning."
+                    )
+                    gt_positions = np.array(
+                        [v["pos"] for v in gt_variants], dtype=np.intp
+                    )
+                    gt_chroms = np.array(
+                        [v["chrom"] for v in gt_variants], dtype=str
+                    )
+                    ld_keep = ld_prune(
+                        dosage,
+                        positions=gt_positions,
+                        chromosomes=gt_chroms,
+                        window_bp=args.ld_window_bp,
+                        r2_thresh=args.ld_r2_thresh,
+                    )
+            else:
+                from array_lrr_gwas.ld_prune import ld_prune
+
+                gt_positions = np.array(
+                    [v["pos"] for v in gt_variants], dtype=np.intp
+                )
+                gt_chroms = np.array(
+                    [v["chrom"] for v in gt_variants], dtype=str
+                )
+                logger.info(
+                    "LD pruning with NumPy (window=%dbp, r²=%.2f)",
+                    args.ld_window_bp, args.ld_r2_thresh,
+                )
+                ld_keep = ld_prune(
+                    dosage,
+                    positions=gt_positions,
+                    chromosomes=gt_chroms,
+                    window_bp=args.ld_window_bp,
+                    r2_thresh=args.ld_r2_thresh,
+                )
+
+            n_before = dosage.shape[0]
+            dosage = dosage[ld_keep]
+            gt_variants = [v for v, k in zip(gt_variants, ld_keep) if k]
+            logger.info(
+                "LD pruning: %d → %d variants (removed %d)",
+                n_before, dosage.shape[0], n_before - dosage.shape[0],
+            )
+
+            if dosage.shape[0] == 0:
+                logger.error(
+                    "No variants remain after LD pruning.  Consider "
+                    "relaxing --ld-r2-thresh or using --no-ld-prune."
+                )
+                return 1
 
         logger.info(
             "Using %d genotype variants from %d samples for GRM",

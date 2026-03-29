@@ -14,7 +14,13 @@ RUN apt-get update && \
         liblzma-dev \
         libcurl4-openssl-dev \
         libssl-dev \
+        wget \
     && rm -rf /var/lib/apt/lists/*
+
+# Install plink2 (used by --ld-backend plink2 for fast LD pruning)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends plink2 && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
