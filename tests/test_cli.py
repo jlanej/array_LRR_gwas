@@ -195,3 +195,82 @@ class TestCli:
         assert rc == 0
         assert out.exists()
         assert "does not use the GRM random effect" in caplog.text
+
+    def test_segment_help_flag(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["segment", "--help"])
+        assert exc.value.code == 0
+
+    def test_segment_missing_input(self, tmp_path):
+        out = tmp_path / "regions.bed"
+        rc = main([
+            "segment",
+            str(tmp_path / "nonexistent.tsv"),
+            "-o", str(out),
+        ])
+        assert rc == 1
+
+    def test_segment_threshold(self, tmp_path):
+        """Threshold segmentation via CLI with synthetic association TSV."""
+        import csv
+
+        tsv = tmp_path / "results.tsv"
+        rows = [
+            {"chrom": "chr1", "pos": 1000, "variant_id": "v0",
+             "beta": 0.5, "se": 0.05, "stat": 10.0,
+             "p_value": 1e-15, "n_samples": 100, "method": "ols"},
+            {"chrom": "chr1", "pos": 2000, "variant_id": "v1",
+             "beta": 0.01, "se": 0.05, "stat": 0.2,
+             "p_value": 0.84, "n_samples": 100, "method": "ols"},
+        ]
+        with open(tsv, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()),
+                                    delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)
+
+        out = tmp_path / "regions.bed"
+        rc = main([
+            "segment",
+            str(tsv),
+            "--strategy", "threshold",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        lines = out.read_text().strip().split("\n")
+        assert lines[0].startswith("#")
+        assert len(lines) == 2  # header + 1 region
+
+    def test_segment_hmm(self, tmp_path):
+        """HMM segmentation via CLI with synthetic association TSV."""
+        import csv
+
+        tsv = tmp_path / "results.tsv"
+        rows = []
+        for i in range(20):
+            p = 1e-12 if 5 <= i <= 10 else 0.5
+            rows.append({
+                "chrom": "chr1", "pos": 1000 + i * 100,
+                "variant_id": f"v{i}", "beta": 0.3 if p < 0.01 else 0.01,
+                "se": 0.05, "stat": 6.0 if p < 0.01 else 0.2,
+                "p_value": p, "n_samples": 100, "method": "ols",
+            })
+        with open(tsv, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()),
+                                    delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)
+
+        out = tmp_path / "regions.bed"
+        rc = main([
+            "segment",
+            str(tsv),
+            "--strategy", "hmm",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        lines = out.read_text().strip().split("\n")
+        assert lines[0].startswith("#")
+        assert len(lines) >= 2  # header + at least 1 region
