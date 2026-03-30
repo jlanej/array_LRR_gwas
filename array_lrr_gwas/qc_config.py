@@ -83,6 +83,26 @@ _DEFAULTS: dict[str, Any] = {
         # Upstream default: 0.97  (filter_qc_samples.py)
         "min_call_rate": 0.97,
     },
+    "association_qc": {
+        # Honor pre-computed exclusion columns from the compiled sample sheet
+        # (pre_pca_excluded, excluded_relatedness, excluded_het_outlier).
+        # Scientific rationale: While the GRM/LMM corrects for moderate
+        # kinship, close relatives (up to 2nd degree) are typically removed
+        # upstream for variance control and to avoid overcounting families
+        # (UK Biobank, TOPMed, Broad Institute best practices).
+        "honor_precomputed": True,
+        # Exclude samples with high BAF SD (contamination proxy).
+        # Marees et al. 2018 recommend investigating BAF SD > 0.15.
+        "exclude_baf_sd": True,
+        "max_baf_sd": 0.15,
+        # Exclude samples with discordant reported vs. inferred sex.
+        # Anderson et al. 2010 Nat Protoc recommend removal.
+        "exclude_sex_discordant": True,
+        # Exclude samples with extreme inbreeding coefficient |F| > threshold.
+        # Anderson et al. 2010 recommend |F| > 0.15 as a QC flag.
+        "exclude_extreme_inbreeding": True,
+        "max_abs_inbreeding_f": 0.15,
+    },
     "marker_qc": {
         # Min per-marker call rate for batch-correction subsetting.
         # A moderately inclusive threshold retains more markers for SVD.

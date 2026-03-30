@@ -264,6 +264,80 @@ def _build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Number of global ancestry PCs to use from sample sheet (default: 20).",
     )
+
+    # ---- Association sample-exclusion flags ----
+    # These flags control additional exclusion criteria applied when
+    # --sample-sheet is provided.  Each is ON by default following GWAS
+    # best-practice (Anderson et al. 2010; Marees et al. 2018; UK Biobank
+    # and TOPMed SOPs).  All can be disabled individually via the flags
+    # below or via the association_qc section in the YAML --config.
+    assoc.add_argument(
+        "--no-honor-precomputed",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable honoring pre-computed exclusion columns "
+            "(pre_pca_excluded, excluded_relatedness, excluded_het_outlier) "
+            "from the sample sheet.  By default these upstream flags are "
+            "respected: related samples (typically up to 2nd degree) are "
+            "removed to reduce bias in effect estimates even though the "
+            "GRM/LMM corrects for moderate kinship, and het-outliers are "
+            "removed as potential contamination or sample errors."
+        ),
+    )
+    assoc.add_argument(
+        "--no-exclude-baf-sd",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable BAF SD exclusion.  By default, samples with "
+            "baf_sd > --max-baf-sd (0.15) are excluded as a proxy for "
+            "DNA contamination (Marees et al. 2018).  Requires 'baf_sd' "
+            "column in the sample sheet; silently skipped if absent."
+        ),
+    )
+    assoc.add_argument(
+        "--max-baf-sd",
+        type=float,
+        default=None,
+        help=(
+            "BAF SD threshold for sample exclusion (default: 0.15). "
+            "Samples with baf_sd above this value are excluded. "
+            "Higher BAF SD suggests potential DNA contamination."
+        ),
+    )
+    assoc.add_argument(
+        "--no-exclude-sex-discordant",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable sex-discordance exclusion.  By default, samples with "
+            "sex_status == 'DISCORDANT' in the sample sheet are excluded "
+            "as potential sample swaps (Anderson et al. 2010 Nat Protoc)."
+        ),
+    )
+    assoc.add_argument(
+        "--no-exclude-extreme-inbreeding",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable extreme inbreeding coefficient exclusion.  By default, "
+            "samples with |inbreeding_F| > --max-abs-inbreeding-f (0.15) "
+            "are excluded as a safety net for extreme population structure "
+            "or sample quality issues (Anderson et al. 2010)."
+        ),
+    )
+    assoc.add_argument(
+        "--max-abs-inbreeding-f",
+        type=float,
+        default=None,
+        help=(
+            "Absolute inbreeding coefficient threshold (default: 0.15). "
+            "Samples with |F| exceeding this are excluded.  "
+            "Higher values of |F| may indicate extreme population "
+            "stratification (F > 0) or contamination (F < 0)."
+        ),
+    )
     assoc.add_argument(
         "--genotype-bcf",
         type=Path,
@@ -760,9 +834,10 @@ def _run_associate(args: argparse.Namespace) -> int:
         analyzed_mask = valid_mask & hq_mask
         hq_source = "file"
     elif args.sample_sheet is not None:
-        from array_lrr_gwas.sample_sheet import classify_samples_from_sheet
+        from array_lrr_gwas.sample_sheet import classify_samples_for_association
 
         # Resolve thresholds: CLI > config > defaults
+        assoc_cfg = cfg.get("association_qc", {})
         max_lrr_sd = (
             args.max_lrr_sd
             if args.max_lrr_sd is not None
@@ -773,21 +848,87 @@ def _run_associate(args: argparse.Namespace) -> int:
             if args.min_sample_call_rate is not None
             else cfg["sample_qc"]["min_call_rate"]
         )
+
+        # Resolve exclusion flags: CLI --no-* flags override config
+        honor_precomputed = (
+            not args.no_honor_precomputed
+            and assoc_cfg.get("honor_precomputed", True)
+        ) if not args.no_honor_precomputed else False
+
+        exclude_baf_sd = (
+            not args.no_exclude_baf_sd
+            and assoc_cfg.get("exclude_baf_sd", True)
+        ) if not args.no_exclude_baf_sd else False
+
+        max_baf_sd = (
+            args.max_baf_sd
+            if args.max_baf_sd is not None
+            else assoc_cfg.get("max_baf_sd", 0.15)
+        )
+
+        exclude_sex_discordant = (
+            not args.no_exclude_sex_discordant
+            and assoc_cfg.get("exclude_sex_discordant", True)
+        ) if not args.no_exclude_sex_discordant else False
+
+        exclude_extreme_inbreeding = (
+            not args.no_exclude_extreme_inbreeding
+            and assoc_cfg.get("exclude_extreme_inbreeding", True)
+        ) if not args.no_exclude_extreme_inbreeding else False
+
+        max_abs_inbreeding_f = (
+            args.max_abs_inbreeding_f
+            if args.max_abs_inbreeding_f is not None
+            else assoc_cfg.get("max_abs_inbreeding_f", 0.15)
+        )
+
         logger.info(
             "Deriving HQ samples from sample sheet %s "
-            "(max_lrr_sd=%.4f, min_call_rate=%.4f)",
+            "(max_lrr_sd=%.4f, min_call_rate=%.4f, "
+            "honor_precomputed=%s, exclude_baf_sd=%s [max=%.4f], "
+            "exclude_sex_discordant=%s, exclude_extreme_inbreeding=%s [max|F|=%.4f])",
             args.sample_sheet, max_lrr_sd, min_call_rate,
+            honor_precomputed, exclude_baf_sd, max_baf_sd,
+            exclude_sex_discordant, exclude_extreme_inbreeding, max_abs_inbreeding_f,
         )
-        hq_samples = classify_samples_from_sheet(
+        excl_result = classify_samples_for_association(
             args.sample_sheet,
             max_lrr_sd=max_lrr_sd,
             min_call_rate=min_call_rate,
+            honor_precomputed=honor_precomputed,
+            exclude_baf_sd=exclude_baf_sd,
+            max_baf_sd=max_baf_sd,
+            exclude_sex_discordant=exclude_sex_discordant,
+            exclude_extreme_inbreeding=exclude_extreme_inbreeding,
+            max_abs_inbreeding_f=max_abs_inbreeding_f,
         )
+        hq_samples = excl_result.hq_ids
         hq_mask = np.array([s in hq_samples for s in samples], dtype=bool)
         n_hq_in_lrr = int(hq_mask.sum())
         n_dropped_lq = int((valid_mask & ~hq_mask).sum())
         analyzed_mask = valid_mask & hq_mask
         hq_source = "sample_sheet"
+
+        # Log per-category exclusion counts
+        logger.info(
+            "Sample exclusion summary (sheet total=%d): "
+            "low_call_rate=%d, high_lrr_sd=%d, "
+            "pre_pca_excluded=%d, excluded_relatedness=%d, "
+            "excluded_het_outlier=%d, high_baf_sd=%d, "
+            "sex_discordant=%d, extreme_inbreeding_f=%d, "
+            "total_excluded=%d, passing=%d",
+            excl_result.total,
+            excl_result.counts["low_call_rate"],
+            excl_result.counts["high_lrr_sd"],
+            excl_result.counts["pre_pca_excluded"],
+            excl_result.counts["excluded_relatedness"],
+            excl_result.counts["excluded_het_outlier"],
+            excl_result.counts["high_baf_sd"],
+            excl_result.counts["sex_discordant"],
+            excl_result.counts["extreme_inbreeding_f"],
+            excl_result.counts["total_excluded"],
+            excl_result.total - excl_result.counts["total_excluded"],
+        )
 
     n_analyzed = int(analyzed_mask.sum())
     if n_analyzed == 0:
