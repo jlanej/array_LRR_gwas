@@ -853,12 +853,12 @@ def _run_associate(args: argparse.Namespace) -> int:
         honor_precomputed = (
             not args.no_honor_precomputed
             and assoc_cfg.get("honor_precomputed", True)
-        ) if not args.no_honor_precomputed else False
+        )
 
         exclude_baf_sd = (
             not args.no_exclude_baf_sd
             and assoc_cfg.get("exclude_baf_sd", True)
-        ) if not args.no_exclude_baf_sd else False
+        )
 
         max_baf_sd = (
             args.max_baf_sd
@@ -869,12 +869,12 @@ def _run_associate(args: argparse.Namespace) -> int:
         exclude_sex_discordant = (
             not args.no_exclude_sex_discordant
             and assoc_cfg.get("exclude_sex_discordant", True)
-        ) if not args.no_exclude_sex_discordant else False
+        )
 
         exclude_extreme_inbreeding = (
             not args.no_exclude_extreme_inbreeding
             and assoc_cfg.get("exclude_extreme_inbreeding", True)
-        ) if not args.no_exclude_extreme_inbreeding else False
+        )
 
         max_abs_inbreeding_f = (
             args.max_abs_inbreeding_f

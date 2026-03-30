@@ -333,7 +333,7 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--hq-samples` | path | `None` | Optional HQ sample list; analyzes only `valid phenotype ∩ HQ` samples (drops LQ). When omitted but `--sample-sheet` is provided, HQ samples are derived from the sheet using `--max-lrr-sd` and `--min-sample-call-rate` |
 | `--max-lrr-sd` | float | `0.35` | Max per-sample LRR SD for HQ classification (used when deriving HQ from sample sheet) |
 | `--min-sample-call-rate` | float | `0.97` | Min per-sample call rate for HQ classification (used when deriving HQ from sample sheet) |
-| `--no-honor-precomputed` | flag | `False` | Disable honoring pre-computed exclusion columns (`pre_pca_excluded`, `excluded_relatedness`, `excluded_het_outlier`) from sample sheet. See [Sample Exclusion Strategies](#association-stage) |
+| `--no-honor-precomputed` | flag | `False` | Disable honoring pre-computed exclusion columns (`pre_pca_excluded`, `excluded_relatedness`, `excluded_het_outlier`) from sample sheet. See [Sample Exclusion Strategies](#sample-exclusion-strategies) |
 | `--no-exclude-baf-sd` | flag | `False` | Disable BAF SD exclusion (samples with `baf_sd > --max-baf-sd` are excluded by default as a contamination proxy) |
 | `--max-baf-sd` | float | `0.15` | BAF SD threshold for sample exclusion. Higher BAF SD suggests DNA contamination (Marees et al. 2018) |
 | `--no-exclude-sex-discordant` | flag | `False` | Disable sex-discordance exclusion (`sex_status == "DISCORDANT"` excluded by default; Anderson et al. 2010) |
