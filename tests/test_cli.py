@@ -130,12 +130,21 @@ class TestCli:
         rc = main(["correct", str(tmp_path / "nonexistent.bcf"), "-o", str(out)])
         assert rc == 1
 
-    def test_correct_no_build_detected(self, test_bcf_path, tmp_path):
-        """When build is not detectable and not supplied, exits with error."""
+    def test_correct_build_auto_detected(self, test_bcf_path, tmp_path):
+        """Build is auto-detected from contig lengths in the new test BCF."""
         out = tmp_path / "out.bcf"
-        rc = main(["correct", str(test_bcf_path), "-o", str(out)])
-        # Our test BCF has no contig lengths, so build detection fails
-        assert rc == 1
+        rc = main([
+            "correct",
+            str(test_bcf_path),
+            "-o", str(out),
+            "--max-lrr-sd", "10.0",
+            "--min-sample-call-rate", "0.0",
+            "--min-marker-call-rate", "0.5",
+            "--min-var", "0.0",
+        ])
+        # Build detection succeeds (T2T-CHM13), so correction should succeed
+        assert rc == 0
+        assert out.exists()
 
     def test_correct_with_explicit_build(self, test_bcf_path, tmp_path):
         """Correction succeeds when build is explicitly given."""
@@ -282,8 +291,8 @@ class TestCli:
         assert "chrom" in content[0]
         assert len(content) > 1
 
-    def test_associate_lmm_no_gt_fails(self, test_bcf_path, tmp_path):
-        """LMM with a BCF that has no GT data should fail gracefully."""
+    def test_associate_lmm_succeeds_with_gt(self, test_bcf_path, tmp_path):
+        """LMM with a BCF that has GT data should succeed."""
         from array_lrr_gwas.io_vcf import read_lrr
 
         _, samples, _ = read_lrr(test_bcf_path)
@@ -303,9 +312,14 @@ class TestCli:
             str(test_bcf_path),
             "--phenotype", str(pheno),
             "--method", "lmm",
+            "--ld-backend", "numpy",
             "-o", str(out),
         ])
-        assert rc == 1  # Should fail: no GT data available
+        assert rc == 0
+        assert out.exists()
+        content = out.read_text().strip().split("\n")
+        assert "chrom" in content[0]
+        assert len(content) > 1
 
     def test_associate_cli_warns_when_logistic_ignores_grm(
         self, test_bcf_path, tmp_path, caplog

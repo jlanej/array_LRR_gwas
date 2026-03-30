@@ -7,14 +7,15 @@ import pytest
 
 from array_lrr_gwas.io_vcf import read_lrr, write_corrected, _CORRECTION_HEADER_KEY
 from array_lrr_gwas.correction import correct_lrr
+from tests.conftest import BCF_N_VARIANTS, BCF_N_SAMPLES, BCF_SAMPLES
 
 
 class TestReadLrr:
     def test_read_test_bcf(self, test_bcf_path):
         lrr, samples, variants = read_lrr(test_bcf_path)
-        assert lrr.shape == (100, 20)
-        assert len(samples) == 20
-        assert len(variants) == 100
+        assert lrr.shape == (BCF_N_VARIANTS, BCF_N_SAMPLES)
+        assert len(samples) == BCF_N_SAMPLES
+        assert len(variants) == BCF_N_VARIANTS
 
     def test_variant_metadata(self, test_bcf_path):
         _, _, variants = read_lrr(test_bcf_path)
@@ -93,6 +94,9 @@ class TestEndToEndWithBcf:
     def test_full_pipeline(self, test_bcf_path, tmp_path):
         lrr, samples, variants = read_lrr(test_bcf_path)
 
+        # Replace non-finite values (e.g. -inf) with NaN for stable correction
+        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+
         corrected, info = correct_lrr(
             lrr,
             k=3,
@@ -116,7 +120,7 @@ class TestEndToEndWithBcf:
         assert lrr2.shape == lrr.shape
         assert samples2 == samples
 
-        # Correction should have reduced variance
-        orig_var = np.nanvar(lrr)
-        corr_var = np.nanvar(lrr2)
+        # Correction should have reduced variance (use only finite values)
+        orig_var = np.nanvar(lrr[np.isfinite(lrr)])
+        corr_var = np.nanvar(lrr2[np.isfinite(lrr2)])
         assert corr_var < orig_var

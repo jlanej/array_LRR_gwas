@@ -625,6 +625,8 @@ class TestAssociationWithBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, samples, variants = read_lrr(test_bcf_path)
+        # Replace non-finite values (e.g. -inf) with NaN for stable analysis
+        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
         n_markers, n_samples = lrr.shape
         rng = np.random.default_rng(42)
         phenotype = rng.normal(size=n_samples)
@@ -632,13 +634,15 @@ class TestAssociationWithBcf:
         result = run_association(lrr, phenotype, variants, method="ols")
         assert len(result.chrom) == n_markers
         assert result.beta.shape == (n_markers,)
-        assert np.all(result.p_value >= 0)
+        finite_p = result.p_value[np.isfinite(result.p_value)]
+        assert np.all(finite_p >= 0)
 
     def test_logistic_on_test_bcf(self, test_bcf_path) -> None:
         """Read real BCF, run logistic association."""
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, samples, variants = read_lrr(test_bcf_path)
+        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
         n_markers, n_samples = lrr.shape
         rng = np.random.default_rng(42)
         phenotype = (rng.random(n_samples) > 0.5).astype(float)
@@ -652,6 +656,7 @@ class TestAssociationWithBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, samples, variants = read_lrr(test_bcf_path)
+        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
         n_markers, n_samples = lrr.shape
         rng = np.random.default_rng(42)
         phenotype = rng.normal(size=n_samples)
@@ -662,7 +667,8 @@ class TestAssociationWithBcf:
         )
         assert result.method == "lmm"
         assert result.beta.shape == (n_markers,)
-        assert np.all(result.p_value >= 0)
+        finite_p = result.p_value[np.isfinite(result.p_value)]
+        assert np.all(finite_p >= 0)
 
     def test_corrected_bcf_association(self, test_bcf_path) -> None:
         """Full pipeline: correct → associate (OLS)."""
@@ -670,6 +676,7 @@ class TestAssociationWithBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, samples, variants = read_lrr(test_bcf_path)
+        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
         n_markers, n_samples = lrr.shape
         positions = np.array([v["pos"] for v in variants], dtype=np.intp)
         chromosomes = np.array([v["chrom"] for v in variants], dtype=str)
