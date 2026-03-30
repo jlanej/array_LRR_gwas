@@ -20,6 +20,9 @@
   - [correct](#correct)
   - [associate](#associate)
   - [segment](#segment)
+- [Sample Exclusion Strategies](#sample-exclusion-strategies)
+  - [RSVD Correction Stage](#rsvd-correction-stage)
+  - [Association Stage](#association-stage)
 - [QC Configuration](#qc-configuration)
 - [Input Formats](#input-formats)
 - [Output Formats](#output-formats)
@@ -330,6 +333,12 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--hq-samples` | path | `None` | Optional HQ sample list; analyzes only `valid phenotype ∩ HQ` samples (drops LQ). When omitted but `--sample-sheet` is provided, HQ samples are derived from the sheet using `--max-lrr-sd` and `--min-sample-call-rate` |
 | `--max-lrr-sd` | float | `0.35` | Max per-sample LRR SD for HQ classification (used when deriving HQ from sample sheet) |
 | `--min-sample-call-rate` | float | `0.97` | Min per-sample call rate for HQ classification (used when deriving HQ from sample sheet) |
+| `--no-honor-precomputed` | flag | `False` | Disable honoring pre-computed exclusion columns (`pre_pca_excluded`, `excluded_relatedness`, `excluded_het_outlier`) from sample sheet. See [Sample Exclusion Strategies](#sample-exclusion-strategies) |
+| `--no-exclude-baf-sd` | flag | `False` | Disable BAF SD exclusion (samples with `baf_sd > --max-baf-sd` are excluded by default as a contamination proxy) |
+| `--max-baf-sd` | float | `0.15` | BAF SD threshold for sample exclusion. Higher BAF SD suggests DNA contamination (Marees et al. 2018) |
+| `--no-exclude-sex-discordant` | flag | `False` | Disable sex-discordance exclusion (`sex_status == "DISCORDANT"` excluded by default; Anderson et al. 2010) |
+| `--no-exclude-extreme-inbreeding` | flag | `False` | Disable extreme inbreeding coefficient exclusion (\|F\| > threshold excluded by default) |
+| `--max-abs-inbreeding-f` | float | `0.15` | Inbreeding coefficient threshold. Samples with \|F\| above this are excluded (Anderson et al. 2010) |
 | `--n-pcs` | int | `20` | Number of PCs to include as covariates |
 | `--genotype-bcf` | path | `INPUT` | BCF/VCF for GRM computation (if different from input) |
 | `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; variants failing call rate/HWE/MAF are excluded before GRM |
@@ -339,7 +348,7 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--ld-window-bp` | int | `1000000` | LD-pruning window size in base pairs |
 | `--ld-r2-thresh` | float | `0.2` | r² threshold for LD pruning |
 | `--ld-backend` | str | `plink2` | LD-pruning backend: `plink2` (default, fast) or `numpy` (fallback) |
-| `--config` | path | `None` | YAML config file; reads `upstream_qc.variant_qc_path` and `sample_qc` thresholds for HQ derivation |
+| `--config` | path | `None` | YAML config file; reads `upstream_qc.variant_qc_path`, `sample_qc`, and `association_qc` settings |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
 
 ### `segment`
@@ -366,11 +375,123 @@ array-lrr-gwas segment INPUT -o OUTPUT [OPTIONS]
 
 ---
 
+## Sample Exclusion Strategies
+
+Rigorous sample exclusion is essential for both the RSVD batch-effect
+correction and the downstream GWAS association analysis.  This section
+documents the exclusion criteria applied at each stage, their scientific
+rationale, and how to configure them.
+
+All exclusion decisions are **logged with per-category counts** for full
+reproducibility and provenance.
+
+### RSVD Correction Stage
+
+The `correct` sub-command classifies samples as high-quality (HQ) or
+low-quality (LQ).  Only HQ samples contribute to the SVD decomposition;
+LQ samples receive corrected values via projection.
+
+| Criterion | Default Threshold | Rationale |
+|-----------|-------------------|-----------|
+| **Low call rate** | `call_rate < 0.97` | Samples with excessive genotype missingness introduce noise into the decomposition. Threshold follows upstream `illumina_idat_processing` defaults and GWAS QC guidance (Anderson et al. 2010 recommend ≥ 0.95–0.98). |
+| **High LRR SD** | `lrr_sd > 0.35` | Per-sample LRR standard deviation is the primary noise metric. Noisy samples degrade the SVD signal-to-noise ratio. Threshold from Marees et al. 2018 and upstream pipeline. |
+
+Both thresholds are user-configurable via `--max-lrr-sd`,
+`--min-sample-call-rate`, or the `sample_qc` section in the YAML
+`--config` file.
+
+**Note:** Samples with missing phenotype values are *not* excluded at the
+correction stage — the correction operates on the full LRR matrix so that
+all samples receive batch-corrected values regardless of downstream
+analysis inclusion.
+
+### Association Stage
+
+The `associate` sub-command applies a richer set of exclusion criteria when
+a `--sample-sheet` is provided.  These are applied *in addition to* the
+core HQ criteria (call rate + LRR SD) and the requirement for a valid
+(non-missing) phenotype value.
+
+#### Default Exclusions (always ON)
+
+| Criterion | Column(s) | Default | Rationale |
+|-----------|-----------|---------|-----------|
+| **Low call rate** | `call_rate` | `< 0.97` | Same as correction stage. |
+| **High LRR SD** | `lrr_sd` | `> 0.35` | Same as correction stage. |
+| **Pre-PCA excluded** | `pre_pca_excluded` | `true` ⇒ exclude | Sample was excluded before ancestry PCA by upstream QC (e.g. failed genotype QC). Honors upstream pipeline decisions. |
+| **Excluded relatedness** | `excluded_relatedness` | `true` ⇒ exclude | Sample removed as part of a related pair (typically up to 2nd degree, kinship > 0.0884). While the GRM/LMM corrects for moderate kinship, removing close relatives reduces bias in effect-size estimates and avoids overcounting families (UK Biobank, TOPMed, Broad Institute conventions). |
+| **Het outlier** | `excluded_het_outlier` | `true` ⇒ exclude | Extreme heterozygosity outlier, suggesting potential DNA contamination or sample mix-up. |
+| **High BAF SD** | `baf_sd` | `> 0.15` ⇒ exclude | B Allele Frequency standard deviation is a contamination proxy. Elevated values suggest DNA contamination (Marees et al. 2018). |
+| **Sex discordant** | `sex_status` | `"DISCORDANT"` ⇒ exclude | Discordance between reported and inferred sex flags potential sample swaps (Anderson et al. 2010 Nat Protoc). |
+| **Extreme inbreeding F** | `inbreeding_F` | `|F| > 0.15` ⇒ exclude | Extreme inbreeding coefficient values indicate extreme population structure (F > 0) or potential contamination (F < 0). Threshold from Anderson et al. 2010. |
+
+All exclusion categories are enabled by default.  Each can be **disabled
+individually** via CLI flags or the `association_qc` section in the YAML
+config:
+
+| CLI Flag | Config Key | Effect |
+|----------|------------|--------|
+| `--no-honor-precomputed` | `association_qc.honor_precomputed: false` | Ignore `pre_pca_excluded`, `excluded_relatedness`, `excluded_het_outlier` |
+| `--no-exclude-baf-sd` | `association_qc.exclude_baf_sd: false` | Skip BAF SD filter |
+| `--max-baf-sd 0.20` | `association_qc.max_baf_sd: 0.20` | Change BAF SD threshold |
+| `--no-exclude-sex-discordant` | `association_qc.exclude_sex_discordant: false` | Skip sex-discordance filter |
+| `--no-exclude-extreme-inbreeding` | `association_qc.exclude_extreme_inbreeding: false` | Skip inbreeding-F filter |
+| `--max-abs-inbreeding-f 0.20` | `association_qc.max_abs_inbreeding_f: 0.20` | Change \|F\| threshold |
+
+**Missing columns** for optional criteria are silently skipped (with an
+info-level log message), so the pipeline works with minimal sample sheets
+containing only `Sample_ID`, `call_rate`, and `lrr_sd`.
+
+#### Usage Example (Automatic from illumina\_idat\_processing Output)
+
+```bash
+# Step 2: Associate with full exclusion strategy (all defaults applied)
+array-lrr-gwas associate corrected.bcf \
+    --phenotype phenotype.tsv \
+    --sample-sheet compiled_sample_sheet.tsv \
+    --genotype-bcf genotypes.bcf \
+    --variant-qc collated_variant_qc.tsv \
+    --method lmm \
+    -o results.tsv -v
+```
+
+The log output will include a detailed exclusion summary:
+
+```
+INFO: Sample exclusion summary (sheet total=5000): low_call_rate=23,
+      high_lrr_sd=45, pre_pca_excluded=12, excluded_relatedness=187,
+      excluded_het_outlier=3, high_baf_sd=7, sex_discordant=2,
+      extreme_inbreeding_f=1, total_excluded=267, passing=4733
+```
+
+#### Trade-offs and Scientific Consensus
+
+The GRM-based LMM corrects for moderate cryptic relatedness in the
+random-effect component.  However, best-practice GWAS pipelines (UK
+Biobank, TOPMed, Broad Institute, eMERGE) still recommend excluding close
+relatives (up to 2nd degree) because:
+
+1. The LMM assumes the GRM captures population structure — very close
+   relatives (parent-child, full siblings) inflate the GRM diagonal and
+   can bias variance-component estimates.
+2. Removing one member of a related pair eliminates redundant phenotype
+   information that inflates effective sample size.
+3. Family-correlated environmental effects are not modelled by genomic
+   relatedness alone.
+
+By defaulting all exclusions to ON, the pipeline errs on the side of
+conservative, robust inference.  Users who prefer to retain all samples
+(e.g. for family-aware analyses) can disable exclusions with the `--no-*`
+flags.
+
+---
+
 ## QC Configuration
 
 Sample and marker QC thresholds can be set via a YAML configuration file
 passed with `--config` to `correct`. The same config can be passed to
-`associate` to provide `upstream_qc.variant_qc_path` for GRM marker filtering.
+`associate` to provide `upstream_qc.variant_qc_path` for GRM marker
+filtering and `association_qc` settings for sample exclusion.
 CLI flags take precedence over YAML values, which take precedence over
 built-in defaults.
 
@@ -380,6 +501,15 @@ built-in defaults.
 sample_qc:
   max_lrr_sd: 0.35            # Max LRR SD for HQ classification
   min_call_rate: 0.97          # Min call rate for HQ classification
+
+association_qc:
+  honor_precomputed: true      # Honor pre_pca_excluded, excluded_relatedness,
+                               #   excluded_het_outlier from sample sheet
+  exclude_baf_sd: true         # Exclude samples with baf_sd > max_baf_sd
+  max_baf_sd: 0.15             # BAF SD threshold (contamination proxy)
+  exclude_sex_discordant: true # Exclude sex_status == "DISCORDANT"
+  exclude_extreme_inbreeding: true  # Exclude |inbreeding_F| > threshold
+  max_abs_inbreeding_f: 0.15  # Inbreeding F threshold
 
 marker_qc:
   min_call_rate: 0.95          # Min marker call rate
@@ -403,6 +533,10 @@ sample_qc:
   max_lrr_sd: 0.30
   min_call_rate: 0.98
 
+association_qc:
+  max_baf_sd: 0.10               # Stricter contamination threshold
+  max_abs_inbreeding_f: 0.10     # Stricter inbreeding threshold
+
 marker_qc:
   min_call_rate: 0.98
   min_var: 0.002
@@ -412,6 +546,16 @@ correction:
   k: 5
   n_components: 50             # Optional; only used when k is null
   backend: rsvd
+```
+
+### Permissive Example (Disable Optional Exclusions)
+
+```yaml
+association_qc:
+  honor_precomputed: false       # Keep related samples and het outliers
+  exclude_baf_sd: false          # No BAF SD filter
+  exclude_sex_discordant: false  # Keep sex-discordant samples
+  exclude_extreme_inbreeding: false  # No inbreeding filter
 ```
 
 ---
@@ -794,6 +938,9 @@ tests/
   348–354 (2010). [EMMA]
 - Lippert, C. et al. *FaST linear mixed models for genome-wide association
   studies.* Nature Methods **8**, 833–835 (2011). [FaST-LMM]
+- Marees, A. T. et al. *A tutorial on conducting genome-wide association
+  studies: Quality control and statistical analysis.* International Journal
+  of Methods in Psychiatric Research **27**, e1608 (2018).
 - Marchenko, V. A. & Pastur, L. A. *Distribution of eigenvalues for some
   sets of random matrices.* Mathematics of the USSR-Sbornik **1**, 457–483
   (1967).

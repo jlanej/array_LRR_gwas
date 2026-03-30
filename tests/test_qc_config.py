@@ -15,6 +15,7 @@ class TestDefaults:
     def test_has_required_sections(self):
         cfg = defaults()
         assert "sample_qc" in cfg
+        assert "association_qc" in cfg
         assert "marker_qc" in cfg
         assert "correction" in cfg
         assert "upstream_qc" in cfg

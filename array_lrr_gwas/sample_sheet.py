@@ -10,13 +10,36 @@ This module provides utilities to ingest that TSV and extract the
 columns needed as fixed-effect covariates for the LMM association,
 as well as to classify samples as high-quality (HQ) based on the
 ``call_rate`` and ``lrr_sd`` columns present in the sample sheet.
+
+Association-stage exclusions
+----------------------------
+:func:`classify_samples_for_association` extends the basic HQ
+classification with additional exclusion criteria recommended for
+GWAS best practice:
+
+* **Pre-computed exclusions** — ``pre_pca_excluded``,
+  ``excluded_relatedness``, ``excluded_het_outlier`` columns from the
+  compiled sample sheet.  These reflect upstream QC decisions
+  (e.g. UK Biobank / TOPMed conventions).
+* **High BAF SD** — BAF standard deviation > threshold (default 0.15)
+  indicates potential sample contamination
+  (Marees et al. 2018 BMC Genomics).
+* **Sex discordance** — ``sex_status == "DISCORDANT"`` flags possible
+  sample swaps (Anderson et al. 2010 Nat Protoc).
+* **Extreme inbreeding coefficient** — |F| > threshold (default 0.15)
+  as a safety net for extreme population structure or sample issues
+  (Anderson et al. 2010).
+
+All exclusions are logged with per-category counts for full provenance.
 """
 
 from __future__ import annotations
 
 import csv
+import logging
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -211,3 +234,299 @@ def classify_samples_from_sheet(
                 hq_ids.add(sid)
 
     return hq_ids
+
+
+# ---------------------------------------------------------------------------
+# Association-stage sample exclusion
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
+
+class ExclusionResult(NamedTuple):
+    """Result of association-stage sample exclusion.
+
+    Attributes
+    ----------
+    hq_ids : set of str
+        Sample IDs passing all enabled exclusion criteria.
+    counts : dict of str to int
+        Number of samples excluded by each category.  Keys include
+        ``"low_call_rate"``, ``"high_lrr_sd"``, ``"pre_pca_excluded"``,
+        ``"excluded_relatedness"``, ``"excluded_het_outlier"``,
+        ``"high_baf_sd"``, ``"sex_discordant"``, ``"extreme_inbreeding_f"``,
+        and ``"total_excluded"``.
+    total : int
+        Total number of samples in the sheet.
+    """
+
+    hq_ids: set[str]
+    counts: dict[str, int]
+    total: int
+
+
+def _parse_bool_field(val: str | None) -> bool | None:
+    """Parse a boolean-ish sample-sheet value.
+
+    Returns ``True`` for ``'true'``, ``'1'``, ``'yes'`` (case-insensitive),
+    ``False`` for ``'false'``, ``'0'``, ``'no'``, and ``None`` otherwise.
+    """
+    if val is None:
+        return None
+    txt = val.strip().lower()
+    if txt in {"true", "1", "yes"}:
+        return True
+    if txt in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def classify_samples_for_association(
+    path: str | Path,
+    *,
+    max_lrr_sd: float = 0.35,
+    min_call_rate: float = 0.97,
+    honor_precomputed: bool = True,
+    exclude_baf_sd: bool = True,
+    max_baf_sd: float = 0.15,
+    exclude_sex_discordant: bool = True,
+    exclude_extreme_inbreeding: bool = True,
+    max_abs_inbreeding_f: float = 0.15,
+    sample_id_col: str = "Sample_ID",
+    call_rate_col: str = "call_rate",
+    lrr_sd_col: str = "lrr_sd",
+    baf_sd_col: str = "baf_sd",
+    sex_status_col: str = "sex_status",
+    inbreeding_f_col: str = "inbreeding_F",
+    pre_pca_excluded_col: str = "pre_pca_excluded",
+    excluded_relatedness_col: str = "excluded_relatedness",
+    excluded_het_outlier_col: str = "excluded_het_outlier",
+) -> ExclusionResult:
+    """Derive high-quality sample IDs for association analysis.
+
+    Applies the core HQ criteria (call rate + LRR SD) used by
+    :func:`classify_samples_from_sheet`, plus additional exclusion
+    criteria recommended for GWAS best practice.
+
+    **Default exclusions (always applied):**
+
+    * ``call_rate >= min_call_rate`` (default 0.97)
+    * ``lrr_sd <= max_lrr_sd`` (default 0.35)
+
+    **Pre-computed upstream exclusions** (``honor_precomputed=True``):
+
+    * ``pre_pca_excluded`` — sample excluded before ancestry PCA
+      (e.g. failed upstream genotype QC).
+    * ``excluded_relatedness`` — removed as part of a related pair
+      (typically up to 2nd degree, kinship > 0.0884; UK Biobank and
+      TOPMed convention).  While the GRM/LMM can correct for moderate
+      kinship, removing close relatives reduces bias in effect estimates
+      and avoids overcounting families.
+    * ``excluded_het_outlier`` — extreme heterozygosity outlier,
+      suggesting potential DNA contamination or sample mix-up.
+
+    **Optional exclusions** (enabled by default per user request):
+
+    * ``exclude_baf_sd`` — high BAF standard deviation (> ``max_baf_sd``,
+      default 0.15) indicates potential sample contamination
+      (Marees et al. 2018).
+    * ``exclude_sex_discordant`` — ``sex_status == "DISCORDANT"``
+      flags possible sample swaps (Anderson et al. 2010).
+    * ``exclude_extreme_inbreeding`` — |inbreeding_F| > threshold
+      (default 0.15) as a safety net for extreme population structure
+      or sample issues (Anderson et al. 2010).
+
+    Missing columns for optional criteria are silently skipped (with a
+    logged info message).  Missing or non-parseable values for a sample
+    cause that sample to be treated as *not excluded* for that criterion.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the tab-separated compiled sample sheet.
+    max_lrr_sd : float
+        Maximum per-sample LRR standard deviation.
+    min_call_rate : float
+        Minimum per-sample genotype call rate.
+    honor_precomputed : bool
+        If True (default), exclude samples flagged by ``pre_pca_excluded``,
+        ``excluded_relatedness``, or ``excluded_het_outlier``.
+    exclude_baf_sd : bool
+        If True (default), exclude samples with ``baf_sd > max_baf_sd``.
+    max_baf_sd : float
+        BAF SD threshold (default 0.15).
+    exclude_sex_discordant : bool
+        If True (default), exclude samples with
+        ``sex_status == "DISCORDANT"``.
+    exclude_extreme_inbreeding : bool
+        If True (default), exclude samples with
+        ``|inbreeding_F| > max_abs_inbreeding_f``.
+    max_abs_inbreeding_f : float
+        Inbreeding coefficient threshold (default 0.15).
+    sample_id_col, call_rate_col, lrr_sd_col, baf_sd_col,
+    sex_status_col, inbreeding_f_col, pre_pca_excluded_col,
+    excluded_relatedness_col, excluded_het_outlier_col : str
+        Column names in the sample sheet.
+
+    Returns
+    -------
+    ExclusionResult
+        Named tuple with ``hq_ids`` (set of str), ``counts`` (dict),
+        and ``total`` (int).
+
+    Raises
+    ------
+    ValueError
+        If the sample sheet is missing the required core columns
+        (``sample_id_col``, ``call_rate_col``, ``lrr_sd_col``).
+
+    References
+    ----------
+    * Anderson et al. 2010 *Nat Protoc* 5:1564–1573.
+    * Marees et al. 2018 *BMC Genomics* (previously *Int J Methods
+      Psychiatr Res*) — GWAS QC tutorial.
+    * UK Biobank genotyping QC documentation.
+    * TOPMed analysis best practices.
+    """
+    path = str(path)
+
+    with open(path, newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        if reader.fieldnames is None:
+            raise ValueError(f"Sample sheet at {path} is empty or has no header")
+
+        # Core columns are always required
+        required = {sample_id_col, call_rate_col, lrr_sd_col}
+        missing = required - set(reader.fieldnames)
+        if missing:
+            raise ValueError(
+                f"Sample sheet is missing required columns for HQ "
+                f"classification: {sorted(missing)}"
+            )
+
+        available_cols = set(reader.fieldnames)
+
+        # Check optional column availability
+        has_pre_pca = pre_pca_excluded_col in available_cols
+        has_relatedness = excluded_relatedness_col in available_cols
+        has_het_outlier = excluded_het_outlier_col in available_cols
+        has_baf_sd = baf_sd_col in available_cols
+        has_sex_status = sex_status_col in available_cols
+        has_inbreeding = inbreeding_f_col in available_cols
+
+        if honor_precomputed:
+            if not has_pre_pca:
+                logger.info(
+                    "Column '%s' not found; skipping pre-PCA exclusion",
+                    pre_pca_excluded_col,
+                )
+            if not has_relatedness:
+                logger.info(
+                    "Column '%s' not found; skipping relatedness exclusion",
+                    excluded_relatedness_col,
+                )
+            if not has_het_outlier:
+                logger.info(
+                    "Column '%s' not found; skipping het-outlier exclusion",
+                    excluded_het_outlier_col,
+                )
+        if exclude_baf_sd and not has_baf_sd:
+            logger.info(
+                "Column '%s' not found; skipping BAF SD exclusion",
+                baf_sd_col,
+            )
+        if exclude_sex_discordant and not has_sex_status:
+            logger.info(
+                "Column '%s' not found; skipping sex-discordant exclusion",
+                sex_status_col,
+            )
+        if exclude_extreme_inbreeding and not has_inbreeding:
+            logger.info(
+                "Column '%s' not found; skipping inbreeding-F exclusion",
+                inbreeding_f_col,
+            )
+
+        counts: dict[str, int] = {
+            "low_call_rate": 0,
+            "high_lrr_sd": 0,
+            "pre_pca_excluded": 0,
+            "excluded_relatedness": 0,
+            "excluded_het_outlier": 0,
+            "high_baf_sd": 0,
+            "sex_discordant": 0,
+            "extreme_inbreeding_f": 0,
+            "total_excluded": 0,
+        }
+        total = 0
+        hq_ids: set[str] = set()
+
+        for row in reader:
+            sid = row.get(sample_id_col)
+            if sid is None or sid == "":
+                continue
+            total += 1
+            excluded = False
+
+            # Core QC: call rate
+            try:
+                cr = float(row.get(call_rate_col, ""))
+            except (TypeError, ValueError):
+                cr = None
+            if cr is None or cr < min_call_rate:
+                counts["low_call_rate"] += 1
+                excluded = True
+
+            # Core QC: LRR SD
+            try:
+                sd = float(row.get(lrr_sd_col, ""))
+            except (TypeError, ValueError):
+                sd = None
+            if sd is None or sd > max_lrr_sd:
+                counts["high_lrr_sd"] += 1
+                excluded = True
+
+            # Pre-computed exclusions
+            if honor_precomputed:
+                if has_pre_pca and _parse_bool_field(row.get(pre_pca_excluded_col)) is True:
+                    counts["pre_pca_excluded"] += 1
+                    excluded = True
+                if has_relatedness and _parse_bool_field(row.get(excluded_relatedness_col)) is True:
+                    counts["excluded_relatedness"] += 1
+                    excluded = True
+                if has_het_outlier and _parse_bool_field(row.get(excluded_het_outlier_col)) is True:
+                    counts["excluded_het_outlier"] += 1
+                    excluded = True
+
+            # BAF SD exclusion (contamination proxy)
+            if exclude_baf_sd and has_baf_sd:
+                try:
+                    baf = float(row.get(baf_sd_col, ""))
+                except (TypeError, ValueError):
+                    baf = None
+                if baf is not None and baf > max_baf_sd:
+                    counts["high_baf_sd"] += 1
+                    excluded = True
+
+            # Sex discordance exclusion
+            if exclude_sex_discordant and has_sex_status:
+                sex_val = (row.get(sex_status_col) or "").strip().upper()
+                if sex_val == "DISCORDANT":
+                    counts["sex_discordant"] += 1
+                    excluded = True
+
+            # Extreme inbreeding F exclusion
+            if exclude_extreme_inbreeding and has_inbreeding:
+                try:
+                    f_val = float(row.get(inbreeding_f_col, ""))
+                except (TypeError, ValueError):
+                    f_val = None
+                if f_val is not None and abs(f_val) > max_abs_inbreeding_f:
+                    counts["extreme_inbreeding_f"] += 1
+                    excluded = True
+
+            if excluded:
+                counts["total_excluded"] += 1
+            else:
+                hq_ids.add(sid)
+
+    return ExclusionResult(hq_ids=hq_ids, counts=counts, total=total)
