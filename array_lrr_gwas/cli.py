@@ -229,7 +229,33 @@ def _build_parser() -> argparse.ArgumentParser:
             "Optional path to HQ sample list (one sample ID per line, or "
             "tab-separated with sample ID in column 1). When provided, "
             "association uses only the intersection of non-missing phenotype "
-            "samples and this HQ list (LQ samples are dropped)."
+            "samples and this HQ list (LQ samples are dropped). "
+            "When omitted but --sample-sheet is provided, HQ samples are "
+            "derived from the sample sheet using --max-lrr-sd and "
+            "--min-sample-call-rate thresholds (same criteria as the "
+            "correct sub-command)."
+        ),
+    )
+    assoc.add_argument(
+        "--max-lrr-sd",
+        type=float,
+        default=None,
+        help=(
+            "Max per-sample LRR SD for HQ classification (default: 0.35). "
+            "Used when --hq-samples is omitted and --sample-sheet is "
+            "provided, to derive HQ samples from the sample sheet. "
+            "Also configurable via sample_qc.max_lrr_sd in the YAML config."
+        ),
+    )
+    assoc.add_argument(
+        "--min-sample-call-rate",
+        type=float,
+        default=None,
+        help=(
+            "Min per-sample call rate for HQ classification (default: 0.97). "
+            "Used when --hq-samples is omitted and --sample-sheet is "
+            "provided, to derive HQ samples from the sample sheet. "
+            "Also configurable via sample_qc.min_call_rate in the YAML config."
         ),
     )
     assoc.add_argument(
@@ -332,8 +358,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "YAML configuration file. For association, this is used "
             "to read upstream_qc.variant_qc_path when --variant-qc is "
-            "not set.  See docs/upstream_qc_formats.md for the full "
-            "configuration schema and examples."
+            "not set, and to read sample_qc.max_lrr_sd / "
+            "sample_qc.min_call_rate when deriving HQ samples from "
+            "the sample sheet.  See docs/upstream_qc_formats.md for the "
+            "full configuration schema and examples."
         ),
     )
     assoc.add_argument(
@@ -709,6 +737,7 @@ def _run_associate(args: argparse.Namespace) -> int:
     analyzed_mask = valid_mask.copy()
     n_hq_in_lrr = None
     n_dropped_lq = 0
+    hq_source: str | None = None
     if args.hq_samples is not None:
         if not args.hq_samples.exists():
             logger.error("HQ sample list not found: %s", args.hq_samples)
@@ -729,6 +758,36 @@ def _run_associate(args: argparse.Namespace) -> int:
         n_hq_in_lrr = int(hq_mask.sum())
         n_dropped_lq = int((valid_mask & ~hq_mask).sum())
         analyzed_mask = valid_mask & hq_mask
+        hq_source = "file"
+    elif args.sample_sheet is not None:
+        from array_lrr_gwas.sample_sheet import classify_samples_from_sheet
+
+        # Resolve thresholds: CLI > config > defaults
+        max_lrr_sd = (
+            args.max_lrr_sd
+            if args.max_lrr_sd is not None
+            else cfg["sample_qc"]["max_lrr_sd"]
+        )
+        min_call_rate = (
+            args.min_sample_call_rate
+            if args.min_sample_call_rate is not None
+            else cfg["sample_qc"]["min_call_rate"]
+        )
+        logger.info(
+            "Deriving HQ samples from sample sheet %s "
+            "(max_lrr_sd=%.4f, min_call_rate=%.4f)",
+            args.sample_sheet, max_lrr_sd, min_call_rate,
+        )
+        hq_samples = classify_samples_from_sheet(
+            args.sample_sheet,
+            max_lrr_sd=max_lrr_sd,
+            min_call_rate=min_call_rate,
+        )
+        hq_mask = np.array([s in hq_samples for s in samples], dtype=bool)
+        n_hq_in_lrr = int(hq_mask.sum())
+        n_dropped_lq = int((valid_mask & ~hq_mask).sum())
+        analyzed_mask = valid_mask & hq_mask
+        hq_source = "sample_sheet"
 
     n_analyzed = int(analyzed_mask.sum())
     if n_analyzed == 0:
@@ -742,9 +801,9 @@ def _run_associate(args: argparse.Namespace) -> int:
     )
     if n_hq_in_lrr is not None:
         logger.info(
-            "Association HQ intersection: hq_in_lrr=%d, "
+            "Association HQ intersection (source=%s): hq_in_lrr=%d, "
             "valid_pheno_and_hq=%d, dropped_lq_with_valid_pheno=%d",
-            n_hq_in_lrr, n_analyzed, n_dropped_lq,
+            hq_source, n_hq_in_lrr, n_analyzed, n_dropped_lq,
         )
     else:
         logger.info("Association analyzed samples: %d", n_analyzed)

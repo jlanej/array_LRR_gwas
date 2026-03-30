@@ -326,8 +326,10 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--phenotype` | path | *required* | Tab-separated file (see [Input Formats](#input-formats)) |
 | `-o, --output` | path | *required* | Output TSV of per-marker association results |
 | `--method` | str | `lmm` | `lmm` (default), `ols`, or `logistic` |
-| `--sample-sheet` | path | `None` | `compiled_sample_sheet.tsv` for ancestry PCs |
-| `--hq-samples` | path | `None` | Optional HQ sample list; analyzes only `valid phenotype ∩ HQ` samples (drops LQ samples) |
+| `--sample-sheet` | path | `None` | `compiled_sample_sheet.tsv` for ancestry PCs; also used to derive HQ samples when `--hq-samples` is omitted |
+| `--hq-samples` | path | `None` | Optional HQ sample list; analyzes only `valid phenotype ∩ HQ` samples (drops LQ). When omitted but `--sample-sheet` is provided, HQ samples are derived from the sheet using `--max-lrr-sd` and `--min-sample-call-rate` |
+| `--max-lrr-sd` | float | `0.35` | Max per-sample LRR SD for HQ classification (used when deriving HQ from sample sheet) |
+| `--min-sample-call-rate` | float | `0.97` | Min per-sample call rate for HQ classification (used when deriving HQ from sample sheet) |
 | `--n-pcs` | int | `20` | Number of PCs to include as covariates |
 | `--genotype-bcf` | path | `INPUT` | BCF/VCF for GRM computation (if different from input) |
 | `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; variants failing call rate/HWE/MAF are excluded before GRM |
@@ -337,7 +339,7 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--ld-window-bp` | int | `1000000` | LD-pruning window size in base pairs |
 | `--ld-r2-thresh` | float | `0.2` | r² threshold for LD pruning |
 | `--ld-backend` | str | `plink2` | LD-pruning backend: `plink2` (default, fast) or `numpy` (fallback) |
-| `--config` | path | `None` | YAML config file used to read `upstream_qc.variant_qc_path` when `--variant-qc` is not provided |
+| `--config` | path | `None` | YAML config file; reads `upstream_qc.variant_qc_path` and `sample_qc` thresholds for HQ derivation |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
 
 ### `segment`
