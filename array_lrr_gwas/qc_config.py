@@ -48,6 +48,18 @@ Best-Practice Default Thresholds
 * ``exclude_extreme_inbreeding``: **True** — Exclude ``|inbreeding_F| > threshold``.
 * ``max_abs_inbreeding_f``: **0.15** — Inbreeding coefficient threshold.
 
+**Association Marker QC** (variant exclusion for ``associate``):
+
+* ``exclude_intensity_only``: **True** — Exclude INTENSITY_ONLY markers
+  (non-polymorphic probes with no genotype cluster) from association testing.
+  These are retained for LRR correction but lack GT and should not be tested.
+* ``apply_variant_qc``: **True** — Apply upstream variant QC mask (call
+  rate + HWE + MAF from ``collated_variant_qc.tsv``) to LRR markers before
+  association testing.  Ensures tested markers pass standard GWAS thresholds.
+* ``exclude_monomorphic_lrr``: **True** — Exclude markers with zero LRR
+  variance across analysed samples (uninformative, produce degenerate
+  test statistics).
+
 Example YAML
 -------------
 .. code-block:: yaml
@@ -65,6 +77,11 @@ Example YAML
       min_call_rate: 0.98
       min_var: 0.002
       max_var: 5.0             # exclude extreme-variance markers
+
+    association_marker_qc:
+      exclude_intensity_only: true
+      apply_variant_qc: true
+      exclude_monomorphic_lrr: true
 
     correction:
       k: 5                     # fix number of batch components
@@ -126,6 +143,22 @@ _DEFAULTS: dict[str, Any] = {
         # Max per-marker LRR variance; None = no upper limit.
         "max_var": None,
     },
+    "association_marker_qc": {
+        # Exclude INTENSITY_ONLY markers from association testing.
+        # These probes report intensity but have no genotype cluster (no GT
+        # field), so their LRR is not comparable to genotyped markers.
+        # Retained for LRR correction (intensity signal is informative for
+        # batch-effect removal) but excluded from GWAS testing by default.
+        "exclude_intensity_only": True,
+        # Apply upstream variant QC mask to LRR markers before association.
+        # Uses call rate + HWE + MAF filters from collated_variant_qc.tsv.
+        # This ensures tested markers meet standard GWAS quality thresholds
+        # (Anderson et al. 2010; Marees et al. 2018).
+        "apply_variant_qc": True,
+        # Exclude markers with zero LRR variance across analysed samples.
+        # Such markers are uninformative and produce degenerate test statistics.
+        "exclude_monomorphic_lrr": True,
+    },
     "correction": {
         # Number of batch PCs to remove; None = auto (Marchenko-Pastur).
         "k": None,
@@ -164,10 +197,10 @@ def load_config(path: str | Path) -> dict[str, Any]:
     """Load a YAML QC configuration file and merge with defaults.
 
     Recognised top-level sections are ``sample_qc``, ``association_qc``,
-    ``marker_qc``, ``correction``, and ``upstream_qc``.  Unknown sections
-    raise :class:`ValueError`.  Keys that are absent in the YAML file
-    retain their best-practice defaults, so users only need to specify the
-    values they wish to override.
+    ``association_marker_qc``, ``marker_qc``, ``correction``, and
+    ``upstream_qc``.  Unknown sections raise :class:`ValueError`.  Keys
+    that are absent in the YAML file retain their best-practice defaults,
+    so users only need to specify the values they wish to override.
 
     Parameters
     ----------

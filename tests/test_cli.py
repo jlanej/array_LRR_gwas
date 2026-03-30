@@ -561,6 +561,7 @@ class TestCli:
                 "--method", "lmm",
                 "--ld-backend", "numpy",
                 "--variant-qc", str(qc_tsv),
+                "--no-apply-variant-qc",
                 "-o", str(out),
             ])
 
@@ -624,6 +625,7 @@ class TestCli:
             "--method", "lmm",
             "--ld-backend", "numpy",
             "--config", str(cfg),
+            "--no-apply-variant-qc",
             "-o", str(out),
         ])
         assert rc == 0
@@ -686,6 +688,7 @@ class TestCli:
             "--phenotype", str(pheno),
             "--method", "ols",
             "--variant-qc", str(qc_tsv),
+            "--no-apply-variant-qc",
             "-o", str(out),
         ])
         assert rc == 0
@@ -908,6 +911,7 @@ class TestCli:
                 "--phenotype", str(pheno),
                 "--hq-samples", str(hq),
                 "--method", "ols",
+                "--no-exclude-monomorphic-lrr",
                 "-o", str(out),
             ])
 
@@ -1137,6 +1141,7 @@ class TestCli:
                 "--sample-sheet", str(sheet),
                 "--max-lrr-sd", "0.05",
                 "--method", "ols",
+                "--no-exclude-monomorphic-lrr",
                 "-o", str(out),
             ])
 
