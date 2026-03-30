@@ -64,11 +64,17 @@ three ways (in order of precedence):
    tab-separated with the ID in column 1).
 2. **Automatic derivation from `--sample-sheet`** — When `--hq-samples`
    is omitted but `--sample-sheet` is provided, HQ samples are derived
-   from the `call_rate` and `lrr_sd` columns of the compiled sample
-   sheet using `--max-lrr-sd` (default 0.35) and
-   `--min-sample-call-rate` (default 0.97).  These thresholds can also
-   be set via the `sample_qc` section in the YAML `--config` file;
-   CLI flags take precedence over YAML values.
+   using the full exclusion strategy implemented in
+   `sample_sheet.classify_samples_for_association()`:
+   - Core QC: `call_rate >= min_call_rate` and `lrr_sd <= max_lrr_sd`
+   - Pre-computed: `pre_pca_excluded`, `excluded_relatedness`,
+     `excluded_het_outlier` (if columns present)
+   - BAF SD: `baf_sd > max_baf_sd` (default 0.15, contamination proxy)
+   - Sex discordance: `sex_status == "DISCORDANT"` (sample swap flag)
+   - Inbreeding F: `|inbreeding_F| > max_abs_inbreeding_f` (default 0.15)
+   All optional exclusions are enabled by default and configurable via
+   `--no-*` CLI flags or the `association_qc` YAML config section.
+   Missing columns are silently skipped.
 3. **No filtering** — When neither `--hq-samples` nor `--sample-sheet`
    is provided, all samples with valid phenotype values are analysed.
 
@@ -101,12 +107,15 @@ For `array_lrr_gwas` batch-effect correction, marker subsetting uses:
 
 Produced by `scripts/compile_sample_sheet.py`, merging sample QC with
 ancestry PCA projections and optional peddy metrics.  Consumed by
-`array_lrr_gwas.sample_sheet.read_sample_sheet`.
+`array_lrr_gwas.sample_sheet.read_sample_sheet` and
+`array_lrr_gwas.sample_sheet.classify_samples_for_association`.
 
 | Column group | Columns | Description |
 |--------------|---------|-------------|
 | Sample QC | `sample_id`, `call_rate`, `lrr_sd`, `lrr_mean`, `lrr_median`, `baf_sd`, `het_rate`, `computed_gender` | Per-sample metrics from Stage 2 |
-| Inbreeding | `inbreeding_F` | Plink2 inbreeding coefficient (optional) |
+| Sex status | `sex_status` | `"OK"` or `"DISCORDANT"` — reported vs. inferred sex concordance (optional; used by association exclusion) |
+| Inbreeding | `inbreeding_F` | Plink2 inbreeding coefficient (optional; used by association exclusion when \|F\| > threshold) |
+| Pre-computed exclusions | `pre_pca_excluded`, `excluded_relatedness`, `excluded_het_outlier` | Boolean flags from upstream QC (optional; `true`/`false` or `1`/`0`). Honored by default in association analysis. |
 | Global PCs | `PC1` … `PC20` | Full-cohort ancestry PCA projections |
 | Ancestry PCs | `{ANC}_PC1` … `{ANC}_PC20` | Per-ancestry PCA (NaN for non-members) |
 | Peddy | `peddy_het_ratio`, `peddy_ancestry-prediction`, … | Peddy QC metrics (optional) |
@@ -142,6 +151,18 @@ default value.  Omitted keys keep these defaults automatically:
 sample_qc:
   max_lrr_sd: 0.35          # Max LRR SD (upstream default, filter_qc_samples.py)
   min_call_rate: 0.97        # Min call rate (upstream default, Anderson et al. 2010)
+
+# association_qc: Additional sample exclusion criteria for the associate
+# sub-command.  All enabled by default (GWAS best practice).
+# See sample_sheet.classify_samples_for_association() for details.
+association_qc:
+  honor_precomputed: true    # Honor pre_pca_excluded, excluded_relatedness,
+                             #   excluded_het_outlier from sample sheet
+  exclude_baf_sd: true       # Exclude samples with baf_sd > max_baf_sd
+  max_baf_sd: 0.15           # BAF SD threshold (contamination proxy; Marees et al. 2018)
+  exclude_sex_discordant: true  # Exclude sex_status == "DISCORDANT" (Anderson et al. 2010)
+  exclude_extreme_inbreeding: true  # Exclude |inbreeding_F| > threshold
+  max_abs_inbreeding_f: 0.15  # Inbreeding F threshold (Anderson et al. 2010)
 
 # marker_qc: Controls marker subsetting for batch-correction SVD.
 marker_qc:
