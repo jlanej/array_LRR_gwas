@@ -91,6 +91,8 @@ Computed by `scripts/compute_variant_qc.sh` (via `plink2 --missing`,
 | `hwe_p`     | float | Hardy-Weinberg equilibrium p-value (per ancestry) | ≥ 1×10⁻⁶ |
 | `maf`       | float | Minor allele frequency | ≥ 0.01 |
 
+### Correction-Stage Marker Subsetting
+
 For `array_lrr_gwas` batch-effect correction, marker subsetting uses:
 
 | Parameter | Description | Default |
@@ -100,6 +102,42 @@ For `array_lrr_gwas` batch-effect correction, marker subsetting uses:
 | `min_var`       | Minimum per-marker LRR variance (removes uninformative markers) | 0.001 |
 | `max_var`       | Maximum per-marker LRR variance (removes artefactual markers) | None |
 | Complexity exclusion | Centromere / segmental duplication regions | Build-specific |
+| Upstream variant QC | Call rate + HWE from `collated_variant_qc.tsv` (MAF not required) | Via `--variant-qc` |
+
+**INTENSITY_ONLY markers** are retained during correction because their
+LRR values contribute to batch-effect estimation.
+
+All filter steps are logged with per-step marker counts:
+
+```
+INFO: Marker subsetting: call-rate filter (≥0.9500): 95000 / 96869 pass (1869 excluded)
+INFO: Marker subsetting: variance filter (min=0.0010, max=None): 96500 / 96869 pass (369 excluded)
+INFO: Marker subsetting: autosome filter: 90000 / 96869 pass (6869 non-autosomal excluded)
+INFO: Marker subsetting: 88000 / 96869 markers pass all filters (91.0%)
+```
+
+### Association-Stage Marker Exclusion
+
+The `associate` sub-command applies additional marker exclusion before the
+per-marker regression to ensure tested variants are reliable and
+interpretable.
+
+| Filter | Default | CLI Override | Config Key |
+|--------|---------|--------------|------------|
+| INTENSITY_ONLY probes | Excluded | `--no-exclude-intensity-only` | `association_marker_qc.exclude_intensity_only: false` |
+| Upstream variant QC (call rate + HWE + MAF) | Applied when `--variant-qc` provided | `--no-apply-variant-qc` | `association_marker_qc.apply_variant_qc: false` |
+| Monomorphic LRR (zero variance) | Excluded | `--no-exclude-monomorphic-lrr` | `association_marker_qc.exclude_monomorphic_lrr: false` |
+
+**Scientific rationale:**
+- **INTENSITY_ONLY**: Non-polymorphic probes report intensity but have no
+  genotype cluster (no GT field).  Their LRR is not comparable to
+  genotyped markers and should not be tested for association.
+- **Upstream variant QC**: Ensures tested markers pass standard GWAS
+  quality thresholds for call rate, Hardy-Weinberg equilibrium, and minor
+  allele frequency (Anderson et al. 2010; Marees et al. 2018).  MAF ≥ 0.01
+  mitigates inflation from rare-variant genotype miscalls.
+- **Monomorphic LRR**: Markers with zero variance across analysed samples
+  are uninformative and produce degenerate test statistics.
 
 ---
 
@@ -169,6 +207,13 @@ marker_qc:
   min_call_rate: 0.95        # Min marker call rate
   min_var: 0.001             # Min LRR variance (removes uninformative markers)
   max_var: null              # Max LRR variance (null = no upper limit)
+
+# association_marker_qc: Controls marker exclusion for the associate sub-command.
+# All enabled by default (GWAS best practice, Anderson et al. 2010; Marees et al. 2018).
+association_marker_qc:
+  exclude_intensity_only: true   # Exclude INTENSITY_ONLY probes (no GT field)
+  apply_variant_qc: true         # Apply upstream variant QC to LRR markers
+  exclude_monomorphic_lrr: true  # Exclude zero-variance LRR markers
 
 # correction: SVD decomposition parameters.
 correction:
@@ -283,6 +328,8 @@ from the YAML config.
 The `--variant-qc` flag and the LD pruning flags work together in
 the `associate` sub-command:
 
+**GRM markers (LMM only):**
+
 1. Markers are first filtered by `--variant-qc` (call rate + HWE +
    MAF pass required for GRM).
 2. The surviving markers are then LD-pruned unless `--no-ld-prune` is
@@ -290,9 +337,18 @@ the `associate` sub-command:
 3. LD pruning uses `--ld-window-bp` (default 1 000 000) and
    `--ld-r2-thresh` (default 0.2).
 
+**LRR markers (association testing):**
+
+1. INTENSITY_ONLY markers are excluded (unless `--no-exclude-intensity-only`).
+2. Markers failing `--variant-qc` (call rate + HWE + MAF) are excluded
+   from association testing (unless `--no-apply-variant-qc`).
+3. Monomorphic LRR markers (zero variance) are excluded (unless
+   `--no-exclude-monomorphic-lrr`).
+
 For the `correct` sub-command, `--variant-qc` applies call rate + HWE
 filters (MAF not required) to the RSVD marker selection; LD pruning
-is not performed during batch correction.
+is not performed during batch correction.  INTENSITY_ONLY markers are
+retained for correction.
 
 ### Provenance in Association Output
 
