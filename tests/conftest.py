@@ -10,6 +10,15 @@ import pytest
 TEST_DATA_DIR = Path(__file__).parent / "data"
 TEST_BCF = TEST_DATA_DIR / "test.bcf"
 
+# ---- Constants describing the bundled test BCF (output of illumina_idat_processing) ----
+BCF_N_VARIANTS = 96_869
+BCF_N_SAMPLES = 8
+BCF_SAMPLES = [
+    "HG00268", "HG00513", "HG00731", "NA12878",
+    "NA19129", "NA19238", "NA19331", "NA19347",
+]
+BCF_DETECTED_BUILD = "T2T-CHM13"
+
 
 @pytest.fixture
 def test_bcf_path() -> Path:
