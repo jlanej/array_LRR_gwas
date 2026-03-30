@@ -36,6 +36,11 @@ def _mock_binary_phenotype(n: int, *, seed: int = 42) -> np.ndarray:
     return (np.random.default_rng(seed).random(n) > 0.5).astype(float)
 
 
+def _sanitize_lrr(lrr: np.ndarray) -> np.ndarray:
+    """Replace non-finite LRR values (e.g. -inf) with NaN for stable analysis."""
+    return np.where(np.isfinite(lrr), lrr, np.nan)
+
+
 def _write_phenotype_tsv(
     path: Path,
     samples: list[str],
@@ -82,7 +87,10 @@ def _write_variant_qc_tsv(
         "all_ancestries_hwe_pass\tall_ancestries_maf_pass"
     ]
     for i, v in enumerate(variants):
-        vid = v.get("id") or f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}"
+        vid = v.get("id")
+        if not vid:
+            alts = ":".join(v.get("alts", ()))
+            vid = f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{alts}"
         cr = "False" if (fail_first and i == 0) else "True"
         lines.append(f"{vid}\t{cr}\tTrue\tTrue")
     path.write_text("\n".join(lines) + "\n")
@@ -216,7 +224,7 @@ class TestSubsettingOnBcf:
         from array_lrr_gwas.subsetting import call_rate_mask
 
         lrr, _, _ = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         mask = call_rate_mask(lrr, min_call_rate=0.95)
         assert mask.shape == (BCF_N_VARIANTS,)
         # Most markers should pass with real data
@@ -227,7 +235,7 @@ class TestSubsettingOnBcf:
         from array_lrr_gwas.subsetting import variance_mask
 
         lrr, _, _ = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         mask = variance_mask(lrr, min_var=0.001)
         assert mask.shape == (BCF_N_VARIANTS,)
         assert mask.sum() > 0
@@ -243,7 +251,10 @@ class TestSubsettingOnBcf:
         # Autosomes should be the majority
         assert mask.sum() > BCF_N_VARIANTS * 0.9
         # Non-autosomal should be excluded
-        assert not mask[chroms == "chrX"].all() or (chroms == "chrX").sum() == 0
+        # chrX markers should be excluded by autosome mask
+        n_chrx = (chroms == "chrX").sum()
+        if n_chrx > 0:
+            assert not mask[chroms == "chrX"].any()
 
     def test_complexity_mask(self, test_bcf_path):
         from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
@@ -266,7 +277,7 @@ class TestSubsettingOnBcf:
         from array_lrr_gwas.subsetting import subset_markers
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         chroms = np.array([v["chrom"] for v in variants])
         positions = np.array([v["pos"] for v in variants], dtype=np.intp)
 
@@ -295,7 +306,7 @@ class TestCorrectionOnBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, _, _ = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         hq = classify_samples(lrr, max_lrr_sd=0.35)
         assert hq.shape == (BCF_N_SAMPLES,)
         # Real data has low LRR SD; all should be HQ with lenient threshold
@@ -307,7 +318,7 @@ class TestCorrectionOnBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         chroms = np.array([v["chrom"] for v in variants])
         positions = np.array([v["pos"] for v in variants], dtype=np.intp)
 
@@ -330,7 +341,7 @@ class TestCorrectionOnBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, _, _ = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
 
         corrected, info = correct_lrr(
             lrr,
@@ -348,7 +359,7 @@ class TestCorrectionOnBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, _, _ = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
 
         corrected, _ = correct_lrr(
             lrr,
@@ -368,7 +379,7 @@ class TestCorrectionOnBcf:
         from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
 
         _write_variant_qc_tsv(tmp_path / "qc.tsv", variants, fail_first=True)
         qc_data = read_collated_variant_qc(tmp_path / "qc.tsv")
@@ -401,7 +412,7 @@ class TestDecompositionOnBcf:
         from array_lrr_gwas.subsetting import subset_markers
 
         lrr, _, _ = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         mask = subset_markers(lrr, min_call_rate=0.90, min_var=0.001,
                               autosomes_only=False)
         sub = lrr[mask]
@@ -422,7 +433,7 @@ class TestDecompositionOnBcf:
         from array_lrr_gwas.subsetting import subset_markers
 
         lrr, _, _ = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         mask = subset_markers(lrr, min_call_rate=0.90, min_var=0.001,
                               autosomes_only=False)
         sub = lrr[mask]
@@ -515,7 +526,7 @@ class TestAssociationOnBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, samples, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         phenotype = _mock_phenotype(BCF_N_SAMPLES)
 
         result = run_association(lrr, phenotype, variants, method="ols")
@@ -530,7 +541,7 @@ class TestAssociationOnBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         rng = np.random.default_rng(42)
         phenotype = _mock_phenotype(BCF_N_SAMPLES)
         covariates = rng.normal(size=(BCF_N_SAMPLES, 2))
@@ -545,7 +556,7 @@ class TestAssociationOnBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         phenotype = _mock_binary_phenotype(BCF_N_SAMPLES)
 
         result = run_association(lrr, phenotype, variants, method="logistic")
@@ -559,7 +570,7 @@ class TestAssociationOnBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
 
         dosage, _, _ = read_genotypes(test_bcf_path, min_maf=0.05, min_call_rate=0.90)
         grm = compute_grm(dosage, min_maf=0.05)
@@ -578,7 +589,7 @@ class TestAssociationOnBcf:
         from array_lrr_gwas.io_vcf import read_lrr
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         phenotype = _mock_phenotype(BCF_N_SAMPLES)
 
         result = run_association(lrr, phenotype, variants, method="ols")
@@ -607,7 +618,7 @@ class TestSegmentationOnBcf:
         from array_lrr_gwas.segmentation import segment_associations
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         phenotype = _mock_phenotype(BCF_N_SAMPLES)
 
         result = run_association(lrr, phenotype, variants, method="ols")
@@ -625,7 +636,7 @@ class TestSegmentationOnBcf:
         from array_lrr_gwas.segmentation import segment_associations
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         phenotype = _mock_phenotype(BCF_N_SAMPLES)
 
         result = run_association(lrr, phenotype, variants, method="ols")
@@ -645,7 +656,7 @@ class TestSegmentationOnBcf:
         from array_lrr_gwas.segmentation import segment_associations
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         phenotype = _mock_phenotype(BCF_N_SAMPLES)
 
         result = run_association(lrr, phenotype, variants, method="ols")
@@ -667,7 +678,7 @@ class TestSegmentationOnBcf:
         from array_lrr_gwas.segmentation import segment_associations
 
         lrr, _, variants = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
         phenotype = _mock_phenotype(BCF_N_SAMPLES)
 
         result = run_association(lrr, phenotype, variants, method="ols")
@@ -794,7 +805,7 @@ class TestQcConfigWithBcf:
         from array_lrr_gwas.qc_config import apply_to_correct_args, defaults
 
         lrr, _, _ = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
 
         cfg = defaults()
         kwargs = apply_to_correct_args(cfg, cli_overrides={
@@ -814,7 +825,7 @@ class TestQcConfigWithBcf:
         from array_lrr_gwas.qc_config import apply_to_correct_args, load_config
 
         lrr, _, _ = read_lrr(test_bcf_path)
-        lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+        lrr = _sanitize_lrr(lrr)
 
         yaml_file = tmp_path / "qc.yaml"
         yaml_file.write_text(
