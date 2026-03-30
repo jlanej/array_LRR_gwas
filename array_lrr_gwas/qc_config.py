@@ -38,6 +38,16 @@ Best-Practice Default Thresholds
 * ``no_complexity_filter``: **False** — When True, skips the default
   genomic-complexity region exclusion (centromeres, segdups).
 
+**Association QC** (additional sample exclusion for ``associate``):
+
+* ``honor_precomputed``: **True** — Honor ``pre_pca_excluded``,
+  ``excluded_relatedness``, ``excluded_het_outlier`` columns.
+* ``exclude_baf_sd``: **True** — Exclude samples with high BAF SD.
+* ``max_baf_sd``: **0.15** — BAF SD threshold (contamination proxy).
+* ``exclude_sex_discordant``: **True** — Exclude ``sex_status == "DISCORDANT"``.
+* ``exclude_extreme_inbreeding``: **True** — Exclude ``|inbreeding_F| > threshold``.
+* ``max_abs_inbreeding_f``: **0.15** — Inbreeding coefficient threshold.
+
 Example YAML
 -------------
 .. code-block:: yaml
@@ -46,6 +56,10 @@ Example YAML
     sample_qc:
       max_lrr_sd: 0.30        # stricter noise threshold
       min_call_rate: 0.98      # stricter call-rate threshold
+
+    association_qc:
+      max_baf_sd: 0.10         # stricter contamination threshold
+      exclude_sex_discordant: false  # keep sex-discordant samples
 
     marker_qc:
       min_call_rate: 0.98
@@ -149,11 +163,11 @@ def defaults() -> dict[str, Any]:
 def load_config(path: str | Path) -> dict[str, Any]:
     """Load a YAML QC configuration file and merge with defaults.
 
-    Only recognised top-level sections (``sample_qc``, ``marker_qc``,
-    ``correction``) are merged; unknown sections raise :class:`ValueError`.
-    Keys that are absent in the YAML file retain their best-practice
-    defaults, so users only need to specify the values they wish to
-    override.
+    Recognised top-level sections are ``sample_qc``, ``association_qc``,
+    ``marker_qc``, ``correction``, and ``upstream_qc``.  Unknown sections
+    raise :class:`ValueError`.  Keys that are absent in the YAML file
+    retain their best-practice defaults, so users only need to specify the
+    values they wish to override.
 
     Parameters
     ----------
@@ -235,6 +249,52 @@ def apply_to_correct_args(
         "k": cfg["correction"]["k"],
         "n_components": cfg["correction"]["n_components"],
         "backend": cfg["correction"]["backend"],
+    }
+
+    if cli_overrides:
+        for key, val in cli_overrides.items():
+            if val is not None and key in args:
+                args[key] = val
+
+    return args
+
+
+def apply_to_associate_args(
+    cfg: dict[str, Any],
+    cli_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Translate a merged QC config into keyword arguments for
+    :func:`~array_lrr_gwas.sample_sheet.classify_samples_for_association`.
+
+    **Precedence**: CLI flags > YAML config > built-in defaults.
+
+    Parameters
+    ----------
+    cfg : dict
+        Merged configuration from :func:`load_config` or :func:`defaults`.
+    cli_overrides : dict or None
+        Explicit CLI overrides.  Boolean flags should already be resolved
+        (e.g. ``no_honor_precomputed=True`` → ``honor_precomputed=False``).
+        Only non-``None`` values are applied.
+
+    Returns
+    -------
+    dict
+        Keyword arguments suitable for
+        ``classify_samples_for_association()``.
+    """
+    aqc = cfg.get("association_qc", {})
+    sqc = cfg.get("sample_qc", {})
+
+    args: dict[str, Any] = {
+        "max_lrr_sd": sqc.get("max_lrr_sd", 0.35),
+        "min_call_rate": sqc.get("min_call_rate", 0.97),
+        "honor_precomputed": aqc.get("honor_precomputed", True),
+        "exclude_baf_sd": aqc.get("exclude_baf_sd", True),
+        "max_baf_sd": aqc.get("max_baf_sd", 0.15),
+        "exclude_sex_discordant": aqc.get("exclude_sex_discordant", True),
+        "exclude_extreme_inbreeding": aqc.get("exclude_extreme_inbreeding", True),
+        "max_abs_inbreeding_f": aqc.get("max_abs_inbreeding_f", 0.15),
     }
 
     if cli_overrides:

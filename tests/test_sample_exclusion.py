@@ -553,3 +553,63 @@ class TestCliExclusionArgs:
         ])
         assert args.max_baf_sd == 0.25
         assert args.max_abs_inbreeding_f == 0.20
+
+
+# ---------------------------------------------------------------------------
+# apply_to_associate_args helper
+# ---------------------------------------------------------------------------
+
+class TestApplyToAssociateArgs:
+    """Tests for ``qc_config.apply_to_associate_args``."""
+
+    def test_defaults_mapping(self):
+        from array_lrr_gwas.qc_config import apply_to_associate_args
+        cfg = defaults()
+        args = apply_to_associate_args(cfg)
+        assert args["max_lrr_sd"] == 0.35
+        assert args["min_call_rate"] == 0.97
+        assert args["honor_precomputed"] is True
+        assert args["exclude_baf_sd"] is True
+        assert args["max_baf_sd"] == 0.15
+        assert args["exclude_sex_discordant"] is True
+        assert args["exclude_extreme_inbreeding"] is True
+        assert args["max_abs_inbreeding_f"] == 0.15
+
+    def test_cli_overrides_take_precedence(self):
+        from array_lrr_gwas.qc_config import apply_to_associate_args
+        cfg = defaults()
+        cli = {"max_lrr_sd": 0.20, "honor_precomputed": False, "max_baf_sd": 0.25}
+        args = apply_to_associate_args(cfg, cli)
+        assert args["max_lrr_sd"] == 0.20
+        assert args["honor_precomputed"] is False
+        assert args["max_baf_sd"] == 0.25
+        # Non-overridden values stay at config defaults
+        assert args["min_call_rate"] == 0.97
+        assert args["exclude_baf_sd"] is True
+
+    def test_none_cli_overrides_ignored(self):
+        from array_lrr_gwas.qc_config import apply_to_associate_args
+        cfg = defaults()
+        cli = {"max_lrr_sd": None, "honor_precomputed": None}
+        args = apply_to_associate_args(cfg, cli)
+        # None values don't override config
+        assert args["max_lrr_sd"] == 0.35
+        assert args["honor_precomputed"] is True
+
+    def test_config_plus_cli(self, tmp_path):
+        from array_lrr_gwas.qc_config import apply_to_associate_args
+        cfg_file = tmp_path / "qc.yaml"
+        cfg_file.write_text(
+            "association_qc:\n"
+            "  max_baf_sd: 0.20\n"
+            "  exclude_sex_discordant: false\n"
+            "sample_qc:\n"
+            "  max_lrr_sd: 0.30\n"
+        )
+        cfg = load_config(cfg_file)
+        # CLI overrides max_baf_sd but not exclude_sex_discordant
+        cli = {"max_baf_sd": 0.10}
+        args = apply_to_associate_args(cfg, cli)
+        assert args["max_lrr_sd"] == 0.30  # from YAML
+        assert args["max_baf_sd"] == 0.10  # from CLI
+        assert args["exclude_sex_discordant"] is False  # from YAML

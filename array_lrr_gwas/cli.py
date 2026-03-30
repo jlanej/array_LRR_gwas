@@ -719,7 +719,7 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     from array_lrr_gwas.association import run_association
     from array_lrr_gwas.io_vcf import read_lrr
-    from array_lrr_gwas.qc_config import defaults, load_config
+    from array_lrr_gwas.qc_config import defaults, load_config, apply_to_associate_args
 
     input_path = args.input
     if not input_path.exists():
@@ -836,71 +836,45 @@ def _run_associate(args: argparse.Namespace) -> int:
     elif args.sample_sheet is not None:
         from array_lrr_gwas.sample_sheet import classify_samples_for_association
 
-        # Resolve thresholds: CLI > config > defaults
-        assoc_cfg = cfg.get("association_qc", {})
-        max_lrr_sd = (
-            args.max_lrr_sd
-            if args.max_lrr_sd is not None
-            else cfg["sample_qc"]["max_lrr_sd"]
-        )
-        min_call_rate = (
-            args.min_sample_call_rate
-            if args.min_sample_call_rate is not None
-            else cfg["sample_qc"]["min_call_rate"]
-        )
+        # Resolve thresholds via apply_to_associate_args:
+        # CLI --no-* flags → config → defaults.
+        cli_overrides: dict[str, object] = {}
+        if args.max_lrr_sd is not None:
+            cli_overrides["max_lrr_sd"] = args.max_lrr_sd
+        if args.min_sample_call_rate is not None:
+            cli_overrides["min_call_rate"] = args.min_sample_call_rate
+        if args.no_honor_precomputed:
+            cli_overrides["honor_precomputed"] = False
+        if args.no_exclude_baf_sd:
+            cli_overrides["exclude_baf_sd"] = False
+        if args.max_baf_sd is not None:
+            cli_overrides["max_baf_sd"] = args.max_baf_sd
+        if args.no_exclude_sex_discordant:
+            cli_overrides["exclude_sex_discordant"] = False
+        if args.no_exclude_extreme_inbreeding:
+            cli_overrides["exclude_extreme_inbreeding"] = False
+        if args.max_abs_inbreeding_f is not None:
+            cli_overrides["max_abs_inbreeding_f"] = args.max_abs_inbreeding_f
 
-        # Resolve exclusion flags: CLI --no-* flags override config
-        honor_precomputed = (
-            not args.no_honor_precomputed
-            and assoc_cfg.get("honor_precomputed", True)
-        )
-
-        exclude_baf_sd = (
-            not args.no_exclude_baf_sd
-            and assoc_cfg.get("exclude_baf_sd", True)
-        )
-
-        max_baf_sd = (
-            args.max_baf_sd
-            if args.max_baf_sd is not None
-            else assoc_cfg.get("max_baf_sd", 0.15)
-        )
-
-        exclude_sex_discordant = (
-            not args.no_exclude_sex_discordant
-            and assoc_cfg.get("exclude_sex_discordant", True)
-        )
-
-        exclude_extreme_inbreeding = (
-            not args.no_exclude_extreme_inbreeding
-            and assoc_cfg.get("exclude_extreme_inbreeding", True)
-        )
-
-        max_abs_inbreeding_f = (
-            args.max_abs_inbreeding_f
-            if args.max_abs_inbreeding_f is not None
-            else assoc_cfg.get("max_abs_inbreeding_f", 0.15)
-        )
+        assoc_kwargs = apply_to_associate_args(cfg, cli_overrides)
 
         logger.info(
             "Deriving HQ samples from sample sheet %s "
             "(max_lrr_sd=%.4f, min_call_rate=%.4f, "
             "honor_precomputed=%s, exclude_baf_sd=%s [max=%.4f], "
             "exclude_sex_discordant=%s, exclude_extreme_inbreeding=%s [max|F|=%.4f])",
-            args.sample_sheet, max_lrr_sd, min_call_rate,
-            honor_precomputed, exclude_baf_sd, max_baf_sd,
-            exclude_sex_discordant, exclude_extreme_inbreeding, max_abs_inbreeding_f,
+            args.sample_sheet,
+            assoc_kwargs["max_lrr_sd"],
+            assoc_kwargs["min_call_rate"],
+            assoc_kwargs["honor_precomputed"],
+            assoc_kwargs["exclude_baf_sd"],
+            assoc_kwargs["max_baf_sd"],
+            assoc_kwargs["exclude_sex_discordant"],
+            assoc_kwargs["exclude_extreme_inbreeding"],
+            assoc_kwargs["max_abs_inbreeding_f"],
         )
         excl_result = classify_samples_for_association(
-            args.sample_sheet,
-            max_lrr_sd=max_lrr_sd,
-            min_call_rate=min_call_rate,
-            honor_precomputed=honor_precomputed,
-            exclude_baf_sd=exclude_baf_sd,
-            max_baf_sd=max_baf_sd,
-            exclude_sex_discordant=exclude_sex_discordant,
-            exclude_extreme_inbreeding=exclude_extreme_inbreeding,
-            max_abs_inbreeding_f=max_abs_inbreeding_f,
+            args.sample_sheet, **assoc_kwargs,
         )
         hq_samples = excl_result.hq_ids
         hq_mask = np.array([s in hq_samples for s in samples], dtype=bool)
