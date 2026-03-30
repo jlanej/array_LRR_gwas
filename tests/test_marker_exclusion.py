@@ -28,7 +28,7 @@ class TestIntensityOnlyFlag:
             assert "intensity_only" in v
             assert isinstance(v["intensity_only"], bool)
 
-    def test_intensity_only_default_false_for_vcf_without_flag(self, tmp_path):
+    def test_intensity_only_defaults_false_when_info_field_undefined(self, tmp_path):
         """When the INFO field is not defined, default to False."""
         import pysam
 

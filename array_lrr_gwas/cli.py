@@ -1145,13 +1145,18 @@ def _run_associate(args: argparse.Namespace) -> int:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             lrr_var = np.nanvar(lrr_sub, axis=1)
-        mono_mask = (lrr_var == 0.0) | np.isnan(lrr_var)
+        all_nan_mask = np.all(np.isnan(lrr_sub), axis=1)
+        zero_var_mask = (lrr_var == 0.0) & ~all_nan_mask
+        mono_mask = zero_var_mask | all_nan_mask
         n_mono = int(mono_mask.sum())
+        n_zero_var = int(zero_var_mask.sum())
+        n_all_nan = int(all_nan_mask.sum())
         marker_keep &= ~mono_mask
         logger.info(
             "Association marker exclusion: monomorphic LRR "
-            "(zero variance): %d / %d excluded",
-            n_mono, n_total_markers,
+            "(zero variance): %d / %d excluded "
+            "(%d constant, %d all-NaN)",
+            n_mono, n_total_markers, n_zero_var, n_all_nan,
         )
 
     n_keep = int(marker_keep.sum())
