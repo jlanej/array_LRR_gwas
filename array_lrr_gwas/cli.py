@@ -1378,16 +1378,15 @@ def _run_associate(args: argparse.Namespace) -> int:
     # --no-exclude-monomorphic-lrr is used, some True values may appear.
     for rec, v in zip(records, variants):
         rec["intensity_only"] = v.get("intensity_only", False)
-    # Compute per-marker monomorphic flag on the *tested* LRR sub-matrix
+    # Compute per-marker monomorphic flag on the *tested* LRR sub-matrix.
+    # len(records) == lrr_sub.shape[0] since both derive from the same
+    # marker-filtered variant list passed to run_association().
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         _tested_var = np.nanvar(lrr_sub, axis=1)
     _tested_nan = np.all(np.isnan(lrr_sub), axis=1)
     for i, rec in enumerate(records):
-        if i < len(_tested_var):
-            rec["lrr_monomorphic"] = bool(_tested_var[i] == 0.0) or bool(_tested_nan[i])
-        else:
-            rec["lrr_monomorphic"] = ""
+        rec["lrr_monomorphic"] = bool(_tested_var[i] == 0.0) or bool(_tested_nan[i])
 
     header = list(records[0].keys()) if records else []
     with open(args.output, "w", newline="") as fh:

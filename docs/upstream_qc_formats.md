@@ -386,7 +386,11 @@ by which filters, and enables trivial post-hoc filtering:
 
 ```bash
 # Example: filter association results to standard GWAS thresholds
-awk -F'\t' 'NR==1 || ($call_rate == "True" && $hwe == "True" && $maf == "True")' results.tsv
+# (column positions will vary; use header-aware tools like csvtk or pandas)
+head -1 results.tsv  # check column positions
+# Or with Python:
+# import pandas as pd; df = pd.read_csv("results.tsv", sep="\t")
+# df = df[df.all_ancestries_call_rate_pass & df.all_ancestries_hwe_pass & df.all_ancestries_maf_pass]
 ```
 
 ---
