@@ -18,6 +18,8 @@ import logging
 import sys
 from pathlib import Path
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,6 +30,61 @@ def _variant_id(v: dict) -> str:
         return vid
     alts = v.get("alts") or ()
     return f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(alts)}"
+
+
+def _fmt_float(val: float) -> str:
+    """Format floats compactly for TSV outputs."""
+    return f"{float(val):.10g}"
+
+
+def _write_svd_text_outputs(
+    prefix: Path,
+    *,
+    info: dict,
+    samples: list[str],
+    variants: list[dict],
+    include_loadings: bool = False,
+) -> dict[str, Path]:
+    """Write SVD metadata text outputs for the ``correct`` command."""
+    k = int(info["k"])
+    singular_values = np.asarray(info["singular_values"], dtype=float)
+    sample_scores = np.asarray(info["sample_scores"], dtype=float)
+
+    pcs_path = Path(f"{prefix}.sample_pcs.tsv")
+    with pcs_path.open("w", encoding="utf-8") as fh:
+        header = ["Sample_ID"] + [f"PC{i + 1}" for i in range(k)]
+        fh.write("\t".join(header) + "\n")
+        for sample_idx, sample_id in enumerate(samples):
+            pcs = [_fmt_float(sample_scores[pc_idx, sample_idx]) for pc_idx in range(k)]
+            fh.write("\t".join([sample_id] + pcs) + "\n")
+
+    sv_path = Path(f"{prefix}.singular_values.tsv")
+    with sv_path.open("w", encoding="utf-8") as fh:
+        fh.write("PC\tsingular_value\n")
+        for pc_idx, sval in enumerate(singular_values, start=1):
+            fh.write(f"PC{pc_idx}\t{_fmt_float(sval)}\n")
+
+    out_paths: dict[str, Path] = {
+        "sample_pcs": pcs_path,
+        "singular_values": sv_path,
+    }
+
+    if include_loadings:
+        marker_mask = np.asarray(info["marker_mask"], dtype=bool)
+        marker_loadings = np.asarray(info["marker_loadings"], dtype=float)
+        kept_idx = np.flatnonzero(marker_mask)
+        loadings_path = Path(f"{prefix}.loadings.tsv")
+        with loadings_path.open("w", encoding="utf-8") as fh:
+            header = ["chrom", "pos", "variant_id"] + [f"PC{i + 1}" for i in range(k)]
+            fh.write("\t".join(header) + "\n")
+            for row_idx, var_idx in enumerate(kept_idx):
+                var = variants[var_idx]
+                pcs = [_fmt_float(marker_loadings[row_idx, pc_idx]) for pc_idx in range(k)]
+                row = [str(var["chrom"]), str(var["pos"]), _variant_id(var)] + pcs
+                fh.write("\t".join(row) + "\n")
+        out_paths["loadings"] = loadings_path
+
+    return out_paths
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -175,6 +232,24 @@ def _build_parser() -> argparse.ArgumentParser:
             "Also configurable via upstream_qc.variant_qc_path in the "
             "YAML config. If neither is set, no upstream filtering is "
             "applied and a warning is logged."
+        ),
+    )
+    correct.add_argument(
+        "--svd-output-prefix",
+        type=Path,
+        default=None,
+        help=(
+            "Prefix for SVD text outputs written by `correct`. "
+            "Default: <output>.svd, producing "
+            "<prefix>.sample_pcs.tsv and <prefix>.singular_values.tsv."
+        ),
+    )
+    correct.add_argument(
+        "--write-loadings",
+        action="store_true",
+        help=(
+            "Also write marker loadings to <prefix>.loadings.tsv "
+            "(can be large for dense arrays)."
         ),
     )
 
@@ -611,8 +686,6 @@ def main(argv: list[str] | None = None) -> int:
 
 def _run_correct(args: argparse.Namespace) -> int:
     """Execute the ``correct`` sub-command."""
-    import numpy as np
-
     from array_lrr_gwas.correction import correct_lrr
     from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
     from array_lrr_gwas.io_vcf import read_lrr, write_corrected
@@ -745,6 +818,18 @@ def _run_correct(args: argparse.Namespace) -> int:
         info,
         path_template=input_path,
     )
+    svd_prefix = args.svd_output_prefix or Path(f"{args.output}.svd")
+    svd_paths = _write_svd_text_outputs(
+        svd_prefix,
+        info=info,
+        samples=samples,
+        variants=variants,
+        include_loadings=args.write_loadings,
+    )
+    logger.info("Wrote sample PCs: %s", svd_paths["sample_pcs"])
+    logger.info("Wrote singular values: %s", svd_paths["singular_values"])
+    if "loadings" in svd_paths:
+        logger.info("Wrote loadings: %s", svd_paths["loadings"])
     logger.info("Done.")
     return 0
 

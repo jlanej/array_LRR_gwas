@@ -163,7 +163,7 @@ def correct_lrr(
         Batch-corrected LRR values.
     info : dict
         Metadata about the correction: selected *k*, marker mask, sample
-        classification, and singular values.
+        classification, singular values, sample PC scores, and marker loadings.
     """
     # 1. Classify samples
     hq_mask = classify_samples(
@@ -253,6 +253,8 @@ def correct_lrr(
     info = {
         "k": k,
         "singular_values": s,
+        "sample_scores": Vt_full,
+        "marker_loadings": U,
         "marker_mask": marker_mask,
         "hq_sample_mask": hq_mask,
         "n_hq_samples": int(np.sum(hq_mask)),

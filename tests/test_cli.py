@@ -48,6 +48,17 @@ class TestCli:
         ])
         assert args.n_components == 12
 
+    def test_correct_svd_output_args_parsed(self):
+        args = _build_parser().parse_args([
+            "correct",
+            "in.bcf",
+            "-o", "out.bcf",
+            "--svd-output-prefix", "my_prefix",
+            "--write-loadings",
+        ])
+        assert args.svd_output_prefix == Path("my_prefix")
+        assert args.write_loadings is True
+
     def test_associate_variant_qc_arg_parsed(self):
         args = _build_parser().parse_args([
             "associate",
@@ -242,6 +253,105 @@ class TestCli:
         ])
         assert rc == 0
         assert out.exists()
+
+    def test_correct_writes_svd_text_outputs(self, tmp_path, monkeypatch):
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+        out = tmp_path / "out.bcf"
+
+        lrr = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float)
+        samples = ["S1", "S2"]
+        variants = [
+            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 200, "id": ".", "ref": "G", "alts": ("T",)},
+        ]
+
+        info = {
+            "k": 2,
+            "singular_values": np.array([3.0, 1.5], dtype=float),
+            "sample_scores": np.array([[0.10, 0.20], [0.30, 0.40]], dtype=float),
+            "marker_loadings": np.array([[0.9, 0.1], [0.2, 0.8]], dtype=float),
+            "marker_mask": np.array([True, True], dtype=bool),
+            "hq_sample_mask": np.array([True, True], dtype=bool),
+            "n_hq_samples": 2,
+            "n_markers_used": 2,
+            "backend": "rsvd",
+        }
+
+        monkeypatch.setattr("array_lrr_gwas.io_vcf.read_lrr", lambda _p: (lrr, samples, variants))
+        monkeypatch.setattr("array_lrr_gwas.io_vcf.write_corrected", lambda *_a, **_k: None)
+        monkeypatch.setattr("array_lrr_gwas.correction.correct_lrr", lambda *_a, **_k: (lrr, info))
+
+        rc = main([
+            "correct",
+            str(fake_bcf),
+            "-o", str(out),
+            "--no-complexity-filter",
+        ])
+        assert rc == 0
+
+        pcs_path = tmp_path / "out.bcf.svd.sample_pcs.tsv"
+        sv_path = tmp_path / "out.bcf.svd.singular_values.tsv"
+        assert pcs_path.exists()
+        assert sv_path.exists()
+
+        pcs_lines = pcs_path.read_text().strip().splitlines()
+        assert pcs_lines[0] == "Sample_ID\tPC1\tPC2"
+        assert pcs_lines[1] == "S1\t0.1\t0.3"
+        assert pcs_lines[2] == "S2\t0.2\t0.4"
+
+        sv_lines = sv_path.read_text().strip().splitlines()
+        assert sv_lines == [
+            "PC\tsingular_value",
+            "PC1\t3",
+            "PC2\t1.5",
+        ]
+
+    def test_correct_writes_loadings_when_requested(self, tmp_path, monkeypatch):
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+        out = tmp_path / "out.bcf"
+        custom_prefix = tmp_path / "svd_summary"
+
+        lrr = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float)
+        samples = ["S1", "S2"]
+        variants = [
+            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 200, "id": ".", "ref": "G", "alts": ("T",)},
+        ]
+        info = {
+            "k": 2,
+            "singular_values": np.array([3.0, 1.5], dtype=float),
+            "sample_scores": np.array([[0.10, 0.20], [0.30, 0.40]], dtype=float),
+            "marker_loadings": np.array([[0.9, 0.1]], dtype=float),
+            "marker_mask": np.array([True, False], dtype=bool),
+            "hq_sample_mask": np.array([True, True], dtype=bool),
+            "n_hq_samples": 2,
+            "n_markers_used": 1,
+            "backend": "rsvd",
+        }
+
+        monkeypatch.setattr("array_lrr_gwas.io_vcf.read_lrr", lambda _p: (lrr, samples, variants))
+        monkeypatch.setattr("array_lrr_gwas.io_vcf.write_corrected", lambda *_a, **_k: None)
+        monkeypatch.setattr("array_lrr_gwas.correction.correct_lrr", lambda *_a, **_k: (lrr, info))
+
+        rc = main([
+            "correct",
+            str(fake_bcf),
+            "-o", str(out),
+            "--no-complexity-filter",
+            "--svd-output-prefix", str(custom_prefix),
+            "--write-loadings",
+        ])
+        assert rc == 0
+
+        loadings_path = tmp_path / "svd_summary.loadings.tsv"
+        assert loadings_path.exists()
+        loadings_lines = loadings_path.read_text().strip().splitlines()
+        assert loadings_lines == [
+            "chrom\tpos\tvariant_id\tPC1\tPC2",
+            "chr1\t100\tv1\t0.9\t0.1",
+        ]
 
     def test_associate_help_flag(self, capsys):
         with pytest.raises(SystemExit) as exc:
