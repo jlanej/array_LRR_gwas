@@ -227,6 +227,8 @@ PIPELINE_DIR=/data/project/my_run
 #   ${PIPELINE_DIR}/stage2/vcf/stage2_reclustered.bcf   — BCF with GT, LRR, BAF
 #   ${PIPELINE_DIR}/compiled_sample_sheet.tsv            — sample QC + ancestry PCs
 #   ${PIPELINE_DIR}/ancestry_stratified_qc/collated_variant_qc.tsv — per-variant QC flags
+# If the upstream run used --skip-stage2, use:
+#   ${PIPELINE_DIR}/stage1/vcf/stage1_initial.bcf
 
 INPUT_BCF="${PIPELINE_DIR}/stage2/vcf/stage2_reclustered.bcf"
 SAMPLE_SHEET="${PIPELINE_DIR}/compiled_sample_sheet.tsv"
@@ -236,6 +238,8 @@ OUTDIR="${PIPELINE_DIR}/lrr_gwas"
 mkdir -p "${OUTDIR}"
 
 # Step 1 — Batch-effect correction (build is auto-detected from BCF contigs)
+# HQ/LQ sample classification here is derived directly from BCF LRR values.
+# --sample-sheet is only needed at association stage for covariates/exclusions.
 array-lrr-gwas correct "${INPUT_BCF}" \
     -o "${OUTDIR}/corrected.bcf" \
     --variant-qc "${VARIANT_QC}" \
@@ -782,6 +786,7 @@ are appended for every tested marker:
 | `all_ancestries_call_rate_pass` | bool/empty | Marker passes cross-ancestry call-rate threshold |
 | `all_ancestries_hwe_pass` | bool/empty | Marker passes cross-ancestry HWE threshold |
 | `all_ancestries_maf_pass` | bool/empty | Marker passes cross-ancestry MAF threshold |
+| `all_ancestries_qc_pass` | bool/empty | Optional upstream composite flag (typically call rate + HWE + MAF all pass) |
 | `intensity_only` | bool | Marker is an INTENSITY\_ONLY probe (no GT cluster) |
 | `lrr_monomorphic` | bool | Marker has zero LRR variance across analysed samples |
 
@@ -789,7 +794,8 @@ are appended for every tested marker:
 > `INTENSITY_ONLY` probes and monomorphic-LRR markers are excluded from
 > association testing.  Upstream variant QC flags
 > (`all_ancestries_call_rate_pass`, `all_ancestries_hwe_pass`,
-> `all_ancestries_maf_pass`) are **not** used to pre-filter markers —
+> `all_ancestries_maf_pass`, and optional `all_ancestries_qc_pass`) are
+> **not** used to pre-filter markers —
 > instead, they are propagated to the output TSV as provenance columns.
 > This enables trivial post-hoc filtering in R, Python, or any
 > downstream tool without re-running the association scan.
@@ -797,8 +803,8 @@ are appended for every tested marker:
 Example row (tab-separated, with header for reference):
 
 ```
-chrom  pos    variant_id      beta    se     stat   p_value  n_samples  method  all_ancestries_call_rate_pass  all_ancestries_hwe_pass  all_ancestries_maf_pass  intensity_only  lrr_monomorphic
-chr1   12345  chr1:12345:A:T  -0.023  0.011  -2.09  0.037    4800       lmm     True                           True                     True                     False           False
+chrom  pos    variant_id      beta    se     stat   p_value  n_samples  method  all_ancestries_call_rate_pass  all_ancestries_hwe_pass  all_ancestries_maf_pass  all_ancestries_qc_pass  intensity_only  lrr_monomorphic
+chr1   12345  chr1:12345:A:T  -0.023  0.011  -2.09  0.037    4800       lmm     True                           True                     True                     True                    False           False
 ```
 
 ### Segmentation BED (`segment`)

@@ -699,16 +699,86 @@ class TestCli:
         assert "all_ancestries_call_rate_pass" in reader.fieldnames
         assert "all_ancestries_hwe_pass" in reader.fieldnames
         assert "all_ancestries_maf_pass" in reader.fieldnames
+        assert "all_ancestries_qc_pass" in reader.fieldnames
 
         # Check values for a1
         assert rows[0]["all_ancestries_call_rate_pass"] == "True"
         assert rows[0]["all_ancestries_hwe_pass"] == "True"
         assert rows[0]["all_ancestries_maf_pass"] == "False"
+        assert rows[0]["all_ancestries_qc_pass"] == ""
 
         # Check values for a2
         assert rows[1]["all_ancestries_call_rate_pass"] == "False"
         assert rows[1]["all_ancestries_hwe_pass"] == "True"
         assert rows[1]["all_ancestries_maf_pass"] == "True"
+        assert rows[1]["all_ancestries_qc_pass"] == ""
+
+    def test_associate_propagates_composite_variant_qc_flag(self, tmp_path, monkeypatch):
+        """When present upstream, all_ancestries_qc_pass is propagated to output."""
+        import csv
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+        qc_tsv = tmp_path / "qc.tsv"
+        qc_tsv.write_text(
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass\t"
+            "all_ancestries_qc_pass\n"
+            "a1\tTrue\tTrue\tFalse\tFalse\n"
+            "a2\tFalse\tTrue\tTrue\tFalse\n"
+        )
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "ols"},
+                ]
+
+        monkeypatch.setattr(
+            association, "run_association",
+            lambda *_a, **_k: _FakeResult(),
+        )
+
+        rc = main([
+            "associate",
+            str(fake_bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "--variant-qc", str(qc_tsv),
+            "-o", str(out),
+        ])
+        assert rc == 0
+
+        with open(out, newline="") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+
+        assert rows[0]["all_ancestries_qc_pass"] == "False"
+        assert rows[1]["all_ancestries_qc_pass"] == "False"
 
     def test_associate_no_qc_provenance_without_variant_qc(self, tmp_path, monkeypatch):
         """Without --variant-qc, output TSV should NOT include QC columns."""
