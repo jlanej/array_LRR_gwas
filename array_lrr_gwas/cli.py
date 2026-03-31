@@ -49,13 +49,14 @@ def _write_svd_text_outputs(
     k = int(info["k"])
     singular_values = np.asarray(info["singular_values"], dtype=float)
     sample_scores = np.asarray(info["sample_scores"], dtype=float)
+    pc_scores = singular_values[:, np.newaxis] * sample_scores
 
     pcs_path = Path(f"{prefix}.sample_pcs.tsv")
     with pcs_path.open("w", encoding="utf-8") as fh:
-        header = ["Sample_ID"] + [f"PC{i + 1}" for i in range(k)]
+        header = ["SAMPLE"] + [f"PC{i + 1}" for i in range(k)]
         fh.write("\t".join(header) + "\n")
         for sample_idx, sample_id in enumerate(samples):
-            pcs = [_fmt_float(sample_scores[pc_idx, sample_idx]) for pc_idx in range(k)]
+            pcs = [_fmt_float(pc_scores[pc_idx, sample_idx]) for pc_idx in range(k)]
             fh.write("\t".join([sample_id] + pcs) + "\n")
 
     sv_path = Path(f"{prefix}.singular_values.tsv")

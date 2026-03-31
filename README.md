@@ -772,9 +772,9 @@ values, timestamp).
 is `<OUTPUT>.svd`; override with `--svd-output-prefix`.
 
 1. `<prefix>.sample_pcs.tsv`
-   - Header: `Sample_ID`, `PC1`, `PC2`, ..., `PCk`
+   - Header: `SAMPLE`, `PC1`, `PC2`, ..., `PCk`
    - One row per sample in BCF/VCF sample order
-   - Values: sample PC scores used for correction
+   - Values: sample PC values for the correction components (`diag(s) @ Vᵀ`)
 
 2. `<prefix>.singular_values.tsv`
    - Header: `PC`, `singular_value`

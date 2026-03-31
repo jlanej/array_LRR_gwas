@@ -296,9 +296,9 @@ class TestCli:
         assert sv_path.exists()
 
         pcs_lines = pcs_path.read_text().strip().splitlines()
-        assert pcs_lines[0] == "Sample_ID\tPC1\tPC2"
-        assert pcs_lines[1] == "S1\t0.1\t0.3"
-        assert pcs_lines[2] == "S2\t0.2\t0.4"
+        assert pcs_lines[0] == "SAMPLE\tPC1\tPC2"
+        assert pcs_lines[1] == "S1\t0.3\t0.45"
+        assert pcs_lines[2] == "S2\t0.6\t0.6"
 
         sv_lines = sv_path.read_text().strip().splitlines()
         assert sv_lines == [
