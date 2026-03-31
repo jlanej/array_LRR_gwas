@@ -144,19 +144,17 @@ class TestAssociationMarkerQcConfig:
         assert "association_marker_qc" in cfg
         amqc = cfg["association_marker_qc"]
         assert amqc["exclude_intensity_only"] is True
-        assert amqc["apply_variant_qc"] is True
         assert amqc["exclude_monomorphic_lrr"] is True
+        assert "apply_variant_qc" not in amqc
 
     def test_yaml_override(self, tmp_path):
         cfg_file = tmp_path / "qc.yaml"
         cfg_file.write_text(
             "association_marker_qc:\n"
             "  exclude_intensity_only: false\n"
-            "  apply_variant_qc: false\n"
         )
         cfg = load_config(cfg_file)
         assert cfg["association_marker_qc"]["exclude_intensity_only"] is False
-        assert cfg["association_marker_qc"]["apply_variant_qc"] is False
         # Unset keys keep defaults
         assert cfg["association_marker_qc"]["exclude_monomorphic_lrr"] is True
 
@@ -187,16 +185,6 @@ class TestMarkerExclusionArgParsing:
             "--no-exclude-intensity-only",
         ])
         assert args.no_exclude_intensity_only is True
-
-    def test_no_apply_variant_qc_flag(self):
-        from array_lrr_gwas.cli import _build_parser
-
-        parser = _build_parser()
-        args = parser.parse_args([
-            "associate", "in.bcf", "--phenotype", "p.tsv", "-o", "out.tsv",
-            "--no-apply-variant-qc",
-        ])
-        assert args.no_apply_variant_qc is True
 
     def test_no_exclude_monomorphic_lrr_flag(self):
         from array_lrr_gwas.cli import _build_parser
@@ -326,18 +314,20 @@ class TestAssociationMarkerExclusion:
         ])
         assert rc == 0
 
-    def test_variant_qc_applied_to_lrr_markers(self, tmp_path, monkeypatch, caplog):
-        """When --variant-qc is set, failing LRR markers are excluded."""
+    def test_variant_qc_flags_propagated_not_filtered(self, tmp_path, monkeypatch, caplog):
+        """Markers failing QC are still tested; QC flags propagated to output."""
+        import csv
+
         from array_lrr_gwas import association
 
-        # a1 passes all; a2 fails MAF; a3 passes all
+        # a1 passes all; a2 fails MAF; a3 fails call rate + HWE
         qc_tsv = tmp_path / "collated_variant_qc.tsv"
         qc_tsv.write_text(
             "variant_id\tall_ancestries_call_rate_pass\t"
             "all_ancestries_hwe_pass\tall_ancestries_maf_pass\n"
             "a1\tTrue\tTrue\tTrue\n"
             "a2\tTrue\tTrue\tFalse\n"
-            "a3\tTrue\tTrue\tTrue\n"
+            "a3\tFalse\tFalse\tTrue\n"
         )
 
         pheno = tmp_path / "pheno.tsv"
@@ -359,12 +349,15 @@ class TestAssociationMarkerExclusion:
         )
 
         class _FakeResult:
-            chrom = ["chr1", "chr1"]
+            chrom = ["chr1", "chr1", "chr1"]
 
             @staticmethod
             def to_records():
                 return [
                     {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
                      "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
                      "n_samples": 3, "method": "ols"},
                     {"chrom": "chr1", "pos": 300, "variant_id": "a3",
@@ -373,9 +366,9 @@ class TestAssociationMarkerExclusion:
                 ]
 
         def _check(lrr_sub, phenotype, variants, **_k):
-            assert lrr_sub.shape[0] == 2  # a2 excluded
-            assert variants[0]["id"] == "a1"
-            assert variants[1]["id"] == "a3"
+            # ALL 3 markers should be tested (no pre-filtering by QC)
+            assert lrr_sub.shape[0] == 3
+            assert len(variants) == 3
             return _FakeResult()
 
         monkeypatch.setattr(association, "run_association", _check)
@@ -391,61 +384,26 @@ class TestAssociationMarkerExclusion:
             ])
 
         assert rc == 0
-        assert "upstream variant QC" in caplog.text
-        assert "1 / 3 excluded" in caplog.text
+        assert out.exists()
 
-    def test_variant_qc_disabled_with_flag(self, tmp_path, monkeypatch):
-        """--no-apply-variant-qc prevents LRR marker QC filtering."""
-        from array_lrr_gwas import association
+        # Verify QC provenance columns are present and correct
+        with open(out, newline="") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
 
-        qc_tsv = tmp_path / "collated_variant_qc.tsv"
-        qc_tsv.write_text(
-            "variant_id\tall_ancestries_call_rate_pass\t"
-            "all_ancestries_hwe_pass\tall_ancestries_maf_pass\n"
-            "a1\tFalse\tFalse\tFalse\n"
-        )
-
-        pheno = tmp_path / "pheno.tsv"
-        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
-        out = tmp_path / "results.tsv"
-        fake_bcf = tmp_path / "in.bcf"
-        fake_bcf.write_text("stub")
-
-        lrr = np.array([[0.1, 0.2, 0.3]], dtype=float)
-        samples = ["S1", "S2", "S3"]
-        variants = [{"chrom": "chr1", "pos": 100, "id": "a1"}]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, variants),
-        )
-
-        class _FakeResult:
-            chrom = ["chr1"]
-
-            @staticmethod
-            def to_records():
-                return [{
-                    "chrom": "chr1", "pos": 100, "variant_id": "a1",
-                    "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                    "n_samples": 3, "method": "ols",
-                }]
-
-        def _check(lrr_sub, phenotype, variants, **_k):
-            assert lrr_sub.shape[0] == 1  # kept despite failing QC
-            return _FakeResult()
-
-        monkeypatch.setattr(association, "run_association", _check)
-
-        rc = main([
-            "associate",
-            str(fake_bcf),
-            "--phenotype", str(pheno),
-            "--method", "ols",
-            "--variant-qc", str(qc_tsv),
-            "--no-apply-variant-qc",
-            "-o", str(out),
-        ])
-        assert rc == 0
+        assert len(rows) == 3
+        # a1 passes all
+        assert rows[0]["all_ancestries_call_rate_pass"] == "True"
+        assert rows[0]["all_ancestries_hwe_pass"] == "True"
+        assert rows[0]["all_ancestries_maf_pass"] == "True"
+        # a2 fails MAF
+        assert rows[1]["all_ancestries_call_rate_pass"] == "True"
+        assert rows[1]["all_ancestries_hwe_pass"] == "True"
+        assert rows[1]["all_ancestries_maf_pass"] == "False"
+        # a3 fails call rate + HWE
+        assert rows[2]["all_ancestries_call_rate_pass"] == "False"
+        assert rows[2]["all_ancestries_hwe_pass"] == "False"
+        assert rows[2]["all_ancestries_maf_pass"] == "True"
 
     def test_monomorphic_lrr_excluded(self, tmp_path, monkeypatch, caplog):
         """Markers with zero LRR variance are excluded by default."""

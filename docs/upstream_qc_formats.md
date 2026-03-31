@@ -118,26 +118,34 @@ INFO: Marker subsetting: 88000 / 96869 markers pass all filters (91.0%)
 
 ### Association-Stage Marker Exclusion
 
-The `associate` sub-command applies additional marker exclusion before the
-per-marker regression to ensure tested variants are reliable and
-interpretable.
+The `associate` sub-command applies minimal hard-fail marker exclusion before
+the per-marker regression.  Upstream variant QC flags are **not** used to
+pre-filter LRR markers — they are propagated to the output TSV for post-hoc
+filtering.
 
 | Filter | Default | CLI Override | Config Key |
 |--------|---------|--------------|------------|
 | INTENSITY_ONLY probes | Excluded | `--no-exclude-intensity-only` | `association_marker_qc.exclude_intensity_only: false` |
-| Upstream variant QC (call rate + HWE + MAF) | Applied when `--variant-qc` provided | `--no-apply-variant-qc` | `association_marker_qc.apply_variant_qc: false` |
 | Monomorphic LRR (zero variance) | Excluded | `--no-exclude-monomorphic-lrr` | `association_marker_qc.exclude_monomorphic_lrr: false` |
+
+> **Upstream variant QC flags are NOT used to pre-filter LRR association
+> markers.**  Instead, per-marker QC flags (`all_ancestries_call_rate_pass`,
+> `all_ancestries_hwe_pass`, `all_ancestries_maf_pass`) are propagated to
+> the output TSV for every tested marker, enabling trivial post-hoc
+> filtering without re-running the scan.
 
 **Scientific rationale:**
 - **INTENSITY_ONLY**: Non-polymorphic probes report intensity but have no
   genotype cluster (no GT field).  Their LRR is not comparable to
   genotyped markers and should not be tested for association.
-- **Upstream variant QC**: Ensures tested markers pass standard GWAS
-  quality thresholds for call rate, Hardy-Weinberg equilibrium, and minor
-  allele frequency (Anderson et al. 2010; Marees et al. 2018).  MAF ≥ 0.01
-  mitigates inflation from rare-variant genotype miscalls.
 - **Monomorphic LRR**: Markers with zero variance across analysed samples
   are uninformative and produce degenerate test statistics.
+- **No genotype-QC pre-filtering**: LRR is a continuous intensity signal.
+  Genotype-derived QC metrics (MAF, HWE, genotype call rate) do not
+  directly determine whether a marker's LRR is informative.  Pre-filtering
+  silently drops potentially interesting loci and forces re-runs if
+  threshold preferences change.  Modern GWAS pipelines (SAIGE, REGENIE)
+  follow the same philosophy: run once, annotate, filter freely.
 
 ---
 
@@ -209,10 +217,10 @@ marker_qc:
   max_var: null              # Max LRR variance (null = no upper limit)
 
 # association_marker_qc: Controls marker exclusion for the associate sub-command.
-# All enabled by default (GWAS best practice, Anderson et al. 2010; Marees et al. 2018).
+# Only INTENSITY_ONLY and monomorphic LRR are hard-fail pre-filters.
+# Upstream variant QC flags are propagated to output, NOT used to pre-filter.
 association_marker_qc:
   exclude_intensity_only: true   # Exclude INTENSITY_ONLY probes (no GT field)
-  apply_variant_qc: true         # Apply upstream variant QC to LRR markers
   exclude_monomorphic_lrr: true  # Exclude zero-variance LRR markers
 
 # correction: SVD decomposition parameters.
@@ -339,10 +347,13 @@ the `associate` sub-command:
 
 **LRR markers (association testing):**
 
+The association scan runs on **all** input markers (minus INTENSITY_ONLY
+and monomorphic LRR).  No upstream QC pre-filtering is applied at
+association time.  QC flags are propagated to the output for post-hoc
+filtering.
+
 1. INTENSITY_ONLY markers are excluded (unless `--no-exclude-intensity-only`).
-2. Markers failing `--variant-qc` (call rate + HWE + MAF) are excluded
-   from association testing (unless `--no-apply-variant-qc`).
-3. Monomorphic LRR markers (zero variance) are excluded (unless
+2. Monomorphic LRR markers (zero variance) are excluded (unless
    `--no-exclude-monomorphic-lrr`).
 
 For the `correct` sub-command, `--variant-qc` applies call rate + HWE
@@ -352,8 +363,15 @@ retained for correction.
 
 ### Provenance in Association Output
 
-When `--variant-qc` is provided for the `associate` sub-command, the
-output TSV includes three additional boolean columns for each marker:
+The output TSV always includes two marker-exclusion provenance columns:
+
+| Column | Description |
+|---|---|
+| `intensity_only` | Whether the marker is an INTENSITY_ONLY probe (bool) |
+| `lrr_monomorphic` | Whether the marker had zero LRR variance across analysed samples (bool) |
+
+When `--variant-qc` is provided, three additional boolean columns are
+added for each marker:
 
 | Column | Description |
 |---|---|
@@ -364,7 +382,12 @@ output TSV includes three additional boolean columns for each marker:
 Markers that are **not** present in the upstream QC file receive
 empty values in these columns.  This allows downstream users and
 auditors to trace exactly which markers were included or excluded
-by which filters.
+by which filters, and enables trivial post-hoc filtering:
+
+```bash
+# Example: filter association results to standard GWAS thresholds
+awk -F'\t' 'NR==1 || ($call_rate == "True" && $hwe == "True" && $maf == "True")' results.tsv
+```
 
 ---
 

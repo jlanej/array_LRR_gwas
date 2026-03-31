@@ -342,7 +342,7 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--max-abs-inbreeding-f` | float | `0.15` | Inbreeding coefficient threshold. Samples with \|F\| above this are excluded (Anderson et al. 2010) |
 | `--n-pcs` | int | `20` | Number of PCs to include as covariates |
 | `--genotype-bcf` | path | `INPUT` | BCF/VCF for GRM computation (if different from input) |
-| `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; markers failing call rate/HWE/MAF are excluded from both GRM and association testing |
+| `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; markers failing call rate/HWE/MAF are excluded from GRM. Per-marker QC flags are propagated to the output TSV for post-hoc filtering. LRR markers are NOT pre-filtered by these flags. |
 | `--min-maf` | float | `0.01` | Min MAF for genotypes used in GRM |
 | `--min-gt-call-rate` | float | `0.90` | Min call rate for genotypes used in GRM |
 | `--no-ld-prune` | flag | `False` | Disable LD pruning of GRM markers |
@@ -350,7 +350,6 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--ld-r2-thresh` | float | `0.2` | r² threshold for LD pruning |
 | `--ld-backend` | str | `plink2` | LD-pruning backend: `plink2` (default, fast) or `numpy` (fallback) |
 | `--no-exclude-intensity-only` | flag | `False` | Retain INTENSITY_ONLY markers in association (excluded by default because they lack GT) |
-| `--no-apply-variant-qc` | flag | `False` | Do not apply upstream variant QC mask to LRR markers for association (QC is still used for GRM) |
 | `--no-exclude-monomorphic-lrr` | flag | `False` | Retain markers with zero LRR variance in association |
 | `--config` | path | `None` | YAML config file; reads `upstream_qc.variant_qc_path`, `sample_qc`, `association_qc`, and `association_marker_qc` settings |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
@@ -522,14 +521,14 @@ the `marker_qc` section of the YAML config.
 
 ### Association Stage (GWAS Testing)
 
-The `associate` sub-command applies additional marker exclusion **before
-the per-marker regression** to ensure tested variants are reliable and
-interpretable.
+The `associate` sub-command applies minimal hard-fail marker exclusion
+**before the per-marker regression**.  Upstream variant QC flags are
+**not** used to pre-filter LRR markers — they are propagated to the
+output TSV for post-hoc filtering.
 
 | Filter | Default | Rationale |
 |--------|---------|-----------|
 | **INTENSITY_ONLY** | Excluded | Non-polymorphic probes flagged as `INTENSITY_ONLY` in the BCF `INFO` field have no genotype cluster (no GT). Their LRR values are not comparable to genotyped markers and should not be tested for association. |
-| **Upstream variant QC** | Call rate + HWE + MAF | When `--variant-qc` is provided, markers failing `all_ancestries_call_rate_pass`, `all_ancestries_hwe_pass`, **or** `all_ancestries_maf_pass` are excluded. Default thresholds in the upstream pipeline: call rate ≥ 0.98, HWE p ≥ 1×10⁻⁶, MAF ≥ 0.01. |
 | **Monomorphic LRR** | Excluded | Markers with zero LRR variance across analysed samples are uninformative and produce degenerate test statistics. |
 
 Each filter can be **disabled individually**:
@@ -537,16 +536,27 @@ Each filter can be **disabled individually**:
 | CLI Flag | Config Key | Effect |
 |----------|------------|--------|
 | `--no-exclude-intensity-only` | `association_marker_qc.exclude_intensity_only: false` | Retain INTENSITY_ONLY markers in association |
-| `--no-apply-variant-qc` | `association_marker_qc.apply_variant_qc: false` | Skip upstream variant QC filtering of LRR markers (QC is still used for GRM) |
 | `--no-exclude-monomorphic-lrr` | `association_marker_qc.exclude_monomorphic_lrr: false` | Retain zero-variance markers |
+
+> **Upstream variant QC flags are NOT used to pre-filter LRR association
+> markers.**  Instead, per-marker QC flags (`all_ancestries_call_rate_pass`,
+> `all_ancestries_hwe_pass`, `all_ancestries_maf_pass`) are propagated to
+> the output TSV for every tested marker, enabling trivial post-hoc
+> filtering without re-running the scan.  Additional provenance columns
+> (`intensity_only`, `lrr_monomorphic`) are also included.
+
+This design follows modern GWAS pipeline conventions (SAIGE, REGENIE):
+**run association once on the maximally inclusive marker set, annotate
+everything, filter the output freely.**  This is especially appropriate
+for LRR where genotype-derived QC metrics (MAF, HWE) are orthogonal to
+the continuous intensity signal being tested.
 
 The log output includes a per-step summary:
 
 ```
 INFO: Association marker exclusion: INTENSITY_ONLY: 342 / 96869 excluded
-INFO: Association marker exclusion: upstream variant QC (call rate + HWE + MAF): 1204 / 96869 excluded
 INFO: Association marker exclusion: monomorphic LRR (zero variance): 17 / 96869 excluded
-INFO: Association marker exclusion summary: 95306 / 96869 markers pass all filters (1563 excluded, 1.6%)
+INFO: Association marker exclusion summary: 96510 / 96869 markers pass all filters (359 excluded, 0.4%)
 ```
 
 ### GRM Marker Filtering (LMM Only)
@@ -603,7 +613,6 @@ marker_qc:
 
 association_marker_qc:
   exclude_intensity_only: true  # Exclude INTENSITY_ONLY probes from association
-  apply_variant_qc: true        # Apply upstream variant QC to LRR markers
   exclude_monomorphic_lrr: true # Exclude zero-variance LRR markers
 
 correction:
