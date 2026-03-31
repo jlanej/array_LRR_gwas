@@ -15,6 +15,7 @@
 - [Pipeline Summary](#pipeline-summary)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+  - [Running Directly on illumina_idat_processing Output](#running-directly-on-illumina_idat_processing-output)
 - [Running on HPC with Apptainer](#running-on-hpc-with-apptainer)
 - [CLI Reference](#cli-reference)
   - [correct](#correct)
@@ -180,10 +181,10 @@ apptainer pull array_lrr_gwas.sif docker://ghcr.io/jlanej/array_lrr_gwas:latest
 array-lrr-gwas correct input.bcf -o corrected.bcf --build GRCh38 -v
 
 # Step 2 — Run LMM association
+# --genotype-bcf is optional: omit it when the input BCF already contains GT.
 array-lrr-gwas associate corrected.bcf \
     --phenotype pheno.tsv \
     --sample-sheet compiled_sample_sheet.tsv \
-    --genotype-bcf genotypes.bcf \
     --method lmm \
     -o results.tsv -v
 
@@ -199,10 +200,12 @@ array-lrr-gwas correct input.bcf -o corrected.bcf --build GRCh38 \
     --variant-qc collated_variant_qc.tsv -v
 
 # Step 2 — Run LMM association with QC-filtered GRM
+# --genotype-bcf is only needed when GT lives in a *separate* file from the
+# LRR input.  When the input BCF contains both GT and LRR (the typical case
+# for illumina_idat_processing output), it can be safely omitted.
 array-lrr-gwas associate corrected.bcf \
     --phenotype pheno.tsv \
     --sample-sheet compiled_sample_sheet.tsv \
-    --genotype-bcf genotypes.bcf \
     --variant-qc collated_variant_qc.tsv \
     --method lmm \
     -o results.tsv -v
@@ -210,6 +213,54 @@ array-lrr-gwas associate corrected.bcf \
 # Step 3 — Segment into CNV regions
 array-lrr-gwas segment results.tsv -o regions.bed -v
 ```
+
+### Running Directly on illumina\_idat\_processing Output
+
+The examples below use the **exact file paths** produced by a typical run
+of [`jlanej/illumina_idat_processing`](https://github.com/jlanej/illumina_idat_processing).
+Adjust `PIPELINE_DIR` to point at your own pipeline run directory.
+
+```bash
+PIPELINE_DIR=/data/project/my_run
+
+# Key files produced by illumina_idat_processing:
+#   ${PIPELINE_DIR}/stage2/vcf/stage2_reclustered.bcf   — BCF with GT, LRR, BAF
+#   ${PIPELINE_DIR}/compiled_sample_sheet.tsv            — sample QC + ancestry PCs
+#   ${PIPELINE_DIR}/ancestry_stratified_qc/collated_variant_qc.tsv — per-variant QC flags
+
+INPUT_BCF="${PIPELINE_DIR}/stage2/vcf/stage2_reclustered.bcf"
+SAMPLE_SHEET="${PIPELINE_DIR}/compiled_sample_sheet.tsv"
+VARIANT_QC="${PIPELINE_DIR}/ancestry_stratified_qc/collated_variant_qc.tsv"
+PHENO="${PIPELINE_DIR}/phenotype.tsv"   # user-provided phenotype file
+OUTDIR="${PIPELINE_DIR}/lrr_gwas"
+mkdir -p "${OUTDIR}"
+
+# Step 1 — Batch-effect correction (build is auto-detected from BCF contigs)
+array-lrr-gwas correct "${INPUT_BCF}" \
+    -o "${OUTDIR}/corrected.bcf" \
+    --variant-qc "${VARIANT_QC}" \
+    -v
+
+# Step 2 — Association (LMM)
+# No --genotype-bcf needed: the reclustered BCF already contains FORMAT/GT.
+array-lrr-gwas associate "${OUTDIR}/corrected.bcf" \
+    --phenotype "${PHENO}" \
+    --sample-sheet "${SAMPLE_SHEET}" \
+    --variant-qc "${VARIANT_QC}" \
+    --method lmm \
+    -o "${OUTDIR}/association_results.tsv" \
+    -v
+
+# Step 3 — Segmentation
+array-lrr-gwas segment "${OUTDIR}/association_results.tsv" \
+    -o "${OUTDIR}/cnv_regions.bed" \
+    -v
+```
+
+> **Tip:** If your genotypes live in a *different* BCF (e.g. an
+> imputed file), pass it explicitly with
+> `--genotype-bcf /path/to/imputed.bcf`.  Otherwise, simply omit the
+> flag.
 
 ---
 
@@ -238,11 +289,12 @@ apptainer pull /path/to/containers/array_lrr_gwas.sif \
 
 SIF=/path/to/containers/array_lrr_gwas.sif
 
-INPUT_BCF=/data/project/genotypes.bcf
-VARIANT_QC=/data/project/collated_variant_qc.tsv
+# illumina_idat_processing output paths
+PIPELINE_DIR=/data/project/my_run
+INPUT_BCF="${PIPELINE_DIR}/stage2/vcf/stage2_reclustered.bcf"
+VARIANT_QC="${PIPELINE_DIR}/ancestry_stratified_qc/collated_variant_qc.tsv"
+SAMPLE_SHEET="${PIPELINE_DIR}/compiled_sample_sheet.tsv"
 PHENO=/data/project/phenotype.tsv
-SAMPLE_SHEET=/data/project/compiled_sample_sheet.tsv
-GT_BCF=/data/project/genotypes.bcf
 OUTDIR=/data/project/results
 mkdir -p "${OUTDIR}"
 
@@ -250,17 +302,16 @@ mkdir -p "${OUTDIR}"
 apptainer run --bind /data "${SIF}" correct \
     "${INPUT_BCF}" \
     -o "${OUTDIR}/corrected.bcf" \
-    --build GRCh38 \
     --variant-qc "${VARIANT_QC}" \
     -v
 
 # Step 2: Association (LMM with GRM and 20 ancestry PCs)
 # LD pruning is enabled by default for GRM computation.
+# --genotype-bcf is omitted: the reclustered BCF already contains FORMAT/GT.
 apptainer run --bind /data "${SIF}" associate \
     "${OUTDIR}/corrected.bcf" \
     --phenotype "${PHENO}" \
     --sample-sheet "${SAMPLE_SHEET}" \
-    --genotype-bcf "${GT_BCF}" \
     --variant-qc "${VARIANT_QC}" \
     --method lmm \
     --n-pcs 20 \
@@ -341,7 +392,7 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--no-exclude-extreme-inbreeding` | flag | `False` | Disable extreme inbreeding coefficient exclusion (\|F\| > threshold excluded by default) |
 | `--max-abs-inbreeding-f` | float | `0.15` | Inbreeding coefficient threshold. Samples with \|F\| above this are excluded (Anderson et al. 2010) |
 | `--n-pcs` | int | `20` | Number of PCs to include as covariates |
-| `--genotype-bcf` | path | `INPUT` | BCF/VCF for GRM computation (if different from input) |
+| `--genotype-bcf` | path | `INPUT` | **Optional.** BCF/VCF for GRM computation. Defaults to the input file when omitted (requires `FORMAT/GT`). Only needed when genotypes live in a separate file from the LRR input. |
 | `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; markers failing call rate/HWE/MAF are excluded from GRM. Per-marker QC flags are propagated to the output TSV for post-hoc filtering. LRR markers are NOT pre-filtered by these flags. |
 | `--min-maf` | float | `0.01` | Min MAF for genotypes used in GRM |
 | `--min-gt-call-rate` | float | `0.90` | Min call rate for genotypes used in GRM |
@@ -449,11 +500,11 @@ containing only `Sample_ID`, `call_rate`, and `lrr_sd`.
 
 ```bash
 # Step 2: Associate with full exclusion strategy (all defaults applied)
+# --genotype-bcf is omitted (input BCF contains GT).
 array-lrr-gwas associate corrected.bcf \
     --phenotype phenotype.tsv \
     --sample-sheet compiled_sample_sheet.tsv \
-    --genotype-bcf genotypes.bcf \
-    --variant-qc collated_variant_qc.tsv \
+    --variant-qc ancestry_stratified_qc/collated_variant_qc.tsv \
     --method lmm \
     -o results.tsv -v
 ```
@@ -693,6 +744,11 @@ and ancestry PCs (`PC1`–`PC20`).  Passed via `--sample-sheet` to the
 `associate` command.  See [docs/upstream_qc_formats.md](docs/upstream_qc_formats.md)
 for the full specification.
 
+**Column casing:** The default sample-ID column is `Sample_ID` (matching
+the upstream `illumina_idat_processing` convention), but column names are
+resolved **case-insensitively** — so `sample_id`, `SAMPLE_ID`, etc. all
+work without extra configuration.
+
 ---
 
 ## Output Formats
@@ -717,6 +773,32 @@ values, timestamp).
 | `p_value` | float | Two-sided p-value |
 | `n_samples` | int | Effective sample size |
 | `method` | str | `lmm`, `ols`, or `logistic` |
+
+When `--variant-qc` is provided, the following **QC provenance columns**
+are appended for every tested marker:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `all_ancestries_call_rate_pass` | bool/empty | Marker passes cross-ancestry call-rate threshold |
+| `all_ancestries_hwe_pass` | bool/empty | Marker passes cross-ancestry HWE threshold |
+| `all_ancestries_maf_pass` | bool/empty | Marker passes cross-ancestry MAF threshold |
+| `intensity_only` | bool | Marker is an INTENSITY\_ONLY probe (no GT cluster) |
+| `lrr_monomorphic` | bool | Marker has zero LRR variance across analysed samples |
+
+> **No marker pre-filtering at the association stage.** By default, only
+> `INTENSITY_ONLY` probes and monomorphic-LRR markers are excluded from
+> association testing.  Upstream variant QC flags
+> (`all_ancestries_call_rate_pass`, `all_ancestries_hwe_pass`,
+> `all_ancestries_maf_pass`) are **not** used to pre-filter markers —
+> instead, they are propagated to the output TSV as provenance columns.
+> This enables trivial post-hoc filtering in R, Python, or any
+> downstream tool without re-running the association scan.
+
+Example row (tab-separated):
+
+```
+chr1  12345  chr1:12345:A:T  -0.023  0.011  -2.09  0.037  4800  lmm  True  True  True  False  False
+```
 
 ### Segmentation BED (`segment`)
 
