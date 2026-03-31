@@ -72,7 +72,10 @@ def _write_variant_qc(path: Path, bcf_path: Path) -> None:
             "all_ancestries_maf_pass",
         ])
         for v in variants:
-            vid = v.get("id") or f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts') or ())}"
+            vid = v.get("id")
+            if not vid or vid == ".":
+                alts = v.get("alts") or ()
+                vid = f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(alts)}"
             # Most variants pass; a few randomly fail
             cr = "True" if rng.random() > 0.02 else "False"
             hwe = "True" if rng.random() > 0.02 else "False"

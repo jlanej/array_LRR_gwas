@@ -794,10 +794,11 @@ are appended for every tested marker:
 > This enables trivial post-hoc filtering in R, Python, or any
 > downstream tool without re-running the association scan.
 
-Example row (tab-separated):
+Example row (tab-separated, with header for reference):
 
 ```
-chr1  12345  chr1:12345:A:T  -0.023  0.011  -2.09  0.037  4800  lmm  True  True  True  False  False
+chrom  pos    variant_id      beta    se     stat   p_value  n_samples  method  all_ancestries_call_rate_pass  all_ancestries_hwe_pass  all_ancestries_maf_pass  intensity_only  lrr_monomorphic
+chr1   12345  chr1:12345:A:T  -0.023  0.011  -2.09  0.037    4800       lmm     True                           True                     True                     False           False
 ```
 
 ### Segmentation BED (`segment`)
