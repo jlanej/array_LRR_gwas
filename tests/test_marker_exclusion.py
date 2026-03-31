@@ -409,8 +409,10 @@ class TestAssociationMarkerExclusion:
         for row in rows:
             assert "intensity_only" in row
             assert "lrr_monomorphic" in row
-        # All markers in this test have non-zero variance and are not
-        # INTENSITY_ONLY (variant dicts lack the key → defaults to False)
+        # The variant dicts above (lines 341-345) omit the 'intensity_only'
+        # key, which triggers the v.get("intensity_only", False) fallback
+        # in cli.py.  All three LRR rows have non-zero variance, so
+        # lrr_monomorphic is also False for every tested marker.
         for row in rows:
             assert row["intensity_only"] == "False"
             assert row["lrr_monomorphic"] == "False"
