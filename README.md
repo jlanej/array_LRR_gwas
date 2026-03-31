@@ -367,6 +367,8 @@ array-lrr-gwas correct INPUT -o OUTPUT [OPTIONS]
 | `--min-var` | float | `0.001` | Min LRR variance for markers |
 | `--max-var` | float | `None` | Max LRR variance for markers |
 | `--backend` | str | `rsvd` | SVD backend: `rsvd` (scikit-learn) or `fbpca` |
+| `--svd-output-prefix` | path | `<OUTPUT>.svd` | Prefix for SVD text summaries (`.sample_pcs.tsv`, `.singular_values.tsv`) |
+| `--write-loadings` | flag | `False` | Also write marker loadings to `<prefix>.loadings.tsv` |
 | `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; markers failing cross-ancestry call rate or HWE are excluded before decomposition |
 | `--config` | path | `None` | YAML QC config file (see [QC Configuration](#qc-configuration)) |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
@@ -763,6 +765,27 @@ Same structure as the input BCF/VCF with the `FORMAT/LRR` values replaced by
 batch-corrected values.  A `batch_lrr_correction` header line records the
 parameters used (k, backend, n\_hq\_samples, n\_markers\_used, singular
 values, timestamp).
+
+### SVD Text Outputs (`correct`)
+
+`correct` also writes tab-separated SVD summary files. By default, the prefix
+is `<OUTPUT>.svd`; override with `--svd-output-prefix`.
+
+1. `<prefix>.sample_pcs.tsv`
+   - Header: `SAMPLE`, `PC1`, `PC2`, ..., `PCk`
+   - One row per sample in BCF/VCF sample order
+   - Values: sample PC values for the correction components (`diag(s) @ Vᵀ`)
+
+2. `<prefix>.singular_values.tsv`
+   - Header: `PC`, `singular_value`
+   - One row per component (`PC1`..`PCk`)
+
+Optional (`--write-loadings`):
+
+3. `<prefix>.loadings.tsv`
+   - Header: `chrom`, `pos`, `variant_id`, `PC1`, `PC2`, ..., `PCk`
+   - One row per marker retained for decomposition (`marker_mask=True`)
+   - Values: marker loadings (`U`) used during residualisation
 
 ### Association TSV (`associate`)
 
