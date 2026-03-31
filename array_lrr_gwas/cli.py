@@ -1363,6 +1363,7 @@ def _run_associate(args: argparse.Namespace) -> int:
         "all_ancestries_call_rate_pass",
         "all_ancestries_hwe_pass",
         "all_ancestries_maf_pass",
+        "all_ancestries_qc_pass",
     )
     if qc_provenance is not None:
         lrr_variant_ids = [_variant_id(v) for v in variants]
@@ -1372,10 +1373,16 @@ def _run_associate(args: argparse.Namespace) -> int:
                 rec["all_ancestries_call_rate_pass"] = qc_rec.call_rate_pass
                 rec["all_ancestries_hwe_pass"] = qc_rec.hwe_pass
                 rec["all_ancestries_maf_pass"] = qc_rec.maf_pass
+                rec["all_ancestries_qc_pass"] = (
+                    ""
+                    if qc_rec.qc_pass is None
+                    else qc_rec.qc_pass
+                )
             else:
                 rec["all_ancestries_call_rate_pass"] = ""
                 rec["all_ancestries_hwe_pass"] = ""
                 rec["all_ancestries_maf_pass"] = ""
+                rec["all_ancestries_qc_pass"] = ""
 
     # Append marker-exclusion provenance columns so users know which
     # markers were excluded (and why) without re-running.  For surviving

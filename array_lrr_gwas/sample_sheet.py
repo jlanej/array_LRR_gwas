@@ -45,6 +45,26 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+def _resolve_column(
+    fieldnames: list[str],
+    requested: str,
+) -> str | None:
+    """Resolve *requested* column name against *fieldnames*, case-insensitively.
+
+    Returns the **actual** column name present in the header that matches
+    *requested* when compared in a case-insensitive manner.  If no match
+    is found, returns ``None``.  If an exact (case-sensitive) match exists
+    it is preferred; otherwise the first case-insensitive match wins.
+    """
+    if requested in fieldnames:
+        return requested
+    lower = requested.lower()
+    for col in fieldnames:
+        if col.lower() == lower:
+            return col
+    return None
+
+
 def read_sample_sheet(
     path: str | Path,
     *,
@@ -89,6 +109,11 @@ def read_sample_sheet(
         if reader.fieldnames is None:
             raise ValueError(f"Sample sheet at {path} is empty or has no header")
 
+        # Resolve sample-ID column (case-insensitive)
+        resolved_sid_col = _resolve_column(reader.fieldnames, sample_id_col)
+        if resolved_sid_col is None:
+            resolved_sid_col = sample_id_col  # fall through; rows will yield None
+
         # Identify PC columns
         pc_cols: list[tuple[int, str]] = []
         for col in reader.fieldnames:
@@ -105,7 +130,7 @@ def read_sample_sheet(
         rows: list[list[float]] = []
 
         for row in reader:
-            sid = row.get(sample_id_col)
+            sid = row.get(resolved_sid_col)
             if sid is None or sid == "":
                 continue
             sample_ids.append(sid)
@@ -209,7 +234,12 @@ def classify_samples_from_sheet(
         if reader.fieldnames is None:
             raise ValueError(f"Sample sheet at {path} is empty or has no header")
 
-        required = {sample_id_col, call_rate_col, lrr_sd_col}
+        # Resolve column names case-insensitively
+        resolved_sid = _resolve_column(reader.fieldnames, sample_id_col) or sample_id_col
+        resolved_cr = _resolve_column(reader.fieldnames, call_rate_col) or call_rate_col
+        resolved_sd = _resolve_column(reader.fieldnames, lrr_sd_col) or lrr_sd_col
+
+        required = {resolved_sid, resolved_cr, resolved_sd}
         missing = required - set(reader.fieldnames)
         if missing:
             raise ValueError(
@@ -219,15 +249,15 @@ def classify_samples_from_sheet(
 
         hq_ids: set[str] = set()
         for row in reader:
-            sid = row.get(sample_id_col)
+            sid = row.get(resolved_sid)
             if sid is None or sid == "":
                 continue
             try:
-                cr = float(row.get(call_rate_col, ""))
+                cr = float(row.get(resolved_cr, ""))
             except (TypeError, ValueError):
                 continue
             try:
-                sd = float(row.get(lrr_sd_col, ""))
+                sd = float(row.get(resolved_sd, ""))
             except (TypeError, ValueError):
                 continue
             if cr >= min_call_rate and sd <= max_lrr_sd:
@@ -395,8 +425,13 @@ def classify_samples_for_association(
         if reader.fieldnames is None:
             raise ValueError(f"Sample sheet at {path} is empty or has no header")
 
+        # Resolve column names case-insensitively
+        resolved_sid = _resolve_column(reader.fieldnames, sample_id_col) or sample_id_col
+        resolved_cr = _resolve_column(reader.fieldnames, call_rate_col) or call_rate_col
+        resolved_sd = _resolve_column(reader.fieldnames, lrr_sd_col) or lrr_sd_col
+
         # Core columns are always required
-        required = {sample_id_col, call_rate_col, lrr_sd_col}
+        required = {resolved_sid, resolved_cr, resolved_sd}
         missing = required - set(reader.fieldnames)
         if missing:
             raise ValueError(
@@ -406,13 +441,21 @@ def classify_samples_for_association(
 
         available_cols = set(reader.fieldnames)
 
+        # Resolve optional column names case-insensitively
+        resolved_pre_pca = _resolve_column(reader.fieldnames, pre_pca_excluded_col)
+        resolved_relatedness = _resolve_column(reader.fieldnames, excluded_relatedness_col)
+        resolved_het_outlier = _resolve_column(reader.fieldnames, excluded_het_outlier_col)
+        resolved_baf_sd = _resolve_column(reader.fieldnames, baf_sd_col)
+        resolved_sex_status = _resolve_column(reader.fieldnames, sex_status_col)
+        resolved_inbreeding = _resolve_column(reader.fieldnames, inbreeding_f_col)
+
         # Check optional column availability
-        has_pre_pca = pre_pca_excluded_col in available_cols
-        has_relatedness = excluded_relatedness_col in available_cols
-        has_het_outlier = excluded_het_outlier_col in available_cols
-        has_baf_sd = baf_sd_col in available_cols
-        has_sex_status = sex_status_col in available_cols
-        has_inbreeding = inbreeding_f_col in available_cols
+        has_pre_pca = resolved_pre_pca is not None
+        has_relatedness = resolved_relatedness is not None
+        has_het_outlier = resolved_het_outlier is not None
+        has_baf_sd = resolved_baf_sd is not None
+        has_sex_status = resolved_sex_status is not None
+        has_inbreeding = resolved_inbreeding is not None
 
         if honor_precomputed:
             if not has_pre_pca:
@@ -461,7 +504,7 @@ def classify_samples_for_association(
         hq_ids: set[str] = set()
 
         for row in reader:
-            sid = row.get(sample_id_col)
+            sid = row.get(resolved_sid)
             if sid is None or sid == "":
                 continue
             total += 1
@@ -469,7 +512,7 @@ def classify_samples_for_association(
 
             # Core QC: call rate
             try:
-                cr = float(row.get(call_rate_col, ""))
+                cr = float(row.get(resolved_cr, ""))
             except (TypeError, ValueError):
                 cr = None
             if cr is None or cr < min_call_rate:
@@ -478,7 +521,7 @@ def classify_samples_for_association(
 
             # Core QC: LRR SD
             try:
-                sd = float(row.get(lrr_sd_col, ""))
+                sd = float(row.get(resolved_sd, ""))
             except (TypeError, ValueError):
                 sd = None
             if sd is None or sd > max_lrr_sd:
@@ -487,20 +530,20 @@ def classify_samples_for_association(
 
             # Pre-computed exclusions
             if honor_precomputed:
-                if has_pre_pca and _parse_bool_field(row.get(pre_pca_excluded_col)) is True:
+                if has_pre_pca and _parse_bool_field(row.get(resolved_pre_pca)) is True:
                     counts["pre_pca_excluded"] += 1
                     excluded = True
-                if has_relatedness and _parse_bool_field(row.get(excluded_relatedness_col)) is True:
+                if has_relatedness and _parse_bool_field(row.get(resolved_relatedness)) is True:
                     counts["excluded_relatedness"] += 1
                     excluded = True
-                if has_het_outlier and _parse_bool_field(row.get(excluded_het_outlier_col)) is True:
+                if has_het_outlier and _parse_bool_field(row.get(resolved_het_outlier)) is True:
                     counts["excluded_het_outlier"] += 1
                     excluded = True
 
             # BAF SD exclusion (contamination proxy)
             if exclude_baf_sd and has_baf_sd:
                 try:
-                    baf = float(row.get(baf_sd_col, ""))
+                    baf = float(row.get(resolved_baf_sd, ""))
                 except (TypeError, ValueError):
                     baf = None
                 if baf is not None and baf > max_baf_sd:
@@ -509,7 +552,7 @@ def classify_samples_for_association(
 
             # Sex discordance exclusion
             if exclude_sex_discordant and has_sex_status:
-                sex_val = (row.get(sex_status_col) or "").strip().upper()
+                sex_val = (row.get(resolved_sex_status) or "").strip().upper()
                 if sex_val == "DISCORDANT":
                     counts["sex_discordant"] += 1
                     excluded = True
@@ -517,7 +560,7 @@ def classify_samples_for_association(
             # Extreme inbreeding F exclusion
             if exclude_extreme_inbreeding and has_inbreeding:
                 try:
-                    f_val = float(row.get(inbreeding_f_col, ""))
+                    f_val = float(row.get(resolved_inbreeding, ""))
                 except (TypeError, ValueError):
                     f_val = None
                 if f_val is not None and abs(f_val) > max_abs_inbreeding_f:

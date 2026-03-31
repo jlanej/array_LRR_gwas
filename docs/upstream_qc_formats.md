@@ -268,13 +268,14 @@ logic, thresholds, and the order of operations.
 
 The upstream pipeline computes per-variant QC metrics **within each
 ancestry stratum** and collapses the results into three cross-ancestry
-boolean flags:
+boolean flags, plus an optional composite flag:
 
 | TSV column | Upstream threshold | Interpretation |
 |---|---|---|
 | `all_ancestries_call_rate_pass` | call rate ≥ 0.98 per ancestry | Marker has adequate genotyping across **all** ancestries |
 | `all_ancestries_hwe_pass` | HWE *p* ≥ 1 × 10⁻⁶ per ancestry | Marker is in Hardy-Weinberg equilibrium in **all** ancestries |
 | `all_ancestries_maf_pass` | MAF ≥ 0.01 per ancestry | Marker is polymorphic in **all** ancestries |
+| `all_ancestries_qc_pass` | composite (typically all 3 flags pass) | Optional convenience flag from upstream collation |
 
 A variant **must pass a flag in every ancestry** for that flag to be
 `True`.  This conservative intersection ensures that included markers
@@ -370,7 +371,7 @@ The output TSV always includes two marker-exclusion provenance columns:
 | `intensity_only` | Whether the marker is an INTENSITY_ONLY probe (bool) |
 | `lrr_monomorphic` | Whether the marker had zero LRR variance across analysed samples (bool) |
 
-When `--variant-qc` is provided, three additional boolean columns are
+When `--variant-qc` is provided, additional boolean provenance columns are
 added for each marker:
 
 | Column | Description |
@@ -378,6 +379,7 @@ added for each marker:
 | `all_ancestries_call_rate_pass` | Whether the marker passed the cross-ancestry call-rate filter |
 | `all_ancestries_hwe_pass` | Whether the marker passed the cross-ancestry HWE filter |
 | `all_ancestries_maf_pass` | Whether the marker passed the cross-ancestry MAF filter |
+| `all_ancestries_qc_pass` | Optional composite upstream QC pass flag (empty when not present upstream) |
 
 Markers that are **not** present in the upstream QC file receive
 empty values in these columns.  This allows downstream users and

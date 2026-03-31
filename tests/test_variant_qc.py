@@ -117,6 +117,17 @@ class TestReadCollatedVariantQC:
         assert len(data) == 1
         assert data["v1"].call_rate_pass is True
 
+    def test_optional_composite_qc_pass_parsed(self, tmp_path: Path) -> None:
+        """Optional all_ancestries_qc_pass column should be parsed when present."""
+        header = (
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass\t"
+            "all_ancestries_qc_pass\n"
+        )
+        p = _write_tsv(tmp_path, header + "v1\tTrue\tTrue\tTrue\tFalse\n")
+        data = read_collated_variant_qc(p)
+        assert data["v1"].qc_pass is False
+
 
 # ---------------------------------------------------------------------------
 # variant_qc_mask — exact match

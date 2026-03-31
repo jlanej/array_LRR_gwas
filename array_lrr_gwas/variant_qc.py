@@ -16,6 +16,8 @@ Expected TSV columns
   equilibrium flag across all ancestries.
 * ``all_ancestries_maf_pass`` — ``True``/``False`` minor-allele-frequency
   flag across all ancestries.
+* ``all_ancestries_qc_pass`` — optional composite ``True``/``False`` flag
+  indicating all three QC metrics pass.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ _COL_VARIANT_ID = "variant_id"
 _COL_CALL_RATE = "all_ancestries_call_rate_pass"
 _COL_HWE = "all_ancestries_hwe_pass"
 _COL_MAF = "all_ancestries_maf_pass"
+_COL_QC_PASS = "all_ancestries_qc_pass"
 _REQUIRED_COLUMNS = frozenset({_COL_VARIANT_ID, _COL_CALL_RATE, _COL_HWE, _COL_MAF})
 
 # Recognised boolean true literals (case-insensitive).
@@ -59,7 +62,7 @@ def _parse_bool(value: str) -> bool:
 class VariantQCRecord:
     """Lightweight container for a single variant's QC flags."""
 
-    __slots__ = ("variant_id", "call_rate_pass", "hwe_pass", "maf_pass")
+    __slots__ = ("variant_id", "call_rate_pass", "hwe_pass", "maf_pass", "qc_pass")
 
     def __init__(
         self,
@@ -67,11 +70,13 @@ class VariantQCRecord:
         call_rate_pass: bool,
         hwe_pass: bool,
         maf_pass: bool,
+        qc_pass: bool | None = None,
     ) -> None:
         self.variant_id = variant_id
         self.call_rate_pass = call_rate_pass
         self.hwe_pass = hwe_pass
         self.maf_pass = maf_pass
+        self.qc_pass = qc_pass
 
 
 def read_collated_variant_qc(
@@ -128,6 +133,11 @@ def read_collated_variant_qc(
                 call_rate_pass=_parse_bool(row[_COL_CALL_RATE]),
                 hwe_pass=_parse_bool(row[_COL_HWE]),
                 maf_pass=_parse_bool(row[_COL_MAF]),
+                qc_pass=(
+                    _parse_bool(row[_COL_QC_PASS])
+                    if _COL_QC_PASS in present_columns
+                    else None
+                ),
             )
 
     if duplicates:
