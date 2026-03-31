@@ -53,12 +53,13 @@ Best-Practice Default Thresholds
 * ``exclude_intensity_only``: **True** — Exclude INTENSITY_ONLY markers
   (non-polymorphic probes with no genotype cluster) from association testing.
   These are retained for LRR correction but lack GT and should not be tested.
-* ``apply_variant_qc``: **removed** — Upstream variant QC flags are NOT
-  used to pre-filter LRR markers.  Instead they are propagated to the
-  output TSV for post-hoc filtering.
 * ``exclude_monomorphic_lrr``: **True** — Exclude markers with zero LRR
   variance across analysed samples (uninformative, produce degenerate
   test statistics).
+
+Upstream variant QC flags (call rate, HWE, MAF) are **not** used to
+pre-filter LRR association markers.  Instead, per-marker QC flags are
+propagated to the output TSV for post-hoc filtering.
 
 Example YAML
 -------------

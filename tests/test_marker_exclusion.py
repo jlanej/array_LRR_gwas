@@ -405,6 +405,16 @@ class TestAssociationMarkerExclusion:
         assert rows[2]["all_ancestries_hwe_pass"] == "False"
         assert rows[2]["all_ancestries_maf_pass"] == "True"
 
+        # Verify marker-exclusion provenance columns are present
+        for row in rows:
+            assert "intensity_only" in row
+            assert "lrr_monomorphic" in row
+        # All markers in this test have non-zero variance and are not
+        # INTENSITY_ONLY (variant dicts lack the key → defaults to False)
+        for row in rows:
+            assert row["intensity_only"] == "False"
+            assert row["lrr_monomorphic"] == "False"
+
     def test_monomorphic_lrr_excluded(self, tmp_path, monkeypatch, caplog):
         """Markers with zero LRR variance are excluded by default."""
         from array_lrr_gwas import association

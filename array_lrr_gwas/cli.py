@@ -1099,16 +1099,19 @@ def _run_associate(args: argparse.Namespace) -> int:
         )
 
     # 2. Exclude monomorphic LRR markers (zero variance across samples)
+    # Always compute variance for provenance; optionally exclude.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        _pre_filter_lrr_var = np.nanvar(lrr_sub, axis=1)
+    _pre_filter_all_nan = np.all(np.isnan(lrr_sub), axis=1)
+    _pre_filter_mono = (_pre_filter_lrr_var == 0.0) | _pre_filter_all_nan
+
     if exclude_monomorphic:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            lrr_var = np.nanvar(lrr_sub, axis=1)
-        all_nan_mask = np.all(np.isnan(lrr_sub), axis=1)
-        zero_var_mask = (lrr_var == 0.0) & ~all_nan_mask
-        mono_mask = zero_var_mask | all_nan_mask
+        zero_var_mask = (_pre_filter_lrr_var == 0.0) & ~_pre_filter_all_nan
+        mono_mask = zero_var_mask | _pre_filter_all_nan
         n_mono = int(mono_mask.sum())
         n_zero_var = int(zero_var_mask.sum())
-        n_all_nan = int(all_nan_mask.sum())
+        n_all_nan = int(_pre_filter_all_nan.sum())
         marker_keep &= ~mono_mask
         logger.info(
             "Association marker exclusion: monomorphic LRR "
@@ -1133,7 +1136,9 @@ def _run_associate(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # Apply marker filter
+    # Apply marker filter and carry forward the pre-computed monomorphic
+    # flags for surviving markers (avoids recomputing variance later).
+    _post_filter_mono = _pre_filter_mono[marker_keep]
     lrr_sub = lrr_sub[marker_keep]
     variants = [v for v, k in zip(variants, marker_keep) if k]
 
@@ -1374,19 +1379,15 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     # Append marker-exclusion provenance columns so users know which
     # markers were excluded (and why) without re-running.  For surviving
-    # markers these will be False; when --no-exclude-intensity-only or
-    # --no-exclude-monomorphic-lrr is used, some True values may appear.
+    # markers these will be False when default exclusions are on; when
+    # --no-exclude-intensity-only or --no-exclude-monomorphic-lrr is
+    # used, some True values may appear.
     for rec, v in zip(records, variants):
         rec["intensity_only"] = v.get("intensity_only", False)
-    # Compute per-marker monomorphic flag on the *tested* LRR sub-matrix.
-    # len(records) == lrr_sub.shape[0] since both derive from the same
-    # marker-filtered variant list passed to run_association().
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        _tested_var = np.nanvar(lrr_sub, axis=1)
-    _tested_nan = np.all(np.isnan(lrr_sub), axis=1)
+    # Use the pre-computed monomorphic flags from the exclusion step
+    # (cached in _post_filter_mono) to avoid recomputing variance.
     for i, rec in enumerate(records):
-        rec["lrr_monomorphic"] = bool(_tested_var[i] == 0.0) or bool(_tested_nan[i])
+        rec["lrr_monomorphic"] = bool(_post_filter_mono[i])
 
     header = list(records[0].keys()) if records else []
     with open(args.output, "w", newline="") as fh:

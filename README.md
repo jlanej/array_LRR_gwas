@@ -111,7 +111,7 @@ association testing.  This package addresses that need.
 │  Step 2: Association Analysis  (array-lrr-gwas associate)           │
 │                                                                      │
 │  ① Load corrected LRR + phenotype + covariates (PCs)               │
-│  ② Exclude markers: INTENSITY_ONLY, variant QC, monomorphic LRR    │
+│  ② Exclude markers: INTENSITY_ONLY, monomorphic LRR                 │
 │  ③ Compute GRM from genotypes (for LMM)                            │
 │  ④ LMM: spectral decomposition → REML δ → per-marker WLS          │
 │     OR OLS / logistic regression (no GRM)                           │
