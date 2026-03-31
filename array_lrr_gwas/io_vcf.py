@@ -44,7 +44,7 @@ def read_lrr(
         Sample identifiers in column order.
     variants : list of dict
         Per-variant metadata: ``chrom``, ``pos``, ``id``, ``ref``, ``alts``,
-        ``qual``, ``filter``.
+        ``qual``, ``filter``, ``intensity_only``.
     """
     path = str(path)
     vcf_in = pysam.VariantFile(path)
@@ -63,6 +63,15 @@ def read_lrr(
                 except (TypeError, ValueError):
                     pass
         lrr_rows.append(row)
+        # Check for INTENSITY_ONLY INFO flag.  The flag is set by the
+        # upstream pipeline for non-polymorphic probes that report
+        # intensity but have no genotype cluster (no GT field).
+        # When the INFO key is not defined in the header, pysam raises
+        # ValueError — treat as False in that case.
+        try:
+            intensity_only = bool(rec.info.get("INTENSITY_ONLY", False))
+        except (ValueError, KeyError):
+            intensity_only = False
         variants.append(
             {
                 "chrom": rec.chrom,
@@ -72,6 +81,7 @@ def read_lrr(
                 "alts": tuple(rec.alts) if rec.alts else (),
                 "qual": rec.qual,
                 "filter": list(rec.filter),
+                "intensity_only": intensity_only,
             }
         )
     vcf_in.close()

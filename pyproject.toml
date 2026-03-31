@@ -27,5 +27,8 @@ dev = [
 [project.scripts]
 array-lrr-gwas = "array_lrr_gwas.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["array_lrr_gwas*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

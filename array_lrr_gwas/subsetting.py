@@ -14,11 +14,14 @@ scientifically defensible criteria:
 
 from __future__ import annotations
 
+import logging
 import warnings
 from typing import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
+
+logger = logging.getLogger(__name__)
 
 
 def call_rate_mask(
@@ -182,12 +185,50 @@ def subset_markers(
         ``True`` for markers passing **all** enabled filters.
     """
     mask = call_rate_mask(lrr, min_call_rate=min_call_rate)
-    mask &= variance_mask(lrr, min_var=min_var, max_var=max_var)
+    n_total = len(mask)
+    n_call_rate = int(mask.sum())
+    logger.info(
+        "Marker subsetting: call-rate filter (≥%.4f): %d / %d pass (%d excluded)",
+        min_call_rate, n_call_rate, n_total, n_total - n_call_rate,
+    )
+
+    var_m = variance_mask(lrr, min_var=min_var, max_var=max_var)
+    n_var = int(var_m.sum())
+    mask &= var_m
+    logger.info(
+        "Marker subsetting: variance filter (min=%.4f, max=%s): %d / %d pass (%d excluded)",
+        min_var, max_var if max_var is not None else "None",
+        n_var, n_total, n_total - n_var,
+    )
+
     if chromosomes is not None:
         if autosomes_only:
-            mask &= autosome_mask(chromosomes)
+            auto_m = autosome_mask(chromosomes)
+            n_auto = int(auto_m.sum())
+            mask &= auto_m
+            logger.info(
+                "Marker subsetting: autosome filter: %d / %d pass (%d non-autosomal excluded)",
+                n_auto, n_total, n_total - n_auto,
+            )
         if positions is not None:
-            mask &= complexity_mask(positions, chromosomes, exclude_regions)
+            comp_m = complexity_mask(positions, chromosomes, exclude_regions)
+            n_comp = int(comp_m.sum())
+            mask &= comp_m
+            logger.info(
+                "Marker subsetting: complexity-region filter: %d / %d pass (%d in excluded regions)",
+                n_comp, n_total, n_total - n_comp,
+            )
     if upstream_qc_mask is not None:
+        n_qc = int(upstream_qc_mask.sum())
         mask &= upstream_qc_mask
+        logger.info(
+            "Marker subsetting: upstream variant QC mask: %d / %d pass (%d excluded by QC)",
+            n_qc, n_total, n_total - n_qc,
+        )
+
+    n_final = int(mask.sum())
+    logger.info(
+        "Marker subsetting: %d / %d markers pass all filters (%.1f%%)",
+        n_final, n_total, 100.0 * n_final / n_total if n_total > 0 else 0.0,
+    )
     return mask

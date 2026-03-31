@@ -91,6 +91,8 @@ Computed by `scripts/compute_variant_qc.sh` (via `plink2 --missing`,
 | `hwe_p`     | float | Hardy-Weinberg equilibrium p-value (per ancestry) | ≥ 1×10⁻⁶ |
 | `maf`       | float | Minor allele frequency | ≥ 0.01 |
 
+### Correction-Stage Marker Subsetting
+
 For `array_lrr_gwas` batch-effect correction, marker subsetting uses:
 
 | Parameter | Description | Default |
@@ -100,6 +102,50 @@ For `array_lrr_gwas` batch-effect correction, marker subsetting uses:
 | `min_var`       | Minimum per-marker LRR variance (removes uninformative markers) | 0.001 |
 | `max_var`       | Maximum per-marker LRR variance (removes artefactual markers) | None |
 | Complexity exclusion | Centromere / segmental duplication regions | Build-specific |
+| Upstream variant QC | Call rate + HWE from `collated_variant_qc.tsv` (MAF not required) | Via `--variant-qc` |
+
+**INTENSITY_ONLY markers** are retained during correction because their
+LRR values contribute to batch-effect estimation.
+
+All filter steps are logged with per-step marker counts:
+
+```
+INFO: Marker subsetting: call-rate filter (≥0.9500): 95000 / 96869 pass (1869 excluded)
+INFO: Marker subsetting: variance filter (min=0.0010, max=None): 96500 / 96869 pass (369 excluded)
+INFO: Marker subsetting: autosome filter: 90000 / 96869 pass (6869 non-autosomal excluded)
+INFO: Marker subsetting: 88000 / 96869 markers pass all filters (91.0%)
+```
+
+### Association-Stage Marker Exclusion
+
+The `associate` sub-command applies minimal hard-fail marker exclusion before
+the per-marker regression.  Upstream variant QC flags are **not** used to
+pre-filter LRR markers — they are propagated to the output TSV for post-hoc
+filtering.
+
+| Filter | Default | CLI Override | Config Key |
+|--------|---------|--------------|------------|
+| INTENSITY_ONLY probes | Excluded | `--no-exclude-intensity-only` | `association_marker_qc.exclude_intensity_only: false` |
+| Monomorphic LRR (zero variance) | Excluded | `--no-exclude-monomorphic-lrr` | `association_marker_qc.exclude_monomorphic_lrr: false` |
+
+> **Upstream variant QC flags are NOT used to pre-filter LRR association
+> markers.**  Instead, per-marker QC flags (`all_ancestries_call_rate_pass`,
+> `all_ancestries_hwe_pass`, `all_ancestries_maf_pass`) are propagated to
+> the output TSV for every tested marker, enabling trivial post-hoc
+> filtering without re-running the scan.
+
+**Scientific rationale:**
+- **INTENSITY_ONLY**: Non-polymorphic probes report intensity but have no
+  genotype cluster (no GT field).  Their LRR is not comparable to
+  genotyped markers and should not be tested for association.
+- **Monomorphic LRR**: Markers with zero variance across analysed samples
+  are uninformative and produce degenerate test statistics.
+- **No genotype-QC pre-filtering**: LRR is a continuous intensity signal.
+  Genotype-derived QC metrics (MAF, HWE, genotype call rate) do not
+  directly determine whether a marker's LRR is informative.  Pre-filtering
+  silently drops potentially interesting loci and forces re-runs if
+  threshold preferences change.  Modern GWAS pipelines (SAIGE, REGENIE)
+  follow the same philosophy: run once, annotate, filter freely.
 
 ---
 
@@ -169,6 +215,13 @@ marker_qc:
   min_call_rate: 0.95        # Min marker call rate
   min_var: 0.001             # Min LRR variance (removes uninformative markers)
   max_var: null              # Max LRR variance (null = no upper limit)
+
+# association_marker_qc: Controls marker exclusion for the associate sub-command.
+# Only INTENSITY_ONLY and monomorphic LRR are hard-fail pre-filters.
+# Upstream variant QC flags are propagated to output, NOT used to pre-filter.
+association_marker_qc:
+  exclude_intensity_only: true   # Exclude INTENSITY_ONLY probes (no GT field)
+  exclude_monomorphic_lrr: true  # Exclude zero-variance LRR markers
 
 # correction: SVD decomposition parameters.
 correction:
@@ -283,6 +336,8 @@ from the YAML config.
 The `--variant-qc` flag and the LD pruning flags work together in
 the `associate` sub-command:
 
+**GRM markers (LMM only):**
+
 1. Markers are first filtered by `--variant-qc` (call rate + HWE +
    MAF pass required for GRM).
 2. The surviving markers are then LD-pruned unless `--no-ld-prune` is
@@ -290,14 +345,33 @@ the `associate` sub-command:
 3. LD pruning uses `--ld-window-bp` (default 1 000 000) and
    `--ld-r2-thresh` (default 0.2).
 
+**LRR markers (association testing):**
+
+The association scan runs on **all** input markers (minus INTENSITY_ONLY
+and monomorphic LRR).  No upstream QC pre-filtering is applied at
+association time.  QC flags are propagated to the output for post-hoc
+filtering.
+
+1. INTENSITY_ONLY markers are excluded (unless `--no-exclude-intensity-only`).
+2. Monomorphic LRR markers (zero variance) are excluded (unless
+   `--no-exclude-monomorphic-lrr`).
+
 For the `correct` sub-command, `--variant-qc` applies call rate + HWE
 filters (MAF not required) to the RSVD marker selection; LD pruning
-is not performed during batch correction.
+is not performed during batch correction.  INTENSITY_ONLY markers are
+retained for correction.
 
 ### Provenance in Association Output
 
-When `--variant-qc` is provided for the `associate` sub-command, the
-output TSV includes three additional boolean columns for each marker:
+The output TSV always includes two marker-exclusion provenance columns:
+
+| Column | Description |
+|---|---|
+| `intensity_only` | Whether the marker is an INTENSITY_ONLY probe (bool) |
+| `lrr_monomorphic` | Whether the marker had zero LRR variance across analysed samples (bool) |
+
+When `--variant-qc` is provided, three additional boolean columns are
+added for each marker:
 
 | Column | Description |
 |---|---|
@@ -308,7 +382,16 @@ output TSV includes three additional boolean columns for each marker:
 Markers that are **not** present in the upstream QC file receive
 empty values in these columns.  This allows downstream users and
 auditors to trace exactly which markers were included or excluded
-by which filters.
+by which filters, and enables trivial post-hoc filtering:
+
+```bash
+# Example: filter association results to standard GWAS thresholds
+# (column positions will vary; use header-aware tools like csvtk or pandas)
+head -1 results.tsv  # check column positions
+# Or with Python:
+# import pandas as pd; df = pd.read_csv("results.tsv", sep="\t")
+# df = df[df.all_ancestries_call_rate_pass & df.all_ancestries_hwe_pass & df.all_ancestries_maf_pass]
+```
 
 ---
 

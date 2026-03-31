@@ -13,6 +13,7 @@ The workflow is:
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 import numpy as np
@@ -21,6 +22,8 @@ from numpy.typing import NDArray
 from array_lrr_gwas.decomposition import decompose, DecompCallable
 from array_lrr_gwas.select_k import select_k_mp
 from array_lrr_gwas.subsetting import subset_markers
+
+logger = logging.getLogger(__name__)
 
 
 def classify_samples(
@@ -165,6 +168,14 @@ def correct_lrr(
     # 1. Classify samples
     hq_mask = classify_samples(
         lrr, max_lrr_sd=max_lrr_sd, min_call_rate=min_sample_call_rate
+    )
+    n_hq = int(np.sum(hq_mask))
+    n_total_samples = lrr.shape[1]
+    logger.info(
+        "Sample classification: %d / %d HQ (max_lrr_sd=%.4f, "
+        "min_call_rate=%.4f), %d LQ",
+        n_hq, n_total_samples, max_lrr_sd, min_sample_call_rate,
+        n_total_samples - n_hq,
     )
     if not np.any(hq_mask):
         raise ValueError(

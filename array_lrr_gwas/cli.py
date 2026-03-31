@@ -420,9 +420,47 @@ def _build_parser() -> argparse.ArgumentParser:
             "(call rate + HWE + MAF) → LD prune (unless --no-ld-prune) "
             "→ GRM. Also configurable via upstream_qc.variant_qc_path "
             "in the YAML config. If neither is set, no upstream "
-            "filtering is applied and a warning is logged. When present, "
-            "per-marker QC flags are propagated to the output TSV for "
-            "provenance tracking."
+            "filtering is applied and a warning is logged. "
+            "Per-marker QC flags (call_rate_pass, hwe_pass, maf_pass) "
+            "are propagated to the output TSV for every tested marker, "
+            "enabling trivial post-hoc filtering without re-running. "
+            "LRR markers are NOT pre-filtered by these flags — only "
+            "INTENSITY_ONLY and monomorphic-LRR exclusions are applied "
+            "before association testing."
+        ),
+    )
+
+    # ---- Association marker-exclusion flags ----
+    # These flags control variant-level filtering applied to LRR markers
+    # before the association test.  INTENSITY_ONLY and monomorphic LRR are
+    # the only hard-fail pre-filters.  Upstream variant QC flags are
+    # propagated to the output TSV for post-hoc filtering — they are NOT
+    # used to pre-filter LRR markers.
+    assoc.add_argument(
+        "--no-exclude-intensity-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable exclusion of INTENSITY_ONLY markers from association "
+            "testing.  By default, markers flagged as INTENSITY_ONLY in "
+            "the BCF INFO field are excluded from the association scan "
+            "because they report intensity but have no genotype cluster "
+            "(no GT field), making their LRR unreliable for GWAS.  They "
+            "are retained during batch-effect correction (the correction "
+            "stage only uses LRR values).  Also configurable via "
+            "association_marker_qc.exclude_intensity_only in the YAML config."
+        ),
+    )
+    assoc.add_argument(
+        "--no-exclude-monomorphic-lrr",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable exclusion of markers with zero LRR variance across "
+            "analysed samples.  Such markers are uninformative (constant "
+            "LRR across all samples) and produce degenerate test statistics.  "
+            "Also configurable via "
+            "association_marker_qc.exclude_monomorphic_lrr in the YAML config."
         ),
     )
     assoc.add_argument(
@@ -714,6 +752,7 @@ def _run_correct(args: argparse.Namespace) -> int:
 def _run_associate(args: argparse.Namespace) -> int:
     """Execute the ``associate`` sub-command."""
     import csv
+    import warnings
 
     import numpy as np
 
@@ -1027,6 +1066,82 @@ def _run_associate(args: argparse.Namespace) -> int:
     phenotype = pheno_vals[analyzed_mask]
     lrr_sub = lrr[:, analyzed_mask]
 
+    # ------------------------------------------------------------------
+    # Association-stage marker exclusion
+    # ------------------------------------------------------------------
+    # Only two hard-fail pre-filters for LRR association markers:
+    #   1. INTENSITY_ONLY (no cluster model → unreliable LRR)
+    #   2. Monomorphic LRR (zero variance → degenerate statistics)
+    # Upstream variant QC flags are NOT used to pre-filter — they are
+    # propagated to the output TSV for post-hoc filtering.
+    amqc = cfg.get("association_marker_qc", {})
+    exclude_intensity_only = amqc.get("exclude_intensity_only", True)
+    if args.no_exclude_intensity_only:
+        exclude_intensity_only = False
+    exclude_monomorphic = amqc.get("exclude_monomorphic_lrr", True)
+    if args.no_exclude_monomorphic_lrr:
+        exclude_monomorphic = False
+
+    n_total_markers = lrr_sub.shape[0]
+    marker_keep = np.ones(n_total_markers, dtype=bool)
+
+    # 1. Exclude INTENSITY_ONLY markers
+    if exclude_intensity_only:
+        intensity_mask = np.array(
+            [v.get("intensity_only", False) for v in variants], dtype=bool,
+        )
+        n_intensity = int(intensity_mask.sum())
+        marker_keep &= ~intensity_mask
+        logger.info(
+            "Association marker exclusion: INTENSITY_ONLY: %d / %d excluded "
+            "(non-polymorphic probes without GT; retained for correction only)",
+            n_intensity, n_total_markers,
+        )
+
+    # 2. Exclude monomorphic LRR markers (zero variance across samples)
+    # Always compute variance for provenance; optionally exclude.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        _pre_filter_lrr_var = np.nanvar(lrr_sub, axis=1)
+    _pre_filter_all_nan = np.all(np.isnan(lrr_sub), axis=1)
+    _pre_filter_mono = (_pre_filter_lrr_var == 0.0) | _pre_filter_all_nan
+
+    if exclude_monomorphic:
+        zero_var_mask = (_pre_filter_lrr_var == 0.0) & ~_pre_filter_all_nan
+        mono_mask = zero_var_mask | _pre_filter_all_nan
+        n_mono = int(mono_mask.sum())
+        n_zero_var = int(zero_var_mask.sum())
+        n_all_nan = int(_pre_filter_all_nan.sum())
+        marker_keep &= ~mono_mask
+        logger.info(
+            "Association marker exclusion: monomorphic LRR "
+            "(zero variance): %d / %d excluded "
+            "(%d constant, %d all-NaN)",
+            n_mono, n_total_markers, n_zero_var, n_all_nan,
+        )
+
+    n_keep = int(marker_keep.sum())
+    n_excluded = n_total_markers - n_keep
+    logger.info(
+        "Association marker exclusion summary: %d / %d markers pass all "
+        "filters (%d excluded, %.1f%%)",
+        n_keep, n_total_markers, n_excluded,
+        100.0 * n_excluded / n_total_markers if n_total_markers > 0 else 0.0,
+    )
+
+    if n_keep == 0:
+        logger.error(
+            "No markers remain after association-stage filtering. "
+            "Consider relaxing marker exclusion criteria."
+        )
+        return 1
+
+    # Apply marker filter and carry forward the pre-computed monomorphic
+    # flags for surviving markers (avoids recomputing variance later).
+    _post_filter_mono = _pre_filter_mono[marker_keep]
+    lrr_sub = lrr_sub[marker_keep]
+    variants = [v for v, k in zip(variants, marker_keep) if k]
+
     # GRM for LMM
     grm = None
     if args.method == "lmm":
@@ -1261,6 +1376,18 @@ def _run_associate(args: argparse.Namespace) -> int:
                 rec["all_ancestries_call_rate_pass"] = ""
                 rec["all_ancestries_hwe_pass"] = ""
                 rec["all_ancestries_maf_pass"] = ""
+
+    # Append marker-exclusion provenance columns so users know which
+    # markers were excluded (and why) without re-running.  For surviving
+    # markers these will be False when default exclusions are on; when
+    # --no-exclude-intensity-only or --no-exclude-monomorphic-lrr is
+    # used, some True values may appear.
+    for rec, v in zip(records, variants):
+        rec["intensity_only"] = v.get("intensity_only", False)
+    # Use the pre-computed monomorphic flags from the exclusion step
+    # (cached in _post_filter_mono) to avoid recomputing variance.
+    for i, rec in enumerate(records):
+        rec["lrr_monomorphic"] = bool(_post_filter_mono[i])
 
     header = list(records[0].keys()) if records else []
     with open(args.output, "w", newline="") as fh:

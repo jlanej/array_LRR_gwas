@@ -908,6 +908,7 @@ class TestCli:
                 "--phenotype", str(pheno),
                 "--hq-samples", str(hq),
                 "--method", "ols",
+                "--no-exclude-monomorphic-lrr",
                 "-o", str(out),
             ])
 
@@ -1137,6 +1138,7 @@ class TestCli:
                 "--sample-sheet", str(sheet),
                 "--max-lrr-sd", "0.05",
                 "--method", "ols",
+                "--no-exclude-monomorphic-lrr",
                 "-o", str(out),
             ])
 
