@@ -1,5 +1,5 @@
-#!/usr/bin/env env bash
-# run_correction.sh — Run array-lrr-gwas correct on the 100-sample test BCF.
+#!/usr/bin/env bash
+# test_run_correction.sh — Run array-lrr-gwas correct on the 100-sample test BCF.
 #
 # Input
 # -----
@@ -49,6 +49,18 @@ set -euo pipefail
 # Resolve paths relative to the repo root
 # ---------------------------------------------------------------------------
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# ---------------------------------------------------------------------------
+# Auto-activate the project virtual environment if not already active
+# ---------------------------------------------------------------------------
+if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+    VENV_ACTIVATE="${REPO_ROOT}/.venv/bin/activate"
+    if [[ -f "${VENV_ACTIVATE}" ]]; then
+        # shellcheck source=/dev/null
+        source "${VENV_ACTIVATE}"
+        echo "Activated venv: ${VIRTUAL_ENV}"
+    fi
+fi
 
 BCF="${REPO_ROOT}/tests/data/stage2_reclustered.100.subsample.subset.bcf"
 OUT_DIR="${OUT_DIR:-${REPO_ROOT}/output/correction}"
