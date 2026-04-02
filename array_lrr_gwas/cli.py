@@ -20,6 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
+from array_lrr_gwas.audit import AuditTrail, audit_path_for
+
 logger = logging.getLogger(__name__)
 
 
@@ -693,6 +695,8 @@ def _run_correct(args: argparse.Namespace) -> int:
     from array_lrr_gwas.qc_config import defaults, load_config, apply_to_correct_args
     from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
+    audit = AuditTrail("correct")
+
     input_path = args.input
     if not input_path.exists():
         logger.error("Input file not found: %s", input_path)
@@ -723,12 +727,19 @@ def _run_correct(args: argparse.Namespace) -> int:
             cli_overrides[key] = val
 
     correct_kwargs = apply_to_correct_args(cfg, cli_overrides)
+    audit.set_parameters(**correct_kwargs)
 
     # Read input
     logger.info("Reading LRR from %s", input_path)
     lrr, samples, variants = read_lrr(input_path)
     logger.info(
         "Loaded %d variants × %d samples", lrr.shape[0], lrr.shape[1]
+    )
+    audit.set_input(
+        lrr_file=str(input_path),
+        n_variants=int(lrr.shape[0]),
+        n_samples=int(lrr.shape[1]),
+        config_file=str(args.config) if args.config else None,
     )
 
     # Extract positions and chromosomes from variants
@@ -761,6 +772,17 @@ def _run_correct(args: argparse.Namespace) -> int:
             n_regions,
             build,
         )
+        audit.add_step(
+            "complexity_region_setup",
+            genome_build=build,
+            n_exclusion_regions=n_regions,
+        )
+    else:
+        audit.add_step(
+            "complexity_region_setup",
+            genome_build=None,
+            complexity_filter_disabled=True,
+        )
 
     # Load upstream variant QC mask for RSVD marker selection
     variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
@@ -775,10 +797,34 @@ def _run_correct(args: argparse.Namespace) -> int:
             require_call_rate=True, require_hwe=True, require_maf=False,
         )
         n_pass = int(upstream_qc_mask.sum())
+        n_total_v = len(upstream_qc_mask)
         logger.info(
             "Upstream variant QC (RSVD): %d / %d markers pass "
             "(call rate + HWE; MAF not required)",
-            n_pass, len(upstream_qc_mask),
+            n_pass, n_total_v,
+        )
+        # Per-reason breakdown for audit trail
+        n_not_in_file = sum(1 for vid in variant_ids if vid not in qc_data)
+        n_failed_cr = sum(
+            1 for vid in variant_ids
+            if vid in qc_data and not qc_data[vid].call_rate_pass
+        )
+        n_failed_hwe = sum(
+            1 for vid in variant_ids
+            if vid in qc_data and not qc_data[vid].hwe_pass
+        )
+        audit.add_step(
+            "variant_qc_filter",
+            description="Upstream variant QC for RSVD marker selection",
+            file=str(variant_qc_path),
+            n_qc_records=len(qc_data),
+            criteria="call_rate + HWE (MAF not required)",
+            n_input_variants=n_total_v,
+            n_pass=n_pass,
+            n_excluded=n_total_v - n_pass,
+            n_not_in_qc_file=n_not_in_file,
+            n_failed_call_rate=n_failed_cr,
+            n_failed_hwe=n_failed_hwe,
         )
     else:
         logger.warning(
@@ -786,6 +832,12 @@ def _run_correct(args: argparse.Namespace) -> int:
             "upstream_qc.variant_qc_path).  Skipping ancestry-informed "
             "marker filtering for RSVD.  Provide collated_variant_qc.tsv "
             "for best-practice QC."
+        )
+        audit.add_step(
+            "variant_qc_filter",
+            description="No upstream variant QC file provided",
+            file=None,
+            skipped=True,
         )
 
     # Run correction
@@ -807,6 +859,33 @@ def _run_correct(args: argparse.Namespace) -> int:
         info["k"],
         info["n_hq_samples"],
         info["n_markers_used"],
+    )
+    audit.add_step(
+        "sample_classification",
+        description="HQ/LQ classification for RSVD decomposition",
+        n_total_samples=info["n_total_samples"],
+        n_hq=info["n_hq_samples"],
+        n_lq=info["n_lq_samples"],
+        criteria={
+            "max_lrr_sd": correct_kwargs.get("max_lrr_sd", 0.35),
+            "min_sample_call_rate": correct_kwargs.get(
+                "min_sample_call_rate", 0.95
+            ),
+        },
+    )
+    audit.add_step(
+        "marker_subsetting",
+        description="Combined marker QC for RSVD input matrix",
+        **info.get("marker_filter_details", {}),
+    )
+    audit.add_step(
+        "rsvd_correction",
+        description="Truncated SVD batch-effect correction",
+        k=info["k"],
+        backend=info["backend"],
+        n_markers_used=info["n_markers_used"],
+        n_hq_samples_used=info["n_hq_samples"],
+        n_lq_samples_extrapolated=info["n_lq_samples"],
     )
 
     # Write output
@@ -831,6 +910,15 @@ def _run_correct(args: argparse.Namespace) -> int:
     logger.info("Wrote singular values: %s", svd_paths["singular_values"])
     if "loadings" in svd_paths:
         logger.info("Wrote loadings: %s", svd_paths["loadings"])
+
+    audit.set_output(
+        file=str(args.output),
+        n_variants=int(lrr.shape[0]),
+        n_samples=int(lrr.shape[1]),
+        correction_k=int(info["k"]),
+    )
+    audit.write(audit_path_for(args.output))
+
     logger.info("Done.")
     return 0
 
@@ -845,6 +933,9 @@ def _run_associate(args: argparse.Namespace) -> int:
     from array_lrr_gwas.association import run_association
     from array_lrr_gwas.io_vcf import read_lrr
     from array_lrr_gwas.qc_config import defaults, load_config, apply_to_associate_args
+    from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
+
+    audit = AuditTrail("associate")
 
     input_path = args.input
     if not input_path.exists():
@@ -863,11 +954,38 @@ def _run_associate(args: argparse.Namespace) -> int:
     else:
         cfg = defaults()
 
+    # ------------------------------------------------------------------
+    # Resolve variant-QC path once (used for LRR presence filter, GRM
+    # filtering, and output provenance).
+    # ------------------------------------------------------------------
+    variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get(
+        "variant_qc_path"
+    )
+    qc_data: dict | None = None
+    if variant_qc_path is not None:
+        variant_qc_path = Path(variant_qc_path)
+        logger.info("Loading upstream variant QC from %s", variant_qc_path)
+        qc_data = read_collated_variant_qc(variant_qc_path)
+        logger.info(
+            "Loaded %d variant QC records from %s",
+            len(qc_data), variant_qc_path,
+        )
+
     # Read LRR
     logger.info("Reading LRR from %s", input_path)
     lrr, samples, variants = read_lrr(input_path)
     logger.info(
         "Loaded %d variants × %d samples", lrr.shape[0], lrr.shape[1]
+    )
+    audit.set_input(
+        lrr_file=str(input_path),
+        phenotype_file=str(pheno_path),
+        n_variants=int(lrr.shape[0]),
+        n_samples=int(lrr.shape[1]),
+        variant_qc_file=str(variant_qc_path) if variant_qc_path else None,
+        sample_sheet_file=str(args.sample_sheet) if args.sample_sheet else None,
+        config_file=str(args.config) if args.config else None,
+        method=args.method,
     )
 
     # Read phenotype TSV
@@ -1034,6 +1152,22 @@ def _run_associate(args: argparse.Namespace) -> int:
         logger.error("No analyzable samples remain after filtering")
         return 1
 
+    # Audit: sample classification
+    _sample_audit: dict = {
+        "source": hq_source or "none",
+        "n_total_in_lrr": n_samples_total,
+        "n_phenotype_matched": n_pheno_matched,
+        "n_phenotype_valid": n_valid_pre,
+        "n_phenotype_missing": n_missing_pre,
+        "n_hq_in_lrr": n_hq_in_lrr,
+        "n_dropped_lq_with_valid_pheno": n_dropped_lq,
+        "n_analyzed": n_analyzed,
+    }
+    if hq_source == "sample_sheet":
+        _sample_audit["exclusion_counts"] = dict(excl_result.counts)
+        _sample_audit["sheet_total"] = excl_result.total
+    audit.add_step("sample_classification", **_sample_audit)
+
     logger.info(
         "Association sample breakdown: total_lrr=%d, phenotype_matched=%d, "
         "phenotype_valid=%d, phenotype_missing=%d",
@@ -1155,11 +1289,12 @@ def _run_associate(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------
     # Association-stage marker exclusion
     # ------------------------------------------------------------------
-    # Only two hard-fail pre-filters for LRR association markers:
+    # Hard-fail pre-filters for LRR association markers:
+    #   0. Not present in variant-QC file (when provided)
     #   1. INTENSITY_ONLY (no cluster model → unreliable LRR)
     #   2. Monomorphic LRR (zero variance → degenerate statistics)
-    # Upstream variant QC flags are NOT used to pre-filter — they are
-    # propagated to the output TSV for post-hoc filtering.
+    # Individual variant QC pass/fail flags are propagated to the output
+    # TSV for post-hoc filtering (not used as pre-filters here).
     amqc = cfg.get("association_marker_qc", {})
     exclude_intensity_only = amqc.get("exclude_intensity_only", True)
     if args.no_exclude_intensity_only:
@@ -1170,6 +1305,27 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     n_total_markers = lrr_sub.shape[0]
     marker_keep = np.ones(n_total_markers, dtype=bool)
+
+    # 0. Restrict to variants present in the variant-QC file
+    n_not_in_qc = 0
+    if qc_data is not None:
+        variant_ids_pre = [_variant_id(v) for v in variants]
+        not_in_qc = np.array(
+            [vid not in qc_data for vid in variant_ids_pre], dtype=bool,
+        )
+        n_not_in_qc = int(not_in_qc.sum())
+        marker_keep &= ~not_in_qc
+        logger.info(
+            "Association marker exclusion: not in variant-QC file: "
+            "%d / %d excluded (only variants present in %s are retained)",
+            n_not_in_qc, n_total_markers, variant_qc_path,
+        )
+    else:
+        logger.info(
+            "Association marker exclusion: no variant-QC file provided; "
+            "all %d markers eligible (no universe filter applied)",
+            n_total_markers,
+        )
 
     # 1. Exclude INTENSITY_ONLY markers
     if exclude_intensity_only:

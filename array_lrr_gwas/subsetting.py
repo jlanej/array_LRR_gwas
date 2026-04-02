@@ -160,6 +160,7 @@ def subset_markers(
     exclude_regions: dict[str, list[tuple[int, int]]] | None = None,
     autosomes_only: bool = True,
     upstream_qc_mask: NDArray[np.bool_] | None = None,
+    details: dict | None = None,
 ) -> NDArray[np.bool_]:
     """Combine QC filters to produce a single marker-keep mask.
 
@@ -178,6 +179,9 @@ def subset_markers(
         Pre-computed upstream variant QC mask (e.g. from
         :func:`~array_lrr_gwas.variant_qc.variant_qc_mask`).  When
         provided, the mask is AND-ed with the other filters.
+    details : dict or None
+        If provided, populated in-place with per-filter counts for
+        audit-trail / provenance purposes.
 
     Returns
     -------
@@ -201,6 +205,8 @@ def subset_markers(
         n_var, n_total, n_total - n_var,
     )
 
+    n_auto = n_total
+    n_comp = n_total
     if chromosomes is not None:
         if autosomes_only:
             auto_m = autosome_mask(chromosomes)
@@ -218,6 +224,8 @@ def subset_markers(
                 "Marker subsetting: complexity-region filter: %d / %d pass (%d in excluded regions)",
                 n_comp, n_total, n_total - n_comp,
             )
+
+    n_qc = n_total
     if upstream_qc_mask is not None:
         n_qc = int(upstream_qc_mask.sum())
         mask &= upstream_qc_mask
@@ -231,4 +239,19 @@ def subset_markers(
         "Marker subsetting: %d / %d markers pass all filters (%.1f%%)",
         n_final, n_total, 100.0 * n_final / n_total if n_total > 0 else 0.0,
     )
+
+    if details is not None:
+        details["n_total"] = n_total
+        details["n_pass_call_rate"] = n_call_rate
+        details["n_excluded_call_rate"] = n_total - n_call_rate
+        details["n_pass_variance"] = n_var
+        details["n_excluded_variance"] = n_total - n_var
+        details["n_pass_autosome"] = n_auto
+        details["n_excluded_non_autosomal"] = n_total - n_auto
+        details["n_pass_complexity"] = n_comp
+        details["n_excluded_complexity_region"] = n_total - n_comp
+        details["n_pass_upstream_qc"] = n_qc
+        details["n_excluded_upstream_qc"] = n_total - n_qc
+        details["n_pass_all"] = n_final
+
     return mask

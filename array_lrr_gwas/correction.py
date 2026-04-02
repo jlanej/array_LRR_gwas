@@ -184,6 +184,7 @@ def correct_lrr(
         )
 
     # 2. Subset markers
+    marker_filter_details: dict = {}
     marker_mask = subset_markers(
         lrr,
         positions=positions,
@@ -193,6 +194,7 @@ def correct_lrr(
         max_var=max_var,
         exclude_regions=exclude_regions,
         upstream_qc_mask=upstream_qc_mask,
+        details=marker_filter_details,
     )
     if not np.any(marker_mask):
         raise ValueError(
@@ -258,7 +260,10 @@ def correct_lrr(
         "marker_mask": marker_mask,
         "hq_sample_mask": hq_mask,
         "n_hq_samples": int(np.sum(hq_mask)),
+        "n_lq_samples": n_total_samples - int(np.sum(hq_mask)),
+        "n_total_samples": n_total_samples,
         "n_markers_used": int(np.sum(marker_mask)),
+        "marker_filter_details": marker_filter_details,
         "backend": backend if isinstance(backend, str) else "custom",
     }
     return corrected, info
