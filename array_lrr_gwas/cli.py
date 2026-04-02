@@ -987,6 +987,17 @@ def _run_associate(args: argparse.Namespace) -> int:
         config_file=str(args.config) if args.config else None,
         method=args.method,
     )
+    audit.set_parameters(
+        method=args.method,
+        min_maf=args.min_maf,
+        min_gt_call_rate=args.min_gt_call_rate,
+        no_ld_prune=args.no_ld_prune,
+        ld_window_bp=args.ld_window_bp,
+        ld_r2_thresh=args.ld_r2_thresh,
+        n_pcs=args.n_pcs,
+        exclude_intensity_only=not args.no_exclude_intensity_only,
+        exclude_monomorphic_lrr=not args.no_exclude_monomorphic_lrr,
+    )
 
     # Read phenotype TSV
     logger.info("Reading phenotype from %s", pheno_path)
@@ -1371,6 +1382,22 @@ def _run_associate(args: argparse.Namespace) -> int:
         100.0 * n_excluded / n_total_markers if n_total_markers > 0 else 0.0,
     )
 
+    # Audit: marker exclusion for LRR association
+    _marker_audit: dict = {
+        "n_total": n_total_markers,
+        "n_pass_all": n_keep,
+        "n_excluded_total": n_excluded,
+        "n_excluded_not_in_variant_qc": n_not_in_qc,
+        "variant_qc_file": str(variant_qc_path) if variant_qc_path else None,
+    }
+    if exclude_intensity_only:
+        _marker_audit["n_excluded_intensity_only"] = n_intensity
+    if exclude_monomorphic:
+        _marker_audit["n_excluded_monomorphic"] = n_mono
+        _marker_audit["n_excluded_zero_variance"] = n_zero_var
+        _marker_audit["n_excluded_all_nan"] = n_all_nan
+    audit.add_step("lrr_marker_exclusion", **_marker_audit)
+
     if n_keep == 0:
         logger.error(
             "No markers remain after association-stage filtering. "
@@ -1389,7 +1416,6 @@ def _run_associate(args: argparse.Namespace) -> int:
     if args.method == "lmm":
         from array_lrr_gwas.genotypes import read_genotypes
         from array_lrr_gwas.grm import compute_grm
-        from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
         gt_path = args.genotype_bcf or input_path
         logger.info("Reading genotypes from %s for GRM", gt_path)
@@ -1415,12 +1441,8 @@ def _run_associate(args: argparse.Namespace) -> int:
         )
 
         # Apply upstream variant QC mask (call rate + HWE + MAF)
-        variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
-        if variant_qc_path is not None:
-            logger.info(
-                "Loading upstream variant QC from %s for GRM", variant_qc_path,
-            )
-            qc_data = read_collated_variant_qc(variant_qc_path)
+        # Reuse the qc_data already loaded at the top of _run_associate()
+        if qc_data is not None:
             gt_variant_ids = [_variant_id(v) for v in gt_variants]
             qc_keep = variant_qc_mask(
                 gt_variant_ids, qc_data,
@@ -1559,6 +1581,31 @@ def _run_associate(args: argparse.Namespace) -> int:
             "GRM computed: %d × %d", grm.shape[0], grm.shape[1],
         )
 
+        # Audit: GRM construction pipeline
+        _grm_audit: dict = {
+            "genotype_file": str(gt_path),
+            "n_initial_variants": n_initial,
+            "min_maf": args.min_maf,
+            "min_gt_call_rate": args.min_gt_call_rate,
+            "n_samples_in_grm": int(grm.shape[0]),
+            "n_variants_in_grm": int(dosage_aligned.shape[0]),
+        }
+        if qc_data is not None:
+            _grm_audit["variant_qc_applied"] = True
+            _grm_audit["variant_qc_criteria"] = "call_rate + HWE + MAF"
+            _grm_audit["n_before_variant_qc"] = n_before_qc
+            _grm_audit["n_after_variant_qc"] = int(dosage.shape[0])
+        else:
+            _grm_audit["variant_qc_applied"] = False
+        if not args.no_ld_prune:
+            _grm_audit["ld_pruning"] = True
+            _grm_audit["ld_backend"] = args.ld_backend
+            _grm_audit["ld_window_bp"] = args.ld_window_bp
+            _grm_audit["ld_r2_thresh"] = args.ld_r2_thresh
+        else:
+            _grm_audit["ld_pruning"] = False
+        audit.add_step("grm_construction", **_grm_audit)
+
     if args.method == "logistic":
         logger.warning(
             "Logistic regression does not use the GRM random effect. "
@@ -1578,23 +1625,15 @@ def _run_associate(args: argparse.Namespace) -> int:
     )
     logger.info("Association complete for %d variants", len(result.chrom))
 
-    # Optionally load upstream variant QC flags for output provenance
-    variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
-    qc_provenance = None
-    if variant_qc_path is not None:
-        from array_lrr_gwas.variant_qc import read_collated_variant_qc as _read_vqc
-
-        try:
-            qc_provenance = _read_vqc(variant_qc_path)
-            logger.info(
-                "Propagating upstream QC flags to output TSV "
-                "(%d QC records loaded)",
-                len(qc_provenance),
-            )
-        except (FileNotFoundError, ValueError) as exc:
-            logger.warning(
-                "Could not load variant QC for output provenance: %s", exc,
-            )
+    # Optionally load upstream variant QC flags for output provenance.
+    # Reuse qc_data already loaded at top of _run_associate(); no re-read.
+    qc_provenance = qc_data  # may be None if no --variant-qc
+    if qc_provenance is not None:
+        logger.info(
+            "Propagating upstream QC flags to output TSV "
+            "(%d QC records loaded)",
+            len(qc_provenance),
+        )
 
     # Write output
     logger.info("Writing results to %s", args.output)
@@ -1643,6 +1682,22 @@ def _run_associate(args: argparse.Namespace) -> int:
         writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
         writer.writeheader()
         writer.writerows(records)
+
+    # Audit: association output
+    audit.add_step(
+        "association",
+        method=args.method,
+        n_variants_tested=len(result.chrom),
+        n_samples_analyzed=n_analyzed,
+    )
+    audit.set_output(
+        file=str(args.output),
+        n_variants=len(result.chrom),
+        n_samples=n_analyzed,
+        method=args.method,
+        qc_provenance_attached=qc_provenance is not None,
+    )
+    audit.write(audit_path_for(args.output))
 
     logger.info("Done.")
     return 0

@@ -274,7 +274,10 @@ class TestCli:
             "marker_mask": np.array([True, True], dtype=bool),
             "hq_sample_mask": np.array([True, True], dtype=bool),
             "n_hq_samples": 2,
+            "n_lq_samples": 0,
+            "n_total_samples": 2,
             "n_markers_used": 2,
+            "marker_filter_details": {},
             "backend": "rsvd",
         }
 
@@ -307,6 +310,10 @@ class TestCli:
             "PC2\t1.5",
         ]
 
+        # Verify audit file was written
+        audit_path = tmp_path / "out.bcf.audit.json"
+        assert audit_path.exists()
+
     def test_correct_writes_loadings_when_requested(self, tmp_path, monkeypatch):
         fake_bcf = tmp_path / "in.bcf"
         fake_bcf.write_text("stub")
@@ -327,7 +334,10 @@ class TestCli:
             "marker_mask": np.array([True, False], dtype=bool),
             "hq_sample_mask": np.array([True, True], dtype=bool),
             "n_hq_samples": 2,
+            "n_lq_samples": 0,
+            "n_total_samples": 2,
             "n_markers_used": 1,
+            "marker_filter_details": {},
             "backend": "rsvd",
         }
 
@@ -580,7 +590,7 @@ class TestCli:
 
         from array_lrr_gwas import association
 
-        # Write a QC TSV: v1 passes, v2 fails MAF, v3 passes
+        # Write a QC TSV: v1 passes, v2 fails MAF, v3 passes, a1/a2 pass (LRR variants)
         qc_tsv = tmp_path / "collated_variant_qc.tsv"
         qc_tsv.write_text(
             "variant_id\tall_ancestries_call_rate_pass\t"
@@ -588,6 +598,8 @@ class TestCli:
             "v1\tTrue\tTrue\tTrue\n"
             "v2\tTrue\tTrue\tFalse\n"
             "v3\tTrue\tTrue\tTrue\n"
+            "a1\tTrue\tTrue\tTrue\n"
+            "a2\tTrue\tTrue\tTrue\n"
         )
 
         pheno = tmp_path / "pheno.tsv"
@@ -689,6 +701,8 @@ class TestCli:
             "v1\tTrue\tTrue\tTrue\n"
             "v2\tTrue\tTrue\tFalse\n"
             "v3\tTrue\tTrue\tTrue\n"
+            "a1\tTrue\tTrue\tTrue\n"
+            "a2\tTrue\tTrue\tTrue\n"
         )
         cfg = tmp_path / "qc.yaml"
         cfg.write_text(f"upstream_qc:\n  variant_qc_path: {qc_tsv}\n")
