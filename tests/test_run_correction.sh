@@ -63,6 +63,8 @@ if [[ -z "${VIRTUAL_ENV:-}" ]]; then
 fi
 
 BCF="${REPO_ROOT}/tests/data/stage2_reclustered.100.subsample.subset.bcf"
+FULL_VQC="${REPO_ROOT}/tests/data/collated_variant_qc.tsv"
+SUBSET_VQC="${REPO_ROOT}/tests/data/test_variant_qc.tsv"
 OUT_DIR="${OUT_DIR:-${REPO_ROOT}/output/correction}"
 OUT_BCF="${OUT_DIR}/corrected.bcf"
 
@@ -88,19 +90,42 @@ if ! command -v array-lrr-gwas &>/dev/null; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Generate the BCF-subsetted variant QC file if it doesn't exist yet
+# ---------------------------------------------------------------------------
+if [[ ! -f "${SUBSET_VQC}" ]]; then
+    if [[ ! -f "${FULL_VQC}" ]]; then
+        echo "WARNING: collated_variant_qc.tsv not found at ${FULL_VQC}" >&2
+        echo "         Running without --variant-qc (not best practice)." >&2
+        SUBSET_VQC=""
+    else
+        echo "Generating variant QC subset: ${SUBSET_VQC}"
+        python "${REPO_ROOT}/tests/subset_variant_qc.py" \
+            --bcf    "${BCF}" \
+            --input  "${FULL_VQC}" \
+            --output "${SUBSET_VQC}"
+    fi
+fi
+
+VQC_ARG=""
+if [[ -n "${SUBSET_VQC}" && -f "${SUBSET_VQC}" ]]; then
+    VQC_ARG="--variant-qc ${SUBSET_VQC}"
+fi
+
 mkdir -p "${OUT_DIR}"
 
 # ---------------------------------------------------------------------------
 # Run correction
 # ---------------------------------------------------------------------------
 echo "=== array-lrr-gwas correct ==="
-echo "  Input  : ${BCF}"
-echo "  Output : ${OUT_BCF}"
-echo "  Build  : T2T-CHM13"
-echo "  k      : ${K:-auto (Marchenko–Pastur)}"
+echo "  Input      : ${BCF}"
+echo "  Output     : ${OUT_BCF}"
+echo "  Build      : T2T-CHM13"
+echo "  k          : ${K:-auto (Marchenko–Pastur)}"
+echo "  variant-qc : ${SUBSET_VQC:-none (missing collated_variant_qc.tsv)}"
 echo ""
 
-# shellcheck disable=SC2086  # K_ARG is intentionally word-split
+# shellcheck disable=SC2086  # K_ARG and VQC_ARG are intentionally word-split
 array-lrr-gwas correct \
     "${BCF}" \
     --build T2T-CHM13 \
@@ -108,6 +133,7 @@ array-lrr-gwas correct \
     --svd-output-prefix "${OUT_BCF}.svd" \
     --write-loadings \
     ${K_ARG} \
+    ${VQC_ARG} \
     --verbose
 
 # Index the corrected BCF

@@ -211,3 +211,14 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Pipeline output directory
+output/
+
+# Generated test fixtures
+# Regenerate with:
+#   python tests/make_test_phenotype.py
+#   python tests/subset_variant_qc.py
+tests/data/test_phenotype.tsv
+tests/data/test_variant_qc.tsv
+
