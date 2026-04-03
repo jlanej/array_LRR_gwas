@@ -243,6 +243,16 @@ def variant_qc_mask(
             f"and will be excluded.  Examples: {sample}",
             stacklevel=2,
         )
+        # Emit a louder warning when a large fraction of variants are absent
+        # from the QC file — this often indicates a build or file mismatch.
+        miss_pct = 100.0 * n_miss / n if n > 0 else 0.0
+        if miss_pct > 10.0:
+            logger.warning(
+                "%.1f%% of input variants (%d / %d) are absent from the "
+                "variant QC file.  This may indicate a genome-build mismatch "
+                "or an incomplete QC file.",
+                miss_pct, n_miss, n,
+            )
 
     # Check for extra QC records not present in variant_ids.
     id_set = set(ids)

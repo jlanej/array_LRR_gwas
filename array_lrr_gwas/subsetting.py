@@ -160,6 +160,8 @@ def subset_markers(
     exclude_regions: dict[str, list[tuple[int, int]]] | None = None,
     autosomes_only: bool = True,
     upstream_qc_mask: NDArray[np.bool_] | None = None,
+    audit: object | None = None,
+    variant_ids: Sequence[str] | None = None,
 ) -> NDArray[np.bool_]:
     """Combine QC filters to produce a single marker-keep mask.
 
@@ -178,6 +180,13 @@ def subset_markers(
         Pre-computed upstream variant QC mask (e.g. from
         :func:`~array_lrr_gwas.variant_qc.variant_qc_mask`).  When
         provided, the mask is AND-ed with the other filters.
+    audit : AuditLogger or None
+        Optional :class:`~array_lrr_gwas.audit.AuditLogger` instance.
+        When provided, per-filter audit records are emitted for each
+        subsetting step.
+    variant_ids : sequence of str or None
+        Variant ID strings aligned to the rows of *lrr*.  Required when
+        *audit* is not ``None`` so that excluded IDs can be recorded.
 
     Returns
     -------
@@ -192,6 +201,23 @@ def subset_markers(
         min_call_rate, n_call_rate, n_total, n_total - n_call_rate,
     )
 
+    # Collect per-filter exclusion masks for audit trail
+    _do_audit = audit is not None and variant_ids is not None
+    _vids = list(variant_ids) if variant_ids is not None else None
+
+    if _do_audit:
+        _excluded = {
+            _vids[i]: "failed_call_rate"
+            for i in range(n_total) if not mask[i]
+        }
+        _included = [_vids[i] for i in range(n_total) if mask[i]]
+        audit.record(
+            stage="correction_marker_call_rate",
+            id_type="marker",
+            included=_included,
+            excluded=_excluded,
+        )
+
     var_m = variance_mask(lrr, min_var=min_var, max_var=max_var)
     n_var = int(var_m.sum())
     mask &= var_m
@@ -200,6 +226,19 @@ def subset_markers(
         min_var, max_var if max_var is not None else "None",
         n_var, n_total, n_total - n_var,
     )
+
+    if _do_audit:
+        _excluded = {
+            _vids[i]: "failed_variance"
+            for i in range(n_total) if not var_m[i]
+        }
+        _included = [_vids[i] for i in range(n_total) if var_m[i]]
+        audit.record(
+            stage="correction_marker_variance",
+            id_type="marker",
+            included=_included,
+            excluded=_excluded,
+        )
 
     if chromosomes is not None:
         if autosomes_only:
@@ -210,6 +249,18 @@ def subset_markers(
                 "Marker subsetting: autosome filter: %d / %d pass (%d non-autosomal excluded)",
                 n_auto, n_total, n_total - n_auto,
             )
+            if _do_audit:
+                _excluded = {
+                    _vids[i]: "non_autosomal"
+                    for i in range(n_total) if not auto_m[i]
+                }
+                _included = [_vids[i] for i in range(n_total) if auto_m[i]]
+                audit.record(
+                    stage="correction_marker_autosome",
+                    id_type="marker",
+                    included=_included,
+                    excluded=_excluded,
+                )
         if positions is not None:
             comp_m = complexity_mask(positions, chromosomes, exclude_regions)
             n_comp = int(comp_m.sum())
@@ -218,6 +269,18 @@ def subset_markers(
                 "Marker subsetting: complexity-region filter: %d / %d pass (%d in excluded regions)",
                 n_comp, n_total, n_total - n_comp,
             )
+            if _do_audit:
+                _excluded = {
+                    _vids[i]: "complexity_region"
+                    for i in range(n_total) if not comp_m[i]
+                }
+                _included = [_vids[i] for i in range(n_total) if comp_m[i]]
+                audit.record(
+                    stage="correction_marker_complexity",
+                    id_type="marker",
+                    included=_included,
+                    excluded=_excluded,
+                )
     if upstream_qc_mask is not None:
         n_qc = int(upstream_qc_mask.sum())
         mask &= upstream_qc_mask

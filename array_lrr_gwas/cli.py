@@ -821,12 +821,16 @@ def _run_correct(args: argparse.Namespace) -> int:
         correct_kwargs.get("k") or "auto",
         correct_kwargs.get("n_components") or "auto(5% of HQ samples)",
     )
+    variant_ids = [_variant_id(v) for v in variants]
     corrected, info = correct_lrr(
         lrr,
         positions=positions,
         chromosomes=chromosomes,
         exclude_regions=exclude_regions,
         upstream_qc_mask=upstream_qc_mask,
+        audit=audit,
+        variant_ids=variant_ids,
+        sample_ids=samples,
         **correct_kwargs,
     )
     logger.info(

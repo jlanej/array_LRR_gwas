@@ -163,9 +163,14 @@ class AuditLogger:
     def write_tsv(self, path: str | Path) -> Path:
         """Write a detailed per-ID audit trail as a TSV file.
 
-        Each row represents one ID and its status at one stage:
+        Each row represents either a per-stage summary (``status=summary``)
+        or a single excluded ID (``status=excluded``):
 
             stage | id_type | id | status | reason
+
+        Summary rows have ``id`` set to the count of included IDs and
+        ``reason`` empty, providing a record of how many IDs passed
+        each stage without enumerating them individually.
 
         Parameters
         ----------
@@ -185,6 +190,14 @@ class AuditLogger:
             writer.writeheader()
 
             for rec in self._records:
+                # Write a per-stage summary row with included count
+                writer.writerow({
+                    "stage": rec.stage,
+                    "id_type": rec.id_type,
+                    "id": f"n={rec.total_included}",
+                    "status": "included_summary",
+                    "reason": "",
+                })
                 # Write excluded IDs with reasons
                 for reason, ids in rec.excluded_reasons.items():
                     for eid in ids:

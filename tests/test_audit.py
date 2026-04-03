@@ -107,11 +107,15 @@ class TestAuditLoggerOutput:
             reader = csv.DictReader(fh, delimiter="\t")
             rows = list(reader)
 
-        # Only excluded IDs are written to the detail TSV
-        assert len(rows) == 2
-        assert {r["id"] for r in rows} == {"c", "d"}
-        assert all(r["status"] == "excluded" for r in rows)
-        reasons = {r["id"]: r["reason"] for r in rows}
+        # One summary row + two excluded ID rows per stage
+        assert len(rows) == 3
+        summary_rows = [r for r in rows if r["status"] == "included_summary"]
+        excluded_rows = [r for r in rows if r["status"] == "excluded"]
+        assert len(summary_rows) == 1
+        assert summary_rows[0]["id"] == "n=2"
+        assert len(excluded_rows) == 2
+        assert {r["id"] for r in excluded_rows} == {"c", "d"}
+        reasons = {r["id"]: r["reason"] for r in excluded_rows}
         assert reasons["c"] == "failed_hwe"
         assert reasons["d"] == "not_in_variant_qc"
 
@@ -265,6 +269,109 @@ class TestVariantQCMaskAudit:
         )
         assert mask[0]
         assert not mask[1]
+
+    def test_coverage_warning_when_many_missing(self, caplog):
+        """Warning emitted when >10% of variants are absent from QC file."""
+        from array_lrr_gwas.variant_qc import variant_qc_mask, VariantQCRecord
+
+        qc_data = {"v1": VariantQCRecord("v1", True, True, True)}
+        # 9 out of 10 are missing → 90%
+        vids = ["v1"] + [f"missing_{i}" for i in range(9)]
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.variant_qc"):
+                variant_qc_mask(
+                    vids, qc_data,
+                    require_call_rate=True, require_hwe=True, require_maf=False,
+                )
+        assert "absent from the variant QC file" in caplog.text
+        assert "build mismatch" in caplog.text.lower() or "mismatch" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Subsetting audit integration
+# ---------------------------------------------------------------------------
+
+
+class TestSubsettingAudit:
+    """Per-filter audit records from subset_markers()."""
+
+    def test_subset_markers_records_per_filter_audit(self):
+        from array_lrr_gwas.subsetting import subset_markers
+
+        audit = AuditLogger()
+        rng = np.random.default_rng(42)
+        n_markers, n_samples = 20, 5
+        lrr = rng.standard_normal((n_markers, n_samples))
+        # Force marker 0 to be all NaN (fails call rate + variance)
+        lrr[0, :] = np.nan
+        vids = [f"v{i}" for i in range(n_markers)]
+
+        mask = subset_markers(
+            lrr,
+            min_call_rate=0.5,
+            min_var=0.001,
+            audit=audit,
+            variant_ids=vids,
+        )
+
+        # At least call_rate and variance stages should be recorded
+        stages = [r.stage for r in audit.records]
+        assert "correction_marker_call_rate" in stages
+        assert "correction_marker_variance" in stages
+
+    def test_subset_markers_no_audit_without_ids(self):
+        """audit is ignored when variant_ids is None."""
+        from array_lrr_gwas.subsetting import subset_markers
+
+        audit = AuditLogger()
+        lrr = np.random.default_rng(42).standard_normal((10, 5))
+
+        mask = subset_markers(lrr, audit=audit, variant_ids=None)
+        assert len(audit.records) == 0  # no audit without IDs
+
+
+# ---------------------------------------------------------------------------
+# Correction sample-level audit
+# ---------------------------------------------------------------------------
+
+
+class TestCorrectionSampleAudit:
+    """correct_lrr records HQ/LQ sample classification in audit."""
+
+    def test_correct_lrr_records_sample_audit(self):
+        from array_lrr_gwas.correction import correct_lrr
+
+        audit = AuditLogger()
+        rng = np.random.default_rng(42)
+        n_markers, n_samples = 60, 10
+        # Low-noise data so most samples pass HQ thresholds
+        lrr = rng.standard_normal((n_markers, n_samples)) * 0.1
+        # Make sample 0 very noisy (LQ)
+        lrr[:, 0] = rng.standard_normal(n_markers) * 5.0
+        sample_ids = [f"S{i}" for i in range(n_samples)]
+        variant_ids = [f"v{i}" for i in range(n_markers)]
+
+        _, info = correct_lrr(
+            lrr, k=1,
+            max_lrr_sd=0.35,
+            min_sample_call_rate=0.50,
+            min_marker_call_rate=0.50,
+            min_var=0.0001,
+            audit=audit,
+            sample_ids=sample_ids,
+            variant_ids=variant_ids,
+        )
+
+        stages = [r.stage for r in audit.records]
+        assert "correction_sample_qc" in stages
+        sample_rec = [r for r in audit.records if r.stage == "correction_sample_qc"][0]
+        assert sample_rec.id_type == "sample"
+        assert sample_rec.total_input == n_samples
+        # S0 should be excluded as LQ
+        assert sample_rec.total_excluded >= 1
 
 
 # ---------------------------------------------------------------------------

@@ -125,6 +125,9 @@ def correct_lrr(
     exclude_regions: dict[str, list[tuple[int, int]]] | None = None,
     backend: str | DecompCallable = "rsvd",
     upstream_qc_mask: NDArray[np.bool_] | None = None,
+    audit: object | None = None,
+    variant_ids: list[str] | None = None,
+    sample_ids: list[str] | None = None,
 ) -> tuple[NDArray[np.floating], dict]:
     """End-to-end batch-effect correction for an LRR matrix.
 
@@ -156,6 +159,17 @@ def correct_lrr(
         :func:`~array_lrr_gwas.variant_qc.variant_qc_mask` with
         ``require_call_rate=True, require_hwe=True, require_maf=False``).
         When provided, the mask is AND-ed with the subsetting filters.
+    audit : AuditLogger or None
+        Optional :class:`~array_lrr_gwas.audit.AuditLogger` instance.
+        When provided, per-filter marker subsetting and sample
+        classification are recorded in the audit trail.
+    variant_ids : list of str or None
+        Variant ID strings aligned to the rows of *lrr*.  Required when
+        *audit* is not ``None`` so that per-marker audit IDs can be recorded.
+    sample_ids : list of str or None
+        Sample ID strings aligned to the columns of *lrr*.  Required when
+        *audit* is not ``None`` so that per-sample HQ/LQ classification
+        can be recorded.
 
     Returns
     -------
@@ -183,6 +197,20 @@ def correct_lrr(
             "min_sample_call_rate or check input data."
         )
 
+    # Record sample HQ/LQ classification in the audit trail
+    if audit is not None and sample_ids is not None:
+        _hq_ids = [sample_ids[i] for i in range(n_total_samples) if hq_mask[i]]
+        _lq_excluded = {
+            sample_ids[i]: "low_quality"
+            for i in range(n_total_samples) if not hq_mask[i]
+        }
+        audit.record(
+            stage="correction_sample_qc",
+            id_type="sample",
+            included=_hq_ids,
+            excluded=_lq_excluded,
+        )
+
     # 2. Subset markers
     marker_mask = subset_markers(
         lrr,
@@ -193,6 +221,8 @@ def correct_lrr(
         max_var=max_var,
         exclude_regions=exclude_regions,
         upstream_qc_mask=upstream_qc_mask,
+        audit=audit,
+        variant_ids=variant_ids,
     )
     if not np.any(marker_mask):
         raise ValueError(
