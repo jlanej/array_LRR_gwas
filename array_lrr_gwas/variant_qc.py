@@ -163,6 +163,8 @@ def variant_qc_mask(
     require_call_rate: bool = True,
     require_hwe: bool = True,
     require_maf: bool = False,
+    audit: object | None = None,
+    audit_stage: str = "variant_qc",
 ) -> NDArray[np.bool_]:
     """Build a boolean keep-mask aligned to *variant_ids*.
 
@@ -183,6 +185,12 @@ def variant_qc_mask(
         If ``True``, variants failing ``all_ancestries_maf_pass`` are
         masked out.  Default ``False`` (appropriate for RSVD); set
         ``True`` for GRM construction.
+    audit : AuditLogger or None
+        Optional :class:`~array_lrr_gwas.audit.AuditLogger` instance.
+        When provided, included/excluded variants and reasons are
+        recorded for the audit trail.
+    audit_stage : str
+        Stage name used in the audit record (default ``"variant_qc"``).
 
     Returns
     -------
@@ -205,6 +213,8 @@ def variant_qc_mask(
     # --- Build mask in variant_ids order ---------------------------------
     mask = np.ones(n, dtype=bool)
     missing_ids: list[str] = []
+    # Track per-variant exclusion reasons for audit trail
+    excluded_with_reason: dict[str, str] = {}
 
     for i, vid in enumerate(ids):
         rec = qc_data.get(str(vid))
@@ -212,13 +222,18 @@ def variant_qc_mask(
             missing_ids.append(vid)
             # Treat missing QC data as failing — conservative default.
             mask[i] = False
+            excluded_with_reason[vid] = "not_in_variant_qc"
             continue
+        reasons: list[str] = []
         if require_call_rate and not rec.call_rate_pass:
-            mask[i] = False
+            reasons.append("failed_call_rate")
         if require_hwe and not rec.hwe_pass:
-            mask[i] = False
+            reasons.append("failed_hwe")
         if require_maf and not rec.maf_pass:
+            reasons.append("failed_maf")
+        if reasons:
             mask[i] = False
+            excluded_with_reason[vid] = ";".join(reasons)
 
     if missing_ids:
         n_miss = len(missing_ids)
@@ -240,6 +255,16 @@ def variant_qc_mask(
             "Examples: %s",
             n_extra,
             sample_extra,
+        )
+
+    # --- Record audit trail if logger is provided ------------------------
+    if audit is not None:
+        included_ids = [str(vid) for vid, keep in zip(ids, mask) if keep]
+        audit.record(
+            stage=audit_stage,
+            id_type="marker",
+            included=included_ids,
+            excluded=excluded_with_reason,
         )
 
     return mask

@@ -288,11 +288,15 @@ class ExclusionResult(NamedTuple):
         and ``"total_excluded"``.
     total : int
         Total number of samples in the sheet.
+    excluded_reasons : dict of str to list of str
+        Per-sample exclusion reasons.  Maps each excluded sample ID to
+        a list of reason strings (e.g. ``["low_call_rate", "high_lrr_sd"]``).
     """
 
     hq_ids: set[str]
     counts: dict[str, int]
     total: int
+    excluded_reasons: dict[str, list[str]]
 
 
 def _parse_bool_field(val: str | None) -> bool | None:
@@ -502,6 +506,7 @@ def classify_samples_for_association(
         }
         total = 0
         hq_ids: set[str] = set()
+        per_sample_reasons: dict[str, list[str]] = {}
 
         for row in reader:
             sid = row.get(resolved_sid)
@@ -509,6 +514,7 @@ def classify_samples_for_association(
                 continue
             total += 1
             excluded = False
+            reasons: list[str] = []
 
             # Core QC: call rate
             try:
@@ -518,6 +524,7 @@ def classify_samples_for_association(
             if cr is None or cr < min_call_rate:
                 counts["low_call_rate"] += 1
                 excluded = True
+                reasons.append("low_call_rate")
 
             # Core QC: LRR SD
             try:
@@ -527,18 +534,22 @@ def classify_samples_for_association(
             if sd is None or sd > max_lrr_sd:
                 counts["high_lrr_sd"] += 1
                 excluded = True
+                reasons.append("high_lrr_sd")
 
             # Pre-computed exclusions
             if honor_precomputed:
                 if has_pre_pca and _parse_bool_field(row.get(resolved_pre_pca)) is True:
                     counts["pre_pca_excluded"] += 1
                     excluded = True
+                    reasons.append("pre_pca_excluded")
                 if has_relatedness and _parse_bool_field(row.get(resolved_relatedness)) is True:
                     counts["excluded_relatedness"] += 1
                     excluded = True
+                    reasons.append("excluded_relatedness")
                 if has_het_outlier and _parse_bool_field(row.get(resolved_het_outlier)) is True:
                     counts["excluded_het_outlier"] += 1
                     excluded = True
+                    reasons.append("excluded_het_outlier")
 
             # BAF SD exclusion (contamination proxy)
             if exclude_baf_sd and has_baf_sd:
@@ -549,6 +560,7 @@ def classify_samples_for_association(
                 if baf is not None and baf > max_baf_sd:
                     counts["high_baf_sd"] += 1
                     excluded = True
+                    reasons.append("high_baf_sd")
 
             # Sex discordance exclusion
             if exclude_sex_discordant and has_sex_status:
@@ -556,6 +568,7 @@ def classify_samples_for_association(
                 if sex_val == "DISCORDANT":
                     counts["sex_discordant"] += 1
                     excluded = True
+                    reasons.append("sex_discordant")
 
             # Extreme inbreeding F exclusion
             if exclude_extreme_inbreeding and has_inbreeding:
@@ -566,10 +579,15 @@ def classify_samples_for_association(
                 if f_val is not None and abs(f_val) > max_abs_inbreeding_f:
                     counts["extreme_inbreeding_f"] += 1
                     excluded = True
+                    reasons.append("extreme_inbreeding_f")
 
             if excluded:
                 counts["total_excluded"] += 1
+                per_sample_reasons[sid] = reasons
             else:
                 hq_ids.add(sid)
 
-    return ExclusionResult(hq_ids=hq_ids, counts=counts, total=total)
+    return ExclusionResult(
+        hq_ids=hq_ids, counts=counts, total=total,
+        excluded_reasons=per_sample_reasons,
+    )
