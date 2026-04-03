@@ -246,6 +246,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     correct.add_argument(
+        "--audit-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for structured audit trail files.  When provided, "
+            "a detailed per-stage TSV and JSON summary of included/excluded "
+            "markers and samples (with reasons) are written to this "
+            "directory.  Enables full provenance tracking."
+        ),
+    )
+    correct.add_argument(
         "--write-loadings",
         action="store_true",
         help=(
@@ -553,6 +564,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     assoc.add_argument(
+        "--audit-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for structured audit trail files.  When provided, "
+            "a detailed per-stage TSV and JSON summary of included/excluded "
+            "markers and samples (with reasons) are written to this "
+            "directory.  Enables full provenance tracking."
+        ),
+    )
+    assoc.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -687,6 +709,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _run_correct(args: argparse.Namespace) -> int:
     """Execute the ``correct`` sub-command."""
+    from array_lrr_gwas.audit import AuditLogger
     from array_lrr_gwas.correction import correct_lrr
     from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
     from array_lrr_gwas.io_vcf import read_lrr, write_corrected
@@ -697,6 +720,9 @@ def _run_correct(args: argparse.Namespace) -> int:
     if not input_path.exists():
         logger.error("Input file not found: %s", input_path)
         return 1
+
+    # Initialize audit logger
+    audit = AuditLogger()
 
     # Load QC config (YAML file + CLI overrides)
     if args.config is not None:
@@ -773,6 +799,7 @@ def _run_correct(args: argparse.Namespace) -> int:
         upstream_qc_mask = variant_qc_mask(
             variant_ids, qc_data,
             require_call_rate=True, require_hwe=True, require_maf=False,
+            audit=audit, audit_stage="correction_variant_qc",
         )
         n_pass = int(upstream_qc_mask.sum())
         logger.info(
@@ -794,12 +821,16 @@ def _run_correct(args: argparse.Namespace) -> int:
         correct_kwargs.get("k") or "auto",
         correct_kwargs.get("n_components") or "auto(5% of HQ samples)",
     )
+    variant_ids = [_variant_id(v) for v in variants]
     corrected, info = correct_lrr(
         lrr,
         positions=positions,
         chromosomes=chromosomes,
         exclude_regions=exclude_regions,
         upstream_qc_mask=upstream_qc_mask,
+        audit=audit,
+        variant_ids=variant_ids,
+        sample_ids=samples,
         **correct_kwargs,
     )
     logger.info(
@@ -831,6 +862,16 @@ def _run_correct(args: argparse.Namespace) -> int:
     logger.info("Wrote singular values: %s", svd_paths["singular_values"])
     if "loadings" in svd_paths:
         logger.info("Wrote loadings: %s", svd_paths["loadings"])
+
+    # Write audit trail if requested
+    audit_dir = getattr(args, "audit_dir", None)
+    if audit_dir is not None:
+        audit_dir = Path(audit_dir)
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        audit.write_tsv(audit_dir / "correct_audit.tsv")
+        audit.write_json(audit_dir / "correct_audit.json")
+        audit.write_summary_tsv(audit_dir / "correct_audit_summary.tsv")
+
     logger.info("Done.")
     return 0
 
@@ -842,6 +883,7 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     import numpy as np
 
+    from array_lrr_gwas.audit import AuditLogger
     from array_lrr_gwas.association import run_association
     from array_lrr_gwas.io_vcf import read_lrr
     from array_lrr_gwas.qc_config import defaults, load_config, apply_to_associate_args
@@ -855,6 +897,9 @@ def _run_associate(args: argparse.Namespace) -> int:
     if not pheno_path.exists():
         logger.error("Phenotype file not found: %s", pheno_path)
         return 1
+
+    # Initialize audit logger
+    audit = AuditLogger()
 
     # Optional config (currently used for upstream_qc.variant_qc_path).
     if args.config is not None:
@@ -1027,6 +1072,17 @@ def _run_associate(args: argparse.Namespace) -> int:
             excl_result.counts["extreme_inbreeding_f"],
             excl_result.counts["total_excluded"],
             excl_result.total - excl_result.counts["total_excluded"],
+        )
+
+        # Record sample exclusions in audit trail
+        _sample_excluded: dict[str, str] = {}
+        for sid, reasons in excl_result.excluded_reasons.items():
+            _sample_excluded[sid] = ";".join(reasons)
+        audit.record(
+            stage="association_sample_qc",
+            id_type="sample",
+            included=list(excl_result.hq_ids),
+            excluded=_sample_excluded,
         )
 
     n_analyzed = int(analyzed_mask.sum())
@@ -1215,6 +1271,27 @@ def _run_associate(args: argparse.Namespace) -> int:
         100.0 * n_excluded / n_total_markers if n_total_markers > 0 else 0.0,
     )
 
+    # Record association marker exclusion in audit trail
+    _marker_excluded: dict[str, str] = {}
+    _marker_included: list[str] = []
+    for i, (v, keep) in enumerate(zip(variants, marker_keep)):
+        vid = _variant_id(v)
+        if keep:
+            _marker_included.append(vid)
+        else:
+            reasons = []
+            if exclude_intensity_only and v.get("intensity_only", False):
+                reasons.append("intensity_only")
+            if exclude_monomorphic and _pre_filter_mono[i]:
+                reasons.append("monomorphic_lrr")
+            _marker_excluded[vid] = ";".join(reasons) if reasons else "excluded"
+    audit.record(
+        stage="association_marker_exclusion",
+        id_type="marker",
+        included=_marker_included,
+        excluded=_marker_excluded,
+    )
+
     if n_keep == 0:
         logger.error(
             "No markers remain after association-stage filtering. "
@@ -1269,6 +1346,7 @@ def _run_associate(args: argparse.Namespace) -> int:
             qc_keep = variant_qc_mask(
                 gt_variant_ids, qc_data,
                 require_call_rate=True, require_hwe=True, require_maf=True,
+                audit=audit, audit_stage="grm_variant_qc",
             )
             n_before_qc = dosage.shape[0]
             dosage = dosage[qc_keep]
@@ -1456,6 +1534,7 @@ def _run_associate(args: argparse.Namespace) -> int:
         for rec, vid in zip(records, lrr_variant_ids):
             qc_rec = qc_provenance.get(vid)
             if qc_rec is not None:
+                rec["in_variant_qc"] = True
                 rec["all_ancestries_call_rate_pass"] = qc_rec.call_rate_pass
                 rec["all_ancestries_hwe_pass"] = qc_rec.hwe_pass
                 rec["all_ancestries_maf_pass"] = qc_rec.maf_pass
@@ -1465,6 +1544,7 @@ def _run_associate(args: argparse.Namespace) -> int:
                     else qc_rec.qc_pass
                 )
             else:
+                rec["in_variant_qc"] = False
                 rec["all_ancestries_call_rate_pass"] = ""
                 rec["all_ancestries_hwe_pass"] = ""
                 rec["all_ancestries_maf_pass"] = ""
@@ -1487,6 +1567,15 @@ def _run_associate(args: argparse.Namespace) -> int:
         writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
         writer.writeheader()
         writer.writerows(records)
+
+    # Write audit trail if requested
+    audit_dir = getattr(args, "audit_dir", None)
+    if audit_dir is not None:
+        audit_dir = Path(audit_dir)
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        audit.write_tsv(audit_dir / "associate_audit.tsv")
+        audit.write_json(audit_dir / "associate_audit.json")
+        audit.write_summary_tsv(audit_dir / "associate_audit_summary.tsv")
 
     logger.info("Done.")
     return 0
