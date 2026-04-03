@@ -263,8 +263,8 @@ class TestVariantQCMaskAudit:
             require_call_rate=True, require_hwe=True, require_maf=False,
             audit=None,
         )
-        assert mask[0] is np.True_
-        assert mask[1] is np.False_
+        assert mask[0]
+        assert not mask[1]
 
 
 # ---------------------------------------------------------------------------
