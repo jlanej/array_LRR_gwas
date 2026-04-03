@@ -1267,6 +1267,27 @@ def _run_associate(args: argparse.Namespace) -> int:
         100.0 * n_excluded / n_total_markers if n_total_markers > 0 else 0.0,
     )
 
+    # Record association marker exclusion in audit trail
+    _marker_excluded: dict[str, str] = {}
+    _marker_included: list[str] = []
+    for i, (v, keep) in enumerate(zip(variants, marker_keep)):
+        vid = _variant_id(v)
+        if keep:
+            _marker_included.append(vid)
+        else:
+            reasons = []
+            if exclude_intensity_only and v.get("intensity_only", False):
+                reasons.append("intensity_only")
+            if exclude_monomorphic and _pre_filter_mono[i]:
+                reasons.append("monomorphic_lrr")
+            _marker_excluded[vid] = ";".join(reasons) if reasons else "excluded"
+    audit.record(
+        stage="association_marker_exclusion",
+        id_type="marker",
+        included=_marker_included,
+        excluded=_marker_excluded,
+    )
+
     if n_keep == 0:
         logger.error(
             "No markers remain after association-stage filtering. "
@@ -1321,6 +1342,7 @@ def _run_associate(args: argparse.Namespace) -> int:
             qc_keep = variant_qc_mask(
                 gt_variant_ids, qc_data,
                 require_call_rate=True, require_hwe=True, require_maf=True,
+                audit=audit, audit_stage="grm_variant_qc",
             )
             n_before_qc = dosage.shape[0]
             dosage = dosage[qc_keep]
@@ -1508,6 +1530,7 @@ def _run_associate(args: argparse.Namespace) -> int:
         for rec, vid in zip(records, lrr_variant_ids):
             qc_rec = qc_provenance.get(vid)
             if qc_rec is not None:
+                rec["in_variant_qc"] = True
                 rec["all_ancestries_call_rate_pass"] = qc_rec.call_rate_pass
                 rec["all_ancestries_hwe_pass"] = qc_rec.hwe_pass
                 rec["all_ancestries_maf_pass"] = qc_rec.maf_pass
@@ -1517,6 +1540,7 @@ def _run_associate(args: argparse.Namespace) -> int:
                     else qc_rec.qc_pass
                 )
             else:
+                rec["in_variant_qc"] = False
                 rec["all_ancestries_call_rate_pass"] = ""
                 rec["all_ancestries_hwe_pass"] = ""
                 rec["all_ancestries_maf_pass"] = ""
@@ -1539,6 +1563,15 @@ def _run_associate(args: argparse.Namespace) -> int:
         writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
         writer.writeheader()
         writer.writerows(records)
+
+    # Write audit trail if requested
+    audit_dir = getattr(args, "audit_dir", None)
+    if audit_dir is not None:
+        audit_dir = Path(audit_dir)
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        audit.write_tsv(audit_dir / "associate_audit.tsv")
+        audit.write_json(audit_dir / "associate_audit.json")
+        audit.write_summary_tsv(audit_dir / "associate_audit_summary.tsv")
 
     logger.info("Done.")
     return 0

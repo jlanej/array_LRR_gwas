@@ -371,20 +371,22 @@ The output TSV always includes two marker-exclusion provenance columns:
 | `intensity_only` | Whether the marker is an INTENSITY_ONLY probe (bool) |
 | `lrr_monomorphic` | Whether the marker had zero LRR variance across analysed samples (bool) |
 
-When `--variant-qc` is provided, additional boolean provenance columns are
+When `--variant-qc` is provided, additional provenance columns are
 added for each marker:
 
 | Column | Description |
 |---|---|
+| `in_variant_qc` | Whether the marker was present in the upstream variant QC file (bool). `True` = present, `False` = absent. Enables quick identification of markers not covered by the upstream QC pipeline. |
 | `all_ancestries_call_rate_pass` | Whether the marker passed the cross-ancestry call-rate filter |
 | `all_ancestries_hwe_pass` | Whether the marker passed the cross-ancestry HWE filter |
 | `all_ancestries_maf_pass` | Whether the marker passed the cross-ancestry MAF filter |
 | `all_ancestries_qc_pass` | Optional composite upstream QC pass flag (empty when not present upstream) |
 
 Markers that are **not** present in the upstream QC file receive
-empty values in these columns.  This allows downstream users and
-auditors to trace exactly which markers were included or excluded
-by which filters, and enables trivial post-hoc filtering:
+`in_variant_qc = False` and empty values in the QC flag columns.
+This allows downstream users and auditors to trace exactly which
+markers were included or excluded by which filters, and enables
+trivial post-hoc filtering:
 
 ```bash
 # Example: filter association results to standard GWAS thresholds
@@ -392,7 +394,82 @@ by which filters, and enables trivial post-hoc filtering:
 head -1 results.tsv  # check column positions
 # Or with Python:
 # import pandas as pd; df = pd.read_csv("results.tsv", sep="\t")
-# df = df[df.all_ancestries_call_rate_pass & df.all_ancestries_hwe_pass & df.all_ancestries_maf_pass]
+# df = df[df.in_variant_qc & df.all_ancestries_call_rate_pass & df.all_ancestries_hwe_pass & df.all_ancestries_maf_pass]
+```
+
+---
+
+## Pipeline Audit Trail
+
+When `--audit-dir <DIR>` is passed to the `correct` or `associate`
+sub-command, a structured audit trail is written to the specified
+directory.  The audit trail records all filtering decisions made
+during the pipeline run, including which markers and samples were
+included or excluded at each stage and the reason for each exclusion.
+
+### Audit Files
+
+| File | Format | Description |
+|---|---|---|
+| `correct_audit.tsv` / `associate_audit.tsv` | TSV | Per-ID detail: each row is one excluded ID with its stage, type, and reason |
+| `correct_audit.json` / `associate_audit.json` | JSON | Structured summary with excluded IDs grouped by reason per stage |
+| `correct_audit_summary.tsv` / `associate_audit_summary.tsv` | TSV | Stage-level summary: one row per stage with counts |
+
+### Audit Stages
+
+| Stage | Sub-command | Description |
+|---|---|---|
+| `correction_variant_qc` | `correct` | Markers excluded by upstream variant QC (call rate + HWE) for RSVD |
+| `grm_variant_qc` | `associate` | Markers excluded by upstream variant QC (call rate + HWE + MAF) for GRM |
+| `association_marker_exclusion` | `associate` | Markers excluded by INTENSITY_ONLY or monomorphic LRR filters |
+| `association_sample_qc` | `associate` | Samples excluded by sample-sheet-derived QC criteria |
+
+### Exclusion Reasons
+
+Each excluded ID is annotated with one or more reason strings:
+
+**Marker reasons (variant QC):**
+- `not_in_variant_qc` — marker not present in upstream QC file
+- `failed_call_rate` — marker failed cross-ancestry call-rate filter
+- `failed_hwe` — marker failed cross-ancestry HWE filter
+- `failed_maf` — marker failed cross-ancestry MAF filter
+
+**Marker reasons (association exclusion):**
+- `intensity_only` — INTENSITY_ONLY probe (no genotype cluster)
+- `monomorphic_lrr` — zero LRR variance across analysed samples
+
+**Sample reasons:**
+- `low_call_rate` — sample below call-rate threshold
+- `high_lrr_sd` — sample above LRR SD threshold
+- `pre_pca_excluded` — excluded before ancestry PCA (upstream flag)
+- `excluded_relatedness` — removed as related pair
+- `excluded_het_outlier` — extreme heterozygosity outlier
+- `high_baf_sd` — high BAF SD (contamination proxy)
+- `sex_discordant` — sex discordance flag
+- `extreme_inbreeding_f` — extreme inbreeding coefficient
+
+### Example Usage
+
+```bash
+# Run association with audit trail
+array-lrr-gwas associate input.bcf \
+    --phenotype pheno.tsv \
+    --variant-qc collated_variant_qc.tsv \
+    --audit-dir ./audit \
+    -o results.tsv
+
+# Inspect audit summary
+cat audit/associate_audit_summary.tsv
+
+# Parse audit JSON programmatically
+python -c "
+import json
+with open('audit/associate_audit.json') as f:
+    data = json.load(f)
+for rec in data['audit_records']:
+    print(f'{rec[\"stage\"]}: {rec[\"total_included\"]} included, '
+          f'{rec[\"total_excluded\"]} excluded')
+"
 ```
 
 ---
