@@ -10,9 +10,13 @@ Combines two sources:
 
 2. **Covariates** — from ``tests/data/compiled_sample_sheet.tsv``:
 
-   * ``sex_numeric`` — sex encoded as ``1`` (M) / ``0`` (F) from the
-     ``computed_gender`` column.  Biological sex is a strong confounder for
-     mtDNA-CN (females typically have higher CN) and must be included.
+   * ``sex_numeric`` — sex encoded as ``1`` (male) / ``0`` (female).
+     Sourced from the first column in
+     ``computed_gender → peddy_sex → f_sex`` that is both present and
+     non-all-NA.  Within each row a per-column fallback is also applied so
+     that a missing value in the preferred column is filled from the next
+     available one.  Biological sex is a strong confounder for mtDNA-CN
+     (females typically have higher CN) and must be included.
    * ``PC1`` – ``PC20`` — global ancestry principal components from the
      Illumina IDAT processing pipeline.  These control for population
      stratification in the LRR-based GWAS.
@@ -77,7 +81,15 @@ _QC_PHENO_COL = "MTDNA_CN"
 
 # Columns sourced from the compiled sample sheet
 _SHEET_SAMPLE_COL = "sample_id"
-_SHEET_SEX_COL = "computed_gender"
+# Sex-encoding column priority — first present & non-all-NA column wins;
+# within each row, fallback continues to the next column when the value is NA.
+#   computed_gender : "M" / "F"  (Illumina BeadArray pipeline)
+#   peddy_sex       : "male" / "female"  (peddy inferred sex)
+#   f_sex           : float f-statistic  (PLINK --check-sex / peddy)
+_SHEET_SEX_COLS: list[str] = ["computed_gender", "peddy_sex", "f_sex"]
+# Thresholds for encoding a continuous f-statistic as sex
+_F_SEX_MALE_THRESHOLD: float = 0.6
+_F_SEX_FEMALE_THRESHOLD: float = 0.4
 _N_PCS = 20  # PC1 … PC20 (global ancestry)
 
 # Missing-value sentinels
@@ -101,14 +113,58 @@ def _open_source(source: str) -> io.TextIOWrapper:
 
 
 def _encode_sex(val: str | None) -> str:
-    """Return ``'1'`` (male), ``'0'`` (female), or ``'NA'``."""
+    """Return ``'1'`` (male), ``'0'`` (female), or ``'NA'``.
+
+    Accepts single-letter codes (``M``/``F``) as well as the full words
+    ``male``/``female`` (case-insensitive), as produced by peddy.
+    """
     if not val or val.strip() in _MISSING:
         return "NA"
     v = val.strip().upper()
-    if v == "M":
+    if v in ("M", "MALE"):
         return "1"
-    if v == "F":
+    if v in ("F", "FEMALE"):
         return "0"
+    return "NA"
+
+
+def _encode_f_sex(val: str | None) -> str:
+    """Return ``'1'`` (male), ``'0'`` (female), or ``'NA'`` from an f-statistic.
+
+    The f-statistic (e.g. from PLINK ``--check-sex`` or peddy) is a
+    continuous value in roughly [0, 1] where values near 1 indicate male
+    and values near 0 indicate female.  Values in the ambiguous zone
+    ``[_F_SEX_FEMALE_THRESHOLD, _F_SEX_MALE_THRESHOLD]`` are returned as
+    ``'NA'``.
+    """
+    if not val or val.strip() in _MISSING:
+        return "NA"
+    try:
+        f = float(val.strip())
+    except ValueError:
+        return "NA"
+    if f >= _F_SEX_MALE_THRESHOLD:
+        return "1"
+    if f <= _F_SEX_FEMALE_THRESHOLD:
+        return "0"
+    return "NA"
+
+
+def _resolve_sex_numeric(row: dict[str, str], active_sex_cols: list[str]) -> str:
+    """Return ``sex_numeric`` by falling back through *active_sex_cols*.
+
+    Iterates the columns in priority order and returns the first
+    non-``'NA'`` encoded value found.  ``'f_sex'`` is decoded via
+    :func:`_encode_f_sex`; all others via :func:`_encode_sex`.
+    """
+    for col in active_sex_cols:
+        encoded = (
+            _encode_f_sex(row.get(col))
+            if col == "f_sex"
+            else _encode_sex(row.get(col))
+        )
+        if encoded != "NA":
+            return encoded
     return "NA"
 
 
@@ -196,7 +252,7 @@ def build(
 
         # Validate sample sheet columns
         sheet_cols = set(reader.fieldnames)
-        required_sheet = {_SHEET_SAMPLE_COL, _SHEET_SEX_COL} | set(pc_cols)
+        required_sheet = {_SHEET_SAMPLE_COL} | set(pc_cols)
         missing_sheet_cols = required_sheet - sheet_cols
         if missing_sheet_cols:
             logger.error(
@@ -204,6 +260,20 @@ def build(
                 sorted(missing_sheet_cols),
             )
             return 1
+
+        # Determine which sex columns are actually present, in priority order.
+        active_sex_cols = [c for c in _SHEET_SEX_COLS if c in sheet_cols]
+        if not active_sex_cols:
+            logger.warning(
+                "None of the sex columns (%s) found in sample sheet; "
+                "sex_numeric will be NA for all samples.",
+                _SHEET_SEX_COLS,
+            )
+        else:
+            logger.info(
+                "Sex column priority (first non-NA value per row used): %s",
+                active_sex_cols,
+            )
 
         writer = csv.DictWriter(
             out_fh, fieldnames=out_fields, delimiter="\t", lineterminator="\n",
@@ -227,7 +297,7 @@ def build(
             out_row: dict[str, str] = {
                 "sample_id": sid,
                 "phenotype": phenotype,
-                "sex_numeric": _encode_sex(row.get(_SHEET_SEX_COL)),
+                "sex_numeric": _resolve_sex_numeric(row, active_sex_cols),
             }
             for pc in pc_cols:
                 out_row[pc] = _clean(row.get(pc))
