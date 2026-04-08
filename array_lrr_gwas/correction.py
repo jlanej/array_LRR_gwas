@@ -269,7 +269,7 @@ def correct_lrr(
         logger.info(
             "Computing %d pilot PCs (%.0f%% of %d HQ samples, capped at %d)",
             pilot_k,
-            100 * pilot_k / sub.shape[1],
+            100 * pilot_k / max(1, sub.shape[1]),
             sub.shape[1],
             max_possible_k,
         )
