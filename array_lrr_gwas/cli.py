@@ -264,6 +264,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "(can be large for dense arrays)."
         ),
     )
+    correct.add_argument(
+        "--no-interactive-report",
+        action="store_true",
+        help=(
+            "Skip generation of the interactive HTML diagnostic report. "
+            "By default an HTML report with scree plot, 3-D PC scatter, "
+            "and UMAP projection is written next to the output BCF."
+        ),
+    )
 
     # ---- associate sub-command ----
     assoc = sub.add_parser(
@@ -862,6 +871,29 @@ def _run_correct(args: argparse.Namespace) -> int:
     logger.info("Wrote singular values: %s", svd_paths["singular_values"])
     if "loadings" in svd_paths:
         logger.info("Wrote loadings: %s", svd_paths["loadings"])
+
+    # Generate interactive HTML diagnostic report
+    if not getattr(args, "no_interactive_report", False):
+        from array_lrr_gwas.interactive_report import generate_report
+
+        report_path = Path(f"{args.output}.diagnostic_report.html")
+        metrics_tsv_path = Path(f"{svd_prefix}.sample_metrics.tsv")
+        try:
+            generate_report(
+                info=info,
+                samples=samples,
+                lrr=lrr,
+                output_path=report_path,
+                metrics_tsv_path=metrics_tsv_path,
+            )
+            logger.info("Wrote interactive report: %s", report_path)
+            logger.info("Wrote sample metrics TSV: %s", metrics_tsv_path)
+        except Exception:
+            logger.warning(
+                "Failed to generate interactive report. "
+                "Install plotly and umap-learn for full support.",
+                exc_info=True,
+            )
 
     # Write audit trail if requested
     audit_dir = getattr(args, "audit_dir", None)

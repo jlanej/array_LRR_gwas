@@ -1,0 +1,67 @@
+name: Generate Report
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[report]"
+
+      - name: Generate diagnostic report
+        run: |
+          python -c "
+          import numpy as np
+          from array_lrr_gwas.io_vcf import read_lrr
+          from array_lrr_gwas.correction import correct_lrr
+          from array_lrr_gwas.interactive_report import generate_report
+
+          bcf = 'tests/data/stage2_reclustered.100.subsample.subset.bcf'
+          lrr, samples, variants = read_lrr(bcf)
+          lrr = np.where(np.isfinite(lrr), lrr, np.nan)
+
+          corrected, info = correct_lrr(
+              lrr,
+              k=None,
+              max_lrr_sd=10.0,
+              min_sample_call_rate=0.0,
+              min_marker_call_rate=0.5,
+              min_var=0.0,
+          )
+
+          generate_report(
+              info=info,
+              samples=samples,
+              lrr=lrr,
+              output_path='docs/index.html',
+              metrics_tsv_path='docs/sample_metrics.tsv',
+          )
+          print(f'Report generated: k={info[\"k\"]}, '
+                f'{info[\"n_hq_samples\"]} HQ samples, '
+                f'{info[\"n_markers_used\"]} markers')
+          "
+
+      - name: Commit report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/index.html docs/sample_metrics.tsv
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "docs: auto-generate diagnostic report from test BCF"
+          git push
