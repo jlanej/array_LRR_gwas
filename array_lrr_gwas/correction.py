@@ -176,8 +176,26 @@ def correct_lrr(
     corrected : ndarray, shape (n_markers, n_samples)
         Batch-corrected LRR values.
     info : dict
-        Metadata about the correction: selected *k*, marker mask, sample
-        classification, singular values, sample PC scores, and marker loadings.
+        Metadata about the correction.  Keys:
+
+        ``k``
+            Number of PCs used for correction (may be fewer than
+            ``n_components_computed`` when using auto selection).
+        ``n_components_computed``
+            Total number of PCs that were decomposed (= ``pilot_k`` in auto
+            mode, = ``k`` when *k* is provided explicitly).
+        ``singular_values``
+            All *n_components_computed* singular values in descending order.
+        ``sample_scores``
+            PC scores for all samples, shape *(n_components_computed, n_samples)*.
+        ``marker_loadings``
+            Marker loadings, shape *(n_markers_subset, n_components_computed)*.
+        ``marker_mask``
+            Boolean mask of markers used in the decomposition.
+        ``hq_sample_mask``
+            Boolean mask of HQ samples.
+        ``n_hq_samples``, ``n_markers_used``, ``backend``
+            Scalar summary statistics.
     """
     # 1. Classify samples
     hq_mask = classify_samples(
@@ -248,43 +266,62 @@ def correct_lrr(
                 raise ValueError("n_components must be >= 1.")
             pilot_k = n_components
         pilot_k = min(max_possible_k, pilot_k)
-        _, s_pilot, _ = decompose(sub, pilot_k, backend=backend)
+        logger.info(
+            "Computing %d pilot PCs (%.0f%% of %d HQ samples, capped at %d)",
+            pilot_k,
+            100 * pilot_k / max(1, sub.shape[1]),
+            sub.shape[1],
+            max_possible_k,
+        )
+        U_full_pilot, s_pilot, Vt_hq_pilot = decompose(sub, pilot_k, backend=backend)
         k = select_k_mp(s_pilot, sub.shape[0], sub.shape[1])
         k = min(k, max_possible_k)
+        logger.info(
+            "Marchenko-Pastur selected k=%d from %d computed PCs",
+            k,
+            pilot_k,
+        )
+        # Use the already-computed decomposition; slice first k components for correction
+        n_computed = pilot_k
+        U, s, Vt_hq = U_full_pilot[:, :k], s_pilot[:k], Vt_hq_pilot[:k, :]
+        U_all, s_all, Vt_hq_all = U_full_pilot, s_pilot, Vt_hq_pilot
     else:
         if k > max_possible_k:
             raise ValueError(
                 f"k={k} exceeds max feasible components ({max_possible_k})."
             )
+        logger.info("Using explicit k=%d PCs for correction", k)
+        n_computed = k
+        U, s, Vt_hq = decompose(sub, k, backend=backend)
+        U_all, s_all, Vt_hq_all = U, s, Vt_hq
 
-    U, s, Vt_hq = decompose(sub, k, backend=backend)
-
-    # 4. Extrapolate PCs to LQ samples
+    # 4. Extrapolate PCs to LQ samples (using all computed components)
     lq_mask = ~hq_mask
     n_lq = int(np.sum(lq_mask))
     if n_lq > 0:
-        Vt_lq = extrapolate_pcs(
-            lrr[np.ix_(marker_mask, lq_mask)], row_means, U, s
+        Vt_lq_all = extrapolate_pcs(
+            lrr[np.ix_(marker_mask, lq_mask)], row_means, U_all, s_all
         )
-        # Assemble full Vt (k × n_samples)
-        Vt_full = np.empty((k, lrr.shape[1]), dtype=np.float64)
-        Vt_full[:, hq_mask] = Vt_hq
-        Vt_full[:, lq_mask] = Vt_lq
+        # Assemble full Vt for all computed components (n_computed × n_samples)
+        Vt_full_all = np.empty((n_computed, lrr.shape[1]), dtype=np.float64)
+        Vt_full_all[:, hq_mask] = Vt_hq_all
+        Vt_full_all[:, lq_mask] = Vt_lq_all
     else:
-        Vt_full = Vt_hq
+        Vt_full_all = Vt_hq_all
 
-    # 5. Expand U back to full marker dimension
+    # 5. Expand U back to full marker dimension (only k components for residualization)
     U_full = np.zeros((lrr.shape[0], k), dtype=np.float64)
     U_full[marker_mask, :] = U
 
-    # 6. Residualize
-    corrected = residualize(lrr, U_full, s, Vt_full)
+    # 6. Residualize using only the k selected components
+    corrected = residualize(lrr, U_full, s, Vt_full_all[:k, :])
 
     info = {
         "k": k,
-        "singular_values": s,
-        "sample_scores": Vt_full,
-        "marker_loadings": U,
+        "n_components_computed": n_computed,
+        "singular_values": s_all,
+        "sample_scores": Vt_full_all,
+        "marker_loadings": U_all,
         "marker_mask": marker_mask,
         "hq_sample_mask": hq_mask,
         "n_hq_samples": int(np.sum(hq_mask)),

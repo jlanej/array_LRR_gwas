@@ -268,6 +268,7 @@ class TestCli:
 
         info = {
             "k": 2,
+            "n_components_computed": 2,
             "singular_values": np.array([3.0, 1.5], dtype=float),
             "sample_scores": np.array([[0.10, 0.20], [0.30, 0.40]], dtype=float),
             "marker_loadings": np.array([[0.9, 0.1], [0.2, 0.8]], dtype=float),
@@ -302,10 +303,63 @@ class TestCli:
 
         sv_lines = sv_path.read_text().strip().splitlines()
         assert sv_lines == [
-            "PC\tsingular_value",
-            "PC1\t3",
-            "PC2\t1.5",
+            "PC\tsingular_value\tused_for_correction",
+            "PC1\t3\tyes",
+            "PC2\t1.5\tyes",
         ]
+
+    def test_correct_writes_svd_outputs_pilot_gt_k(self, tmp_path, monkeypatch):
+        """When n_components_computed > k, all pilot PCs are written and
+        only the first k are marked used_for_correction=yes."""
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+        out = tmp_path / "out.bcf"
+
+        lrr = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=float)
+        samples = ["S1", "S2"]
+        variants = [
+            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 200, "id": ".", "ref": "G", "alts": ("T",)},
+        ]
+        # k=1 selected but 3 were computed
+        info = {
+            "k": 1,
+            "n_components_computed": 3,
+            "singular_values": np.array([5.0, 2.0, 0.5], dtype=float),
+            "sample_scores": np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]], dtype=float),
+            "marker_loadings": np.array([[0.9, 0.1, 0.05], [0.2, 0.8, 0.02]], dtype=float),
+            "marker_mask": np.array([True, True], dtype=bool),
+            "hq_sample_mask": np.array([True, True], dtype=bool),
+            "n_hq_samples": 2,
+            "n_markers_used": 2,
+            "backend": "rsvd",
+        }
+
+        monkeypatch.setattr("array_lrr_gwas.io_vcf.read_lrr", lambda _p: (lrr, samples, variants))
+        monkeypatch.setattr("array_lrr_gwas.io_vcf.write_corrected", lambda *_a, **_k: None)
+        monkeypatch.setattr("array_lrr_gwas.correction.correct_lrr", lambda *_a, **_k: (lrr, info))
+
+        rc = main([
+            "correct",
+            str(fake_bcf),
+            "-o", str(out),
+            "--no-complexity-filter",
+        ])
+        assert rc == 0
+
+        sv_path = tmp_path / "out.bcf.svd.singular_values.tsv"
+        sv_lines = sv_path.read_text().strip().splitlines()
+        assert sv_lines == [
+            "PC\tsingular_value\tused_for_correction",
+            "PC1\t5\tyes",
+            "PC2\t2\tno",
+            "PC3\t0.5\tno",
+        ]
+
+        pcs_path = tmp_path / "out.bcf.svd.sample_pcs.tsv"
+        pcs_lines = pcs_path.read_text().strip().splitlines()
+        # Header should contain all 3 PCs
+        assert pcs_lines[0] == "SAMPLE\tPC1\tPC2\tPC3"
 
     def test_correct_writes_loadings_when_requested(self, tmp_path, monkeypatch):
         fake_bcf = tmp_path / "in.bcf"
@@ -321,6 +375,7 @@ class TestCli:
         ]
         info = {
             "k": 2,
+            "n_components_computed": 2,
             "singular_values": np.array([3.0, 1.5], dtype=float),
             "sample_scores": np.array([[0.10, 0.20], [0.30, 0.40]], dtype=float),
             "marker_loadings": np.array([[0.9, 0.1]], dtype=float),

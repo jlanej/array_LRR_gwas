@@ -105,10 +105,11 @@ def _build_header_description(info: dict) -> str:
     parts = [
         "LRR batch-effect correction applied by array_lrr_gwas.",
         f"Components removed (k): {info['k']}.",
+        f"Components computed: {info.get('n_components_computed', info['k'])}.",
         f"Decomposition backend: {info['backend']}.",
         f"HQ samples used: {info['n_hq_samples']}.",
         f"Markers used: {info['n_markers_used']}.",
-        f"Singular values: {np.array2string(info['singular_values'], precision=4, separator=',')}.",
+        f"Singular values (all computed): {np.array2string(info['singular_values'], precision=4, separator=',')}.",
         f"Date: {datetime.datetime.now(datetime.timezone.utc).isoformat()}.",
     ]
     return " ".join(parts)

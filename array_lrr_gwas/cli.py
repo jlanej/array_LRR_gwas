@@ -47,23 +47,25 @@ def _write_svd_text_outputs(
 ) -> dict[str, Path]:
     """Write SVD metadata text outputs for the ``correct`` command."""
     k = int(info["k"])
+    n_computed = int(info.get("n_components_computed", k))
     singular_values = np.asarray(info["singular_values"], dtype=float)
     sample_scores = np.asarray(info["sample_scores"], dtype=float)
     pc_scores = singular_values[:, np.newaxis] * sample_scores
 
     pcs_path = Path(f"{prefix}.sample_pcs.tsv")
     with pcs_path.open("w", encoding="utf-8") as fh:
-        header = ["SAMPLE"] + [f"PC{i + 1}" for i in range(k)]
+        header = ["SAMPLE"] + [f"PC{i + 1}" for i in range(n_computed)]
         fh.write("\t".join(header) + "\n")
         for sample_idx, sample_id in enumerate(samples):
-            pcs = [_fmt_float(pc_scores[pc_idx, sample_idx]) for pc_idx in range(k)]
+            pcs = [_fmt_float(pc_scores[pc_idx, sample_idx]) for pc_idx in range(n_computed)]
             fh.write("\t".join([sample_id] + pcs) + "\n")
 
     sv_path = Path(f"{prefix}.singular_values.tsv")
     with sv_path.open("w", encoding="utf-8") as fh:
-        fh.write("PC\tsingular_value\n")
+        fh.write("PC\tsingular_value\tused_for_correction\n")
         for pc_idx, sval in enumerate(singular_values, start=1):
-            fh.write(f"PC{pc_idx}\t{_fmt_float(sval)}\n")
+            used = "yes" if pc_idx <= k else "no"
+            fh.write(f"PC{pc_idx}\t{_fmt_float(sval)}\t{used}\n")
 
     out_paths: dict[str, Path] = {
         "sample_pcs": pcs_path,
@@ -76,11 +78,11 @@ def _write_svd_text_outputs(
         kept_idx = np.flatnonzero(marker_mask)
         loadings_path = Path(f"{prefix}.loadings.tsv")
         with loadings_path.open("w", encoding="utf-8") as fh:
-            header = ["chrom", "pos", "variant_id"] + [f"PC{i + 1}" for i in range(k)]
+            header = ["chrom", "pos", "variant_id"] + [f"PC{i + 1}" for i in range(n_computed)]
             fh.write("\t".join(header) + "\n")
             for row_idx, var_idx in enumerate(kept_idx):
                 var = variants[var_idx]
-                pcs = [_fmt_float(marker_loadings[row_idx, pc_idx]) for pc_idx in range(k)]
+                pcs = [_fmt_float(marker_loadings[row_idx, pc_idx]) for pc_idx in range(n_computed)]
                 row = [str(var["chrom"]), str(var["pos"]), _variant_id(var)] + pcs
                 fh.write("\t".join(row) + "\n")
         out_paths["loadings"] = loadings_path
