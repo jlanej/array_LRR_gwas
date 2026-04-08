@@ -28,8 +28,8 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY array_lrr_gwas/ array_lrr_gwas/
 
-# Install the package with report dependencies
-RUN pip install --no-cache-dir ".[report]"
+# Install the package
+RUN pip install --no-cache-dir .
 
 # Verify the installation
 RUN python -c "import array_lrr_gwas; print('array_lrr_gwas imported successfully')"
