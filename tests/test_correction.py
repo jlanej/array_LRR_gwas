@@ -77,6 +77,45 @@ class TestCorrectLrr:
         )
         assert info["k"] >= 1
         assert corrected.shape == synthetic_lrr.shape
+        # n_components_computed must be >= k (pilot covers at least k)
+        assert info["n_components_computed"] >= info["k"]
+        # singular_values and sample_scores reflect all computed components
+        assert len(info["singular_values"]) == info["n_components_computed"]
+        assert info["sample_scores"].shape[0] == info["n_components_computed"]
+        assert info["marker_loadings"].shape[1] == info["n_components_computed"]
+
+    def test_auto_k_all_components_in_output(self, synthetic_lrr):
+        """When n_components > k, all computed PCs are stored in info."""
+        corrected, info = correct_lrr(
+            synthetic_lrr,
+            k=None,
+            n_components=3,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+        assert info["n_components_computed"] == 3
+        assert len(info["singular_values"]) == 3
+        assert info["sample_scores"].shape[0] == 3
+        assert info["marker_loadings"].shape[1] == 3
+        # But only k were used for correction
+        assert info["k"] <= 3
+
+    def test_explicit_k_components_computed_equals_k(self, synthetic_lrr):
+        """When k is explicit, n_components_computed == k."""
+        _, info = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+        assert info["n_components_computed"] == 2
+        assert len(info["singular_values"]) == 2
+        assert info["sample_scores"].shape[0] == 2
+        assert info["marker_loadings"].shape[1] == 2
 
     def test_auto_k_accepts_n_components(self, synthetic_lrr):
         corrected, info = correct_lrr(
