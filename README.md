@@ -807,10 +807,10 @@ The report contains:
 The sample metrics TSV has columns `SAMPLE`, `LRR_SD`, `callrate` and is
 suitable for loading into downstream notebooks or overlay in the report.
 
-**Install optional dependencies for full report support:**
+Interactive report dependencies are now included in the base package install:
 
 ```bash
-pip install array_lrr_gwas[report]    # adds plotly + umap-learn
+pip install array_lrr_gwas
 ```
 
 ### Association TSV (`associate`)
