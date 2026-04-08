@@ -19,6 +19,10 @@ dependencies = [
 
 [project.optional-dependencies]
 fbpca = ["fbpca>=0.1"]
+report = [
+    "plotly>=5.0",
+    "umap-learn>=0.5",
+]
 dev = [
     "pytest>=7",
     "pytest-cov>=4",
