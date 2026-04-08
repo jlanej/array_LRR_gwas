@@ -369,6 +369,7 @@ array-lrr-gwas correct INPUT -o OUTPUT [OPTIONS]
 | `--backend` | str | `rsvd` | SVD backend: `rsvd` (scikit-learn) or `fbpca` |
 | `--svd-output-prefix` | path | `<OUTPUT>.svd` | Prefix for SVD text summaries (`.sample_pcs.tsv`, `.singular_values.tsv`) |
 | `--write-loadings` | flag | `False` | Also write marker loadings to `<prefix>.loadings.tsv` |
+| `--no-interactive-report` | flag | `False` | Skip generation of the interactive HTML diagnostic report (scree plot, 3-D PC scatter, UMAP projection) |
 | `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; markers failing cross-ancestry call rate or HWE are excluded before decomposition |
 | `--config` | path | `None` | YAML QC config file (see [QC Configuration](#qc-configuration)) |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
@@ -786,6 +787,31 @@ Optional (`--write-loadings`):
    - Header: `chrom`, `pos`, `variant_id`, `PC1`, `PC2`, ..., `PCk`
    - One row per marker retained for decomposition (`marker_mask=True`)
    - Values: marker loadings (`U`) used during residualisation
+
+### Interactive Diagnostic Report (`correct`)
+
+By default, `correct` generates a self-contained interactive HTML report at
+`<OUTPUT>.diagnostic_report.html` and a sample metrics TSV at
+`<prefix>.sample_metrics.tsv`.  Disable with `--no-interactive-report`.
+
+The report contains:
+
+- **Scree plot** — eigenvalues with the Marchenko–Pastur (MP) cutoff line
+  clearly separating significant PCs from noise.
+- **3-D PC scatter** — interactive scatter plot of samples on PCs 1–3
+  (all PCs up to and including the MP cutoff are selectable).  Supports
+  colour overlays by LRR_SD, call rate, and HQ/LQ status.
+- **UMAP projection** — 2-D UMAP computed from `max(3, k_MP)` PCs, with
+  the same colour overlay options.
+
+The sample metrics TSV has columns `SAMPLE`, `LRR_SD`, `callrate` and is
+suitable for loading into downstream notebooks or overlay in the report.
+
+**Install optional dependencies for full report support:**
+
+```bash
+pip install array_lrr_gwas[report]    # adds plotly + umap-learn
+```
 
 ### Association TSV (`associate`)
 
