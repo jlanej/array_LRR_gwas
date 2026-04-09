@@ -51,7 +51,7 @@ def _parse_sample_sheet_columns(
     path: str | Path,
     samples: list[str],
     *,
-    sample_id_col: str = "Sample_ID",
+    sample_id_col: str = "sample_id",
 ) -> dict[str, Any]:
     """Read all columns from a compiled sample sheet, aligned to *samples*.
 
@@ -497,6 +497,8 @@ def _build_html(
         return idx >= 0 && DATA.sheet.numeric[idx];
     }
     // Map categorical string values to discrete colours.
+    // Palette cycles for columns with more than 10 unique values.
+    // Missing values (null or empty string) are shown in grey (#cccccc).
     function _catColors(vals) {
         const palette = [
             "#0f3460","#e94560","#f5a623","#7ed321","#9b59b6",
