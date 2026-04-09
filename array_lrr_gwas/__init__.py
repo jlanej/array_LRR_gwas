@@ -2,7 +2,7 @@
 
 from array_lrr_gwas.subsetting import subset_markers, subsample_markers_uniform
 from array_lrr_gwas.decomposition import rsvd, decompose, estimate_rsvd_marker_budget
-from array_lrr_gwas.correction import correct_lrr
+from array_lrr_gwas.correction import correct_lrr, qr_precompute, residualize_qr
 from array_lrr_gwas.select_k import select_k_mp, select_k_elbow
 from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
 from array_lrr_gwas.association import run_association, AssociationResult
@@ -20,6 +20,8 @@ __all__ = [
     "decompose",
     "estimate_rsvd_marker_budget",
     "correct_lrr",
+    "qr_precompute",
+    "residualize_qr",
     "select_k_mp",
     "select_k_elbow",
     "detect_build",

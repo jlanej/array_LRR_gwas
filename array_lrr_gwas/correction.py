@@ -7,8 +7,9 @@ The workflow is:
 3. Decompose the (markers × HQ-samples) sub-matrix to obtain batch PCs.
 4. **Extrapolate** PCs to remaining (LQ) samples by projecting them onto the
    loadings estimated from HQ data.
-5. Regress the batch PCs out of the full LRR matrix to produce corrected
-   values.
+5. Precompute the QR decomposition of the global PC design matrix.
+6. Regress the batch PCs out of **all** markers via streaming, chunked QR
+   regression with robust per-marker missing-data handling.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Callable
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.linalg import qr as _scipy_qr
 
 from array_lrr_gwas.decomposition import decompose, DecompCallable
 from array_lrr_gwas.select_k import select_k_mp
@@ -115,6 +117,168 @@ def residualize(
     return corrected
 
 
+# ---------------------------------------------------------------------------
+# QR-based streaming PC regression
+# ---------------------------------------------------------------------------
+
+def qr_precompute(
+    Vt_k: NDArray[np.floating],
+) -> tuple[NDArray[np.floating], NDArray[np.floating], NDArray[np.floating]]:
+    """Precompute the QR decomposition of the PC-score design matrix.
+
+    The design matrix is ``X = Vt_k.T`` with shape *(n_samples, k)*.
+    A thin (economy) QR factorisation ``X = Q R`` is computed once and
+    reused for every marker during streaming correction.
+
+    Parameters
+    ----------
+    Vt_k : ndarray, shape (k, n_samples)
+        PC scores for all samples (the first *k* right singular vectors
+        from the RSVD decomposition).
+
+    Returns
+    -------
+    Q : ndarray, shape (n_samples, k)
+        Orthonormal basis for the column space of *X*.
+    R : ndarray, shape (k, k)
+        Upper-triangular factor.
+    X : ndarray, shape (n_samples, k)
+        The design matrix ``Vt_k.T`` (kept for the per-marker fallback
+        path when missing data requires re-solving).
+    """
+    X = np.ascontiguousarray(Vt_k.T, dtype=np.float64)
+    Q, R = _scipy_qr(X, mode="economic")
+    return Q, R, X
+
+
+def _correct_chunk_qr(
+    chunk: NDArray[np.floating],
+    Q: NDArray[np.floating],
+    X: NDArray[np.floating],
+    min_valid_frac: float = 0.5,
+) -> NDArray[np.floating]:
+    """Correct a chunk of markers using precomputed QR regression.
+
+    For markers with **no** missing data the fast path is used::
+
+        corrected = y − Q (Qᵀ y)
+
+    For markers that contain ``NaN`` values, the regression is re-solved
+    on the valid (finite) subset of samples via :func:`numpy.linalg.lstsq`.
+    Missing positions are left as ``NaN`` in the output.
+
+    If fewer than ``max(k + 1, min_valid_frac × n_samples)`` finite
+    values are available, the marker is returned **uncorrected**.
+
+    Parameters
+    ----------
+    chunk : ndarray, shape (n_chunk, n_samples)
+        LRR values for the current marker chunk.
+    Q : ndarray, shape (n_samples, k)
+        Orthonormal Q factor from :func:`qr_precompute`.
+    X : ndarray, shape (n_samples, k)
+        Full design matrix from :func:`qr_precompute` (used only for the
+        per-marker NaN fallback).
+    min_valid_frac : float
+        Minimum fraction of finite samples required for correction.
+
+    Returns
+    -------
+    corrected : ndarray, shape (n_chunk, n_samples)
+    n_skipped : int
+        Number of markers that were left uncorrected due to insufficient
+        valid data.
+    """
+    n_chunk, n_samples = chunk.shape
+    k = Q.shape[1]
+    corrected = chunk.copy()
+    n_skipped = 0
+
+    # Identify markers with / without non-finite values (NaN or inf)
+    has_nonfinite = ~np.all(np.isfinite(chunk), axis=1)
+
+    # --- fast path (all finite) – vectorised over the clean rows --------
+    no_nan_idx = np.flatnonzero(~has_nonfinite)
+    if len(no_nan_idx) > 0:
+        Y = chunk[no_nan_idx]           # (n_clean, n_samples)
+        coeffs = Y @ Q                  # (n_clean, k)
+        proj = coeffs @ Q.T             # (n_clean, n_samples)
+        corrected[no_nan_idx] = Y - proj
+
+    # --- slow path (per-marker with non-finite values) ------------------
+    min_valid = max(k + 1, int(np.ceil(min_valid_frac * n_samples)))
+    for idx in np.flatnonzero(has_nonfinite):
+        y = chunk[idx]
+        valid = np.isfinite(y)
+        n_valid = int(valid.sum())
+
+        if n_valid < min_valid:
+            # Not enough data – leave uncorrected
+            n_skipped += 1
+            continue
+
+        X_v = X[valid]
+        y_v = y[valid]
+        beta, _, _, _ = np.linalg.lstsq(X_v, y_v, rcond=None)
+        corrected[idx, valid] = y_v - X_v @ beta
+
+    return corrected, n_skipped
+
+
+def residualize_qr(
+    lrr: NDArray[np.floating],
+    Vt_k: NDArray[np.floating],
+    *,
+    chunk_size: int = 5000,
+    min_valid_frac: float = 0.5,
+) -> NDArray[np.floating]:
+    """Streaming QR-based PC regression for **all** markers.
+
+    The PC-score design matrix ``X = Vt_k.T`` is factorised once via
+    :func:`qr_precompute`.  Markers are then processed in chunks of
+    *chunk_size* rows so that at most two chunks are resident in memory
+    at any time.
+
+    Parameters
+    ----------
+    lrr : ndarray, shape (n_markers, n_samples)
+        Original LRR matrix (may contain ``NaN``).
+    Vt_k : ndarray, shape (k, n_samples)
+        PC scores for all samples (first *k* components).
+    chunk_size : int
+        Number of marker rows processed per iteration.
+    min_valid_frac : float
+        Minimum fraction of finite samples required per marker; markers
+        below this threshold are returned uncorrected.
+
+    Returns
+    -------
+    corrected : ndarray, shape (n_markers, n_samples)
+    """
+    Q, R, X = qr_precompute(Vt_k)
+    n_markers = lrr.shape[0]
+    corrected = np.empty_like(lrr)
+
+    n_skipped = 0
+    for start in range(0, n_markers, chunk_size):
+        end = min(start + chunk_size, n_markers)
+        chunk = lrr[start:end]
+        corrected_chunk, chunk_skipped = _correct_chunk_qr(
+            chunk, Q, X, min_valid_frac=min_valid_frac,
+        )
+        corrected[start:end] = corrected_chunk
+        n_skipped += chunk_skipped
+
+    if n_skipped > 0:
+        logger.info(
+            "QR regression: %d / %d markers skipped (insufficient valid data)",
+            n_skipped,
+            n_markers,
+        )
+
+    return corrected
+
+
 def correct_lrr(
     lrr: NDArray[np.floating],
     positions: NDArray[np.intp] | None = None,
@@ -134,6 +298,8 @@ def correct_lrr(
     variant_ids: list[str] | None = None,
     sample_ids: list[str] | None = None,
     max_ram_gb: float | None = None,
+    chunk_size: int = 5000,
+    min_valid_frac: float = 0.5,
 ) -> tuple[NDArray[np.floating], dict]:
     """End-to-end batch-effect correction for an LRR matrix.
 
@@ -182,6 +348,14 @@ def correct_lrr(
         are deterministically subsampled to fit using genome-uniform
         sampling.  ``None`` disables the budget (no subsampling).
         ``0`` also disables subsampling.
+    chunk_size : int
+        Number of marker rows processed per streaming QR-regression
+        iteration.  Controls peak memory: at most two chunks are resident
+        simultaneously.
+    min_valid_frac : float
+        Minimum fraction of finite (non-``NaN``) samples required per
+        marker for QR regression.  Markers below this threshold (or with
+        fewer than ``k + 1`` valid values) are left uncorrected.
 
     Returns
     -------
@@ -379,12 +553,16 @@ def correct_lrr(
     else:
         Vt_full_all = Vt_hq_all
 
-    # 5. Expand U back to full marker dimension (only k components for residualization)
-    U_full = np.zeros((lrr.shape[0], k), dtype=np.float64)
-    U_full[marker_mask, :] = U
-
-    # 6. Residualize using only the k selected components
-    corrected = residualize(lrr, U_full, s, Vt_full_all[:k, :])
+    # 5-6. Regress PCs out of ALL markers via streaming QR decomposition.
+    # Unlike the old SVD-based residualize() which only corrected the
+    # marker subset used for decomposition, QR regression corrects every
+    # marker by regressing its LRR values against the global PC scores.
+    corrected = residualize_qr(
+        lrr,
+        Vt_full_all[:k, :],
+        chunk_size=chunk_size,
+        min_valid_frac=min_valid_frac,
+    )
 
     info = {
         "k": k,
