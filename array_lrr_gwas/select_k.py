@@ -44,9 +44,13 @@ def select_k_mp(
 ) -> int:
     """Select *k* using the Marchenko–Pastur threshold.
 
-    The noise variance is estimated as the median squared singular value
-    divided by the Marchenko–Pastur median (a robust choice when signal
-    components are relatively few).
+    The noise variance σ² is estimated from the median squared singular
+    value.  The data matrix X has shape (n_markers × n_samples), so the
+    sample covariance X^T X / n_markers has eigenvalues s² / n_markers.
+    Under pure noise each such eigenvalue has expectation σ², hence
+    σ² ≈ median(s²) / n_markers.  Dividing by n_samples instead would
+    over-estimate σ² by the factor n_markers / n_samples and make the
+    threshold too high, causing genuine signal components to be missed.
 
     Parameters
     ----------
@@ -63,9 +67,9 @@ def select_k_mp(
     """
     s2 = singular_values ** 2
 
-    # Robust noise estimate: use the median squared singular value,
-    # normalised to an eigenvalue of the covariance matrix.
-    noise_eigenvalue = float(np.median(s2)) / n_samples
+    # Robust noise estimate: median eigenvalue of the n_samples × n_samples
+    # sample covariance X^T X / n_markers approximates σ² under pure noise.
+    noise_eigenvalue = float(np.median(s2)) / n_markers
     upper = _mp_upper_edge(n_markers, n_samples, noise_eigenvalue)
 
     # Eigenvalues of the covariance matrix = s^2 / n_samples
