@@ -346,6 +346,186 @@ class TestGenerateReport:
 
 
 # ---------------------------------------------------------------------------
+# Sample-sheet column parsing
+# ---------------------------------------------------------------------------
+
+DATA_DIR = Path(__file__).parent / "data"
+
+
+class TestParseSampleSheetColumns:
+    def test_basic_columns(self):
+        from array_lrr_gwas.interactive_report import _parse_sample_sheet_columns
+
+        sheet_path = DATA_DIR / "compiled_sample_sheet.tsv"
+        # Use first 5 samples from the sheet
+        import csv
+        with sheet_path.open(newline="") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        sid_col = next(
+            (f for f in fieldnames if f.lower() == "sample_id"), fieldnames[0]
+        )
+        sample_ids = [r[sid_col] for r in rows[:5]]
+
+        result = _parse_sample_sheet_columns(sheet_path, sample_ids)
+
+        assert "columns" in result
+        assert "numeric" in result
+        assert "data" in result
+        assert len(result["columns"]) == len(result["numeric"])
+        # sample ID column must NOT appear in columns list
+        assert sid_col not in result["columns"]
+        # All data lists must have length == number of samples
+        for col, vals in result["data"].items():
+            assert len(vals) == len(sample_ids), f"Column {col!r} has wrong length"
+
+    def test_numeric_flag_for_call_rate(self):
+        from array_lrr_gwas.interactive_report import _parse_sample_sheet_columns
+
+        sheet_path = DATA_DIR / "compiled_sample_sheet.tsv"
+        import csv
+        with sheet_path.open(newline="") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+        sample_ids = [r["sample_id"] for r in rows[:10]]
+
+        result = _parse_sample_sheet_columns(sheet_path, sample_ids)
+
+        col_idx = result["columns"].index("call_rate")
+        assert result["numeric"][col_idx] is True
+        # All call_rate values should be float
+        for val in result["data"]["call_rate"]:
+            assert val is None or isinstance(val, float)
+
+    def test_sex_status_is_categorical(self):
+        from array_lrr_gwas.interactive_report import _parse_sample_sheet_columns
+
+        sheet_path = DATA_DIR / "compiled_sample_sheet.tsv"
+        import csv
+        with sheet_path.open(newline="") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+        sample_ids = [r["sample_id"] for r in rows[:20]]
+
+        result = _parse_sample_sheet_columns(sheet_path, sample_ids)
+
+        col_idx = result["columns"].index("sex_status")
+        assert result["numeric"][col_idx] is False
+        # Values should be strings (e.g. "CONCORDANT", "AMBIGUOUS", "DISCORDANT")
+        for val in result["data"]["sex_status"]:
+            assert isinstance(val, str)
+
+    def test_missing_sample_filled_empty(self):
+        from array_lrr_gwas.interactive_report import _parse_sample_sheet_columns
+
+        sheet_path = DATA_DIR / "compiled_sample_sheet.tsv"
+        # Include a fake sample ID that doesn't exist in the sheet
+        sample_ids = ["FAKE_SAMPLE_XYZ"]
+        result = _parse_sample_sheet_columns(sheet_path, sample_ids)
+
+        # All values for the missing sample should be None (numeric) or "" (categorical)
+        for col, is_num in zip(result["columns"], result["numeric"]):
+            val = result["data"][col][0]
+            if is_num:
+                assert val is None, f"Expected None for missing numeric {col!r}"
+            else:
+                assert val == "", f"Expected '' for missing categorical {col!r}"
+
+    def test_empty_sheet_returns_empty(self, tmp_path):
+        from array_lrr_gwas.interactive_report import _parse_sample_sheet_columns
+
+        empty = tmp_path / "empty.tsv"
+        empty.write_text("")
+        result = _parse_sample_sheet_columns(empty, ["S1"])
+        assert result == {"columns": [], "numeric": [], "data": {}}
+
+
+class TestGenerateReportWithSampleSheet:
+    def _make_info(self, n_samples: int = 10, k: int = 3) -> dict:
+        rng = np.random.default_rng(42)
+        return {
+            "k": k,
+            "singular_values": np.array([8.0, 4.0, 1.5]),
+            "sample_scores": rng.standard_normal((k, n_samples)),
+            "hq_sample_mask": np.ones(n_samples, dtype=bool),
+            "n_hq_samples": n_samples,
+            "n_markers_used": 200,
+        }
+
+    def test_report_embeds_sheet_data(self, tmp_path):
+        """generate_report embeds sample sheet columns in the HTML."""
+        from array_lrr_gwas.interactive_report import generate_report
+
+        sheet_path = DATA_DIR / "compiled_sample_sheet.tsv"
+        import csv
+        with sheet_path.open(newline="") as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+        sample_ids = [r["sample_id"] for r in rows[:10]]
+
+        rng = np.random.default_rng(7)
+        lrr = rng.standard_normal((100, 10)) * 0.2
+        info = self._make_info(n_samples=10)
+
+        out = generate_report(
+            info=info,
+            samples=sample_ids,
+            lrr=lrr,
+            output_path=tmp_path / "report_sheet.html",
+            sample_sheet_path=sheet_path,
+            skip_umap=True,
+        )
+        assert out.exists()
+        html = out.read_text()
+        # Sheet data should be embedded in JSON
+        assert '"sheet"' in html
+        assert '"call_rate"' in html
+        assert '"sex_status"' in html
+        # JS should add sheet-prefixed colour options
+        assert "sheet:" in html
+
+    def test_report_without_sheet_has_null_sheet(self, tmp_path):
+        """Without sample_sheet_path, the sheet key is null."""
+        from array_lrr_gwas.interactive_report import generate_report
+
+        rng = np.random.default_rng(7)
+        lrr = rng.standard_normal((100, 5)) * 0.2
+        info = self._make_info(n_samples=5)
+
+        out = generate_report(
+            info=info,
+            samples=[f"S{i}" for i in range(5)],
+            lrr=lrr,
+            output_path=tmp_path / "report_no_sheet.html",
+            skip_umap=True,
+        )
+        html = out.read_text()
+        assert '"sheet": null' in html
+
+    def test_invalid_sheet_path_warns_not_crashes(self, tmp_path):
+        """A missing sample sheet path produces a warning but no exception."""
+        from array_lrr_gwas.interactive_report import generate_report
+
+        rng = np.random.default_rng(7)
+        lrr = rng.standard_normal((100, 5)) * 0.2
+        info = self._make_info(n_samples=5)
+
+        # Should succeed even with a non-existent path (warning logged instead)
+        out = generate_report(
+            info=info,
+            samples=[f"S{i}" for i in range(5)],
+            lrr=lrr,
+            output_path=tmp_path / "report_bad_sheet.html",
+            sample_sheet_path=tmp_path / "nonexistent.tsv",
+            skip_umap=True,
+        )
+        assert out.exists()
+        html = out.read_text()
+        assert '"sheet": null' in html
+
+
+# ---------------------------------------------------------------------------
 # JSON serialisation edge cases
 # ---------------------------------------------------------------------------
 
