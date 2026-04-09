@@ -66,7 +66,7 @@ def compute_sample_metrics(
     # np.nanstd returns nan when all values are NaN; replace those with None
     # so they serialise as JSON null rather than raising ValueError.
     raw_sd = np.nanstd(lrr, axis=0)
-    lrr_sd: list = [
+    lrr_sd: list[float | None] = [
         None if np.isnan(v) else float(v) for v in raw_sd
     ]
     callrate = (n_valid / n_markers).tolist()

@@ -344,7 +344,12 @@ class TestNanLrrSdRegression:
         # Metrics TSV must contain 'nan' for the affected samples
         tsv_lines = (tmp_path / "metrics_nan.tsv").read_text().splitlines()
         assert tsv_lines[0].startswith("SAMPLE\tLRR_SD\tcallrate\tn_markers_used")
-        nan_samples = {line.split("\t")[0] for line in tsv_lines[1:] if line.split("\t")[1] == "nan"}
+        nan_samples = {
+            parts[0]
+            for line in tsv_lines[1:]
+            for parts in [line.split("\t")]
+            if parts[1] == "nan"
+        }
         assert nan_samples == {"S1", "S3", "S7", "S9", "S13"}
 
     def test_debug_sample_report_data(self, tmp_path):
