@@ -440,6 +440,48 @@ class TestParseSampleSheetColumns:
         result = _parse_sample_sheet_columns(empty, ["S1"])
         assert result == {"columns": [], "numeric": [], "data": {}}
 
+    def test_illumina_sample_sheet_csv_no_error(self):
+        """Parsing the real Illumina SampleSheet.csv must not raise AttributeError.
+
+        Rows in that file have fewer fields than headers (trailing commas are
+        absent for the last column), so csv.DictReader fills missing values
+        with None.  _parse_sample_sheet_columns must handle this gracefully.
+        """
+        from array_lrr_gwas.interactive_report import _parse_sample_sheet_columns
+
+        sheet = DATA_DIR / "sampleSheet" / "SampleSheet.csv"
+        if not sheet.exists():
+            pytest.skip("SampleSheet.csv not present in test data")
+
+        # Extract a handful of real sample IDs from the sheet
+        import csv
+        with sheet.open(newline="", encoding="utf-8") as fh:
+            lines = fh.readlines()
+        data_start = next(
+            (i + 1 for i, ln in enumerate(lines) if ln.strip().lower() == "[data]"),
+            None,
+        )
+        assert data_start is not None, "No [Data] section found in SampleSheet.csv"
+        import io
+        reader = csv.DictReader(io.StringIO("".join(lines[data_start:])))
+        sample_ids = [row["Sample_ID"] for row in reader if row.get("Sample_ID")]
+
+        # Must not raise
+        result = _parse_sample_sheet_columns(sheet, sample_ids[:20])
+
+        assert "columns" in result
+        assert "numeric" in result
+        assert "data" in result
+        # CallRate column must be present and recognised as numeric
+        assert "CallRate" in result["columns"]
+        cr_idx = result["columns"].index("CallRate")
+        assert result["numeric"][cr_idx] is True, "CallRate should be numeric"
+        # All data lists must have correct length
+        for col, vals in result["data"].items():
+            assert len(vals) == min(len(sample_ids), 20), (
+                f"Column {col!r} has wrong length"
+            )
+
 
 class TestGenerateReportWithSampleSheet:
     def _make_info(self, n_samples: int = 10, k: int = 3) -> dict:

@@ -265,7 +265,7 @@ def read_all_raw_rows(
     for row in reader:
         sid = row.get(sid_col, "").strip()
         if sid:
-            raw[sid] = {c: row.get(c, "") for c in other_columns}
+            raw[sid] = {c: (row.get(c) or "") for c in other_columns}
 
     return other_columns, raw
 
