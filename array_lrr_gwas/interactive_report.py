@@ -57,15 +57,24 @@ def compute_sample_metrics(
 
     Returns
     -------
-    dict with keys ``SAMPLE``, ``LRR_SD``, ``callrate``.
+    dict with keys ``SAMPLE``, ``LRR_SD``, ``callrate``,
+    and ``n_markers_used`` (non-NaN marker count per sample).
+    LRR_SD entries are ``None`` for samples with no valid (non-NaN) markers.
     """
     n_markers = lrr.shape[0]
-    lrr_sd = np.nanstd(lrr, axis=0).tolist()
-    callrate = (np.sum(~np.isnan(lrr), axis=0) / n_markers).tolist()
+    n_valid = np.sum(~np.isnan(lrr), axis=0)  # non-NaN count per sample
+    # np.nanstd returns nan when all values are NaN; replace those with None
+    # so they serialise as JSON null rather than raising ValueError.
+    raw_sd = np.nanstd(lrr, axis=0)
+    lrr_sd: list = [
+        None if np.isnan(v) else float(v) for v in raw_sd
+    ]
+    callrate = (n_valid / n_markers).tolist()
     return {
         "SAMPLE": list(samples),
         "LRR_SD": lrr_sd,
         "callrate": callrate,
+        "n_markers_used": n_valid.tolist(),
     }
 
 
@@ -85,11 +94,20 @@ def write_sample_metrics_tsv(
     Path to the written file.
     """
     path = Path(path)
+    n_markers_used = metrics.get("n_markers_used")
+    has_n_markers = n_markers_used is not None
+    header = "SAMPLE\tLRR_SD\tcallrate"
+    if has_n_markers:
+        header += "\tn_markers_used"
     with path.open("w", encoding="utf-8") as fh:
-        fh.write("SAMPLE\tLRR_SD\tcallrate\n")
+        fh.write(header + "\n")
         for i, sample in enumerate(metrics["SAMPLE"]):
-            fh.write(f"{sample}\t{metrics['LRR_SD'][i]:.6g}\t"
-                     f"{metrics['callrate'][i]:.6g}\n")
+            lrr_sd_val = metrics["LRR_SD"][i]
+            lrr_sd_str = "nan" if lrr_sd_val is None else f"{lrr_sd_val:.6g}"
+            line = f"{sample}\t{lrr_sd_str}\t{metrics['callrate'][i]:.6g}"
+            if has_n_markers:
+                line += f"\t{n_markers_used[i]}"
+            fh.write(line + "\n")
     return path
 
 
@@ -347,7 +365,9 @@ def _build_html(
     function buildHoverText() {
         return DATA.scatter.samples.map((s, i) => {
             const hq = DATA.scatter.hq[i] ? "HQ" : "LQ";
-            return s + "<br>LRR_SD=" + DATA.scatter.LRR_SD[i].toFixed(4) +
+            const lrrSd = DATA.scatter.LRR_SD[i];
+            const lrrSdStr = lrrSd === null ? "N/A" : lrrSd.toFixed(4);
+            return s + "<br>LRR_SD=" + lrrSdStr +
                    "<br>callrate=" + DATA.scatter.callrate[i].toFixed(4) +
                    "<br>" + hq;
         });
