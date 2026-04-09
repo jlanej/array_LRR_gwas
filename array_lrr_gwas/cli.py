@@ -758,6 +758,10 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+    # Suppress verbose debug output from third-party libraries (e.g. numba SSA
+    # pass messages, umap) that flood the log when --verbose is active.
+    for _noisy_lib in ("numba", "umap"):
+        logging.getLogger(_noisy_lib).setLevel(logging.WARNING)
 
     if args.command == "correct":
         return _run_correct(args)
