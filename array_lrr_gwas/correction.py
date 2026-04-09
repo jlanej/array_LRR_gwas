@@ -274,9 +274,9 @@ def correct_lrr(
         from array_lrr_gwas.subsetting import subsample_markers_uniform
 
         max_ram_bytes = int(max_ram_gb * 1024**3)
-        _pilot_k_for_budget = max(1, int(np.ceil(0.05 * n_hq))) if k is None else k
+        k_for_budget = max(1, int(np.ceil(0.05 * n_hq))) if k is None else k
         budget = estimate_rsvd_marker_budget(
-            n_hq, _pilot_k_for_budget, max_ram_bytes=max_ram_bytes
+            n_hq, k_for_budget, max_ram_bytes=max_ram_bytes
         )
         n_candidates = int(marker_mask.sum())
         if n_candidates > budget:

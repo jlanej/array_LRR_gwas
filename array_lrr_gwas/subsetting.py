@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections import defaultdict
 from typing import Sequence
 
 import numpy as np
@@ -377,7 +378,6 @@ def subsample_markers_uniform(
                 bin_keys.append((chrom_to_idx[chrom], int(b)))
 
     # Group candidates by bin
-    from collections import defaultdict
     bin_to_candidates: dict[tuple[int, int], list[int]] = defaultdict(list)
     # Iterate in a consistent order: sort candidates by chrom, then position
     # We need to map bin_keys back to candidate_indices

@@ -886,9 +886,9 @@ def _run_correct(args: argparse.Namespace) -> int:
         else:
             n_variants_est = lrr.shape[0]
         max_ram_bytes = int(max_ram_gb * 1024**3)
-        _est_k = correct_kwargs.get("k") or max(1, int(np.ceil(0.05 * n_samples_est)))
+        estimated_k = correct_kwargs.get("k") or max(1, int(np.ceil(0.05 * n_samples_est)))
         budget_est = estimate_rsvd_marker_budget(
-            n_samples_est, _est_k, max_ram_bytes=max_ram_bytes
+            n_samples_est, estimated_k, max_ram_bytes=max_ram_bytes
         )
         est_ram_gb = (
             2.5 * n_variants_est * n_samples_est * 8 / 1024**3
