@@ -131,7 +131,9 @@ function colorScale(key) {
 function buildHoverText() {
     return DATA.scatter.samples.map((s, i) => {
         const hq = DATA.scatter.hq[i] ? "HQ" : "LQ";
-        return s + "<br>LRR_SD=" + DATA.scatter.LRR_SD[i].toFixed(4) +
+        const lrrSd = DATA.scatter.LRR_SD[i];
+        const lrrSdStr = lrrSd === null ? "N/A" : lrrSd.toFixed(4);
+        return s + "<br>LRR_SD=" + lrrSdStr +
                "<br>callrate=" + DATA.scatter.callrate[i].toFixed(4) +
                "<br>" + hq;
     });
