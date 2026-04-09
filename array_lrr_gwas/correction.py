@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 
 from array_lrr_gwas.decomposition import decompose, DecompCallable
 from array_lrr_gwas.select_k import select_k_mp
-from array_lrr_gwas.subsetting import subset_markers
+from array_lrr_gwas.subsetting import autosome_mask, subset_markers
 
 logger = logging.getLogger(__name__)
 
@@ -202,9 +202,16 @@ def correct_lrr(
         ``n_hq_samples``, ``n_markers_used``, ``backend``
             Scalar summary statistics.
     """
-    # 1. Classify samples
+    # 1. Classify samples using only autosomal markers for LRR_SD and callrate.
+    # Non-autosomal (sex chromosome, MT) intensity signals encode biological sex
+    # rather than technical noise and must not contribute to sample QC metrics.
+    if chromosomes is not None:
+        auto_m = autosome_mask(chromosomes)
+        lrr_for_qc = lrr[auto_m]
+    else:
+        lrr_for_qc = lrr
     hq_mask = classify_samples(
-        lrr, max_lrr_sd=max_lrr_sd, min_call_rate=min_sample_call_rate
+        lrr_for_qc, max_lrr_sd=max_lrr_sd, min_call_rate=min_sample_call_rate
     )
     n_hq = int(np.sum(hq_mask))
     n_total_samples = lrr.shape[1]

@@ -135,6 +135,39 @@ class TestComputeSampleMetrics:
         # Result must be JSON-serialisable with allow_nan=False
         json.dumps({"LRR_SD": m["LRR_SD"]}, allow_nan=False)
 
+    def test_autosomal_only_chromosomes(self, sample_ids):
+        """Non-autosomal markers must be excluded from LRR_SD and callrate.
+
+        chrY and chrX markers carry sex-linked signals that inflate LRR_SD.
+        When chromosomes are provided only autosomal markers are used.
+        """
+        from array_lrr_gwas.interactive_report import compute_sample_metrics
+
+        rng = np.random.default_rng(55)
+        n_auto = 80
+        n_sex = 20  # 20 non-autosomal markers (chrX / chrY)
+        n_total = n_auto + n_sex
+        lrr = rng.standard_normal((n_total, 15)) * 0.2
+        # Inject inf into a sex-chromosome row → would cause NaN LRR_SD if
+        # not filtered.
+        lrr[n_auto, :] = np.inf  # first chrX row
+
+        chroms = ["chr1"] * n_auto + ["chrX"] * 10 + ["chrY"] * 10
+        chroms_arr = np.array(chroms)
+
+        # Without chromosomes: all rows including the inf → may produce NaN
+        m_all = compute_sample_metrics(lrr, sample_ids)
+        # (isfinite already guards, but callrate denominator includes sex markers)
+        assert m_all["n_markers_used"][0] <= n_total
+
+        # With chromosomes: only 80 autosomal rows used
+        m_auto = compute_sample_metrics(lrr, sample_ids, chromosomes=chroms_arr)
+        assert all(v == n_auto for v in m_auto["n_markers_used"])
+        # callrate denominator is now 80 (autosomal only)
+        assert all(cr == pytest.approx(1.0) for cr in m_auto["callrate"])
+        # All LRR_SD values must be valid floats (no NaN from inf row)
+        assert all(v is not None and np.isfinite(v) for v in m_auto["LRR_SD"])
+
 
 # ---------------------------------------------------------------------------
 # write_sample_metrics_tsv

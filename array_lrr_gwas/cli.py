@@ -885,6 +885,7 @@ def _run_correct(args: argparse.Namespace) -> int:
                 info=info,
                 samples=samples,
                 lrr=lrr,
+                chromosomes=chromosomes,
                 output_path=report_path,
                 metrics_tsv_path=metrics_tsv_path,
             )

@@ -30,12 +30,13 @@ import json
 import logging
 import textwrap
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
 from array_lrr_gwas.select_k import _mp_upper_edge
+from array_lrr_gwas.subsetting import autosome_mask
 
 logger = logging.getLogger(__name__)
 
@@ -47,21 +48,31 @@ logger = logging.getLogger(__name__)
 def compute_sample_metrics(
     lrr: NDArray[np.floating],
     samples: list[str],
+    chromosomes: NDArray | Sequence[str] | None = None,
 ) -> dict[str, list]:
-    """Compute per-sample LRR_SD and callrate.
+    """Compute per-sample LRR_SD and callrate using autosomal markers only.
 
     Parameters
     ----------
     lrr : ndarray, shape (n_markers, n_samples)
     samples : list of str
+    chromosomes : array-like of str, shape (n_markers,), optional
+        Chromosome label for each marker.  When provided, only autosomal
+        markers are used for LRR_SD and callrate.  Non-autosomal markers
+        (X, Y, MT) carry sex-linked intensity signals that inflate or
+        distort per-sample QC metrics.
 
     Returns
     -------
     dict with keys ``SAMPLE``, ``LRR_SD``, ``callrate``,
-    and ``n_markers_used`` (finite, non-NaN marker count per sample).
-    LRR_SD is computed over finite values only (NaN and inf excluded).
-    LRR_SD entries are ``None`` for samples with no finite markers.
+    and ``n_markers_used`` (autosomal finite marker count per sample).
+    LRR_SD is computed over autosomal finite values only (NaN and inf excluded).
+    LRR_SD entries are ``None`` for samples with no finite autosomal markers.
     """
+    # Restrict to autosomal markers when chromosome labels are available.
+    if chromosomes is not None:
+        auto_m = autosome_mask(chromosomes)
+        lrr = lrr[auto_m]
     n_markers = lrr.shape[0]
     # Use np.isfinite to exclude both NaN and inf values.
     # np.nanstd returns NaN when a column contains inf (inf - mean = NaN),
@@ -499,6 +510,7 @@ def generate_report(
     lrr: NDArray[np.floating],
     output_path: str | Path,
     *,
+    chromosomes: NDArray | Sequence[str] | None = None,
     metrics_tsv_path: str | Path | None = None,
     skip_umap: bool = False,
 ) -> Path:
@@ -516,6 +528,9 @@ def generate_report(
         Original (uncorrected) LRR matrix.
     output_path : path-like
         Where to write the HTML file.
+    chromosomes : array-like of str, shape (n_markers,), optional
+        Chromosome label for each marker.  When provided, only autosomal
+        markers are used for LRR_SD and callrate in the sample metrics.
     metrics_tsv_path : path-like or None
         If provided, sample metrics (LRR_SD, callrate) are also saved to this TSV.
     skip_umap : bool
@@ -534,8 +549,8 @@ def generate_report(
     n_hq = int(info["n_hq_samples"])
     n_markers = int(info["n_markers_used"])
 
-    # 1. Compute sample metrics
-    metrics = compute_sample_metrics(lrr, samples)
+    # 1. Compute sample metrics (autosomal markers only when chromosomes provided)
+    metrics = compute_sample_metrics(lrr, samples, chromosomes=chromosomes)
     if metrics_tsv_path is not None:
         write_sample_metrics_tsv(metrics, metrics_tsv_path)
         logger.info("Wrote sample metrics: %s", metrics_tsv_path)
