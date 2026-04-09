@@ -296,3 +296,150 @@ def subset_markers(
         n_final, n_total, 100.0 * n_final / n_total if n_total > 0 else 0.0,
     )
     return mask
+
+
+def subsample_markers_uniform(
+    candidate_indices: NDArray[np.intp],
+    chromosomes: NDArray,
+    positions: NDArray[np.intp],
+    target_n: int,
+    *,
+    n_bins_per_chrom: int = 1000,
+    random_state: int | np.random.RandomState | None = 0,
+) -> NDArray[np.intp]:
+    """Deterministically subsample *target_n* markers with genome-uniform
+    representation.
+
+    Parameters
+    ----------
+    candidate_indices : ndarray of int, shape (n_candidates,)
+        Row indices into the original full LRR matrix that passed
+        all upstream QC filters.
+    chromosomes : ndarray of str, shape (n_total_markers,)
+        Chromosome label for every marker row (not just candidates).
+    positions : ndarray of int, shape (n_total_markers,)
+        Base-pair position for every marker row.
+    target_n : int
+        Desired number of markers after subsampling.
+    n_bins_per_chrom : int
+        Number of equal-width position bins per chromosome.
+    random_state : int, RandomState, or None
+        Master seed for reproducibility.
+
+    Returns
+    -------
+    selected_indices : ndarray of int, shape (≤ target_n,)
+        Sorted row indices of the selected markers.
+    """
+    candidate_indices = np.asarray(candidate_indices)
+    n_candidates = len(candidate_indices)
+    if target_n >= n_candidates:
+        return np.sort(candidate_indices)
+
+    chromosomes = np.asarray(chromosomes, dtype=str)
+    positions = np.asarray(positions)
+
+    # Resolve master seed to an integer for deterministic per-bin seeding
+    if isinstance(random_state, np.random.RandomState):
+        master_seed = random_state.randint(0, 2**31)
+    elif random_state is None:
+        master_seed = 0
+    else:
+        master_seed = int(random_state)
+
+    # Assign each candidate to a (chromosome, bin) pair
+    cand_chroms = chromosomes[candidate_indices]
+    cand_pos = positions[candidate_indices]
+    unique_chroms = np.unique(cand_chroms)
+
+    # Build bin assignments
+    bin_keys: list[tuple[int, int]] = []  # (chrom_idx, bin_idx) per candidate
+    chrom_to_idx = {c: i for i, c in enumerate(unique_chroms)}
+
+    for chrom in unique_chroms:
+        chrom_mask = cand_chroms == chrom
+        chrom_positions = cand_pos[chrom_mask]
+        if len(chrom_positions) == 0:
+            continue
+        pmin, pmax = chrom_positions.min(), chrom_positions.max()
+        if pmax == pmin:
+            # All same position — single bin
+            for _ in range(int(chrom_mask.sum())):
+                bin_keys.append((chrom_to_idx[chrom], 0))
+        else:
+            bin_width = (pmax - pmin + 1) / n_bins_per_chrom
+            bins = np.clip(
+                ((chrom_positions - pmin) / bin_width).astype(int),
+                0,
+                n_bins_per_chrom - 1,
+            )
+            for b in bins:
+                bin_keys.append((chrom_to_idx[chrom], int(b)))
+
+    # Group candidates by bin
+    from collections import defaultdict
+    bin_to_candidates: dict[tuple[int, int], list[int]] = defaultdict(list)
+    # Iterate in a consistent order: sort candidates by chrom, then position
+    # We need to map bin_keys back to candidate_indices
+    # Build the mapping by iterating chromosomes in order
+    idx_ptr = 0
+    for chrom in unique_chroms:
+        chrom_mask = cand_chroms == chrom
+        chrom_cand_indices = candidate_indices[chrom_mask]
+        chrom_positions = cand_pos[chrom_mask]
+        if len(chrom_cand_indices) == 0:
+            continue
+        pmin, pmax = chrom_positions.min(), chrom_positions.max()
+        if pmax == pmin:
+            bins = np.zeros(len(chrom_cand_indices), dtype=int)
+        else:
+            bin_width = (pmax - pmin + 1) / n_bins_per_chrom
+            bins = np.clip(
+                ((chrom_positions - pmin) / bin_width).astype(int),
+                0,
+                n_bins_per_chrom - 1,
+            )
+        ci = chrom_to_idx[chrom]
+        for j, cand_idx in enumerate(chrom_cand_indices):
+            bin_to_candidates[(ci, int(bins[j]))].append(int(cand_idx))
+
+    # Pass 1: compute per-bin quotas proportional to bin size
+    bin_list = sorted(bin_to_candidates.keys())
+    bin_sizes = np.array([len(bin_to_candidates[b]) for b in bin_list])
+    total = bin_sizes.sum()
+    # Proportional allocation with floor rounding
+    raw_quotas = (bin_sizes / total) * target_n
+    quotas = np.floor(raw_quotas).astype(int)
+    # Distribute remaining slots to bins with largest fractional remainder.
+    # Break ties deterministically using a seeded random jitter so that
+    # equal-size bins across chromosomes are treated fairly.
+    remainder = target_n - quotas.sum()
+    if remainder > 0:
+        fractional = raw_quotas - quotas
+        rng_tie = np.random.default_rng(master_seed + 7)
+        tie_break = rng_tie.random(len(bin_list))
+        sort_key = fractional + tie_break * 1e-10
+        top_bins = np.argsort(-sort_key, kind="stable")[:remainder]
+        quotas[top_bins] += 1
+    # Ensure no bin quota exceeds its size
+    quotas = np.minimum(quotas, bin_sizes)
+
+    # Pass 2: select markers within each bin
+    selected = []
+    for i, bkey in enumerate(bin_list):
+        q = quotas[i]
+        if q == 0:
+            continue
+        candidates_in_bin = np.array(bin_to_candidates[bkey])
+        # Sort for deterministic ordering before sampling
+        candidates_in_bin.sort()
+        if q >= len(candidates_in_bin):
+            selected.extend(candidates_in_bin.tolist())
+        else:
+            # Deterministic per-bin seed from (master_seed, chrom_idx, bin_idx)
+            bin_seed = (master_seed * 1_000_003 + bkey[0] * 1_000_033 + bkey[1]) % (2**31)
+            rng = np.random.default_rng(bin_seed)
+            chosen = rng.choice(candidates_in_bin, size=q, replace=False)
+            selected.extend(chosen.tolist())
+
+    return np.sort(np.array(selected, dtype=np.intp))

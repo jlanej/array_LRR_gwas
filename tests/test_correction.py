@@ -260,3 +260,78 @@ class TestCorrectLrr:
         # Correction must succeed and output shape must match input
         assert corrected.shape == lrr_with_inf.shape
         assert info["n_hq_samples"] > 0
+
+    def test_ram_budget_triggers_subsample(self, synthetic_lrr):
+        """With a very small max_ram_gb, marker count should be reduced."""
+        # Run without budget
+        _, info_no_budget = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+
+        # Run with an extremely small RAM budget to force subsampling
+        # synthetic_lrr is 50×15; need a budget that forces < 48 markers
+        # Budget formula: n_markers = max_ram_bytes / (2.5 * n_samples * 8)
+        # For 15 samples: need max_ram_bytes < 48 * 2.5 * 15 * 8 = 14400
+        # So use ~5000 bytes (about 5e-6 GB) → budget ≈ 16 markers
+        tiny_gb = 5000 / 1024**3
+        n_markers, n_samples = synthetic_lrr.shape
+        chroms = np.array(["chr1"] * n_markers)
+        pos = np.arange(n_markers, dtype=np.intp) * 1000
+
+        corrected, info_budgeted = correct_lrr(
+            synthetic_lrr,
+            chromosomes=chroms,
+            positions=pos,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+            max_ram_gb=tiny_gb,
+        )
+        assert corrected.shape == synthetic_lrr.shape
+        assert info_budgeted["n_markers_used"] < info_no_budget["n_markers_used"]
+        assert info_budgeted["rsvd_subsampled"] is True
+        assert info_budgeted["rsvd_marker_budget"] is not None
+
+    def test_ram_budget_no_subsample_needed(self, synthetic_lrr):
+        """With a large max_ram_gb, marker count should be unchanged."""
+        _, info_no_budget = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+
+        _, info_large = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+            max_ram_gb=100.0,
+        )
+        assert info_large["n_markers_used"] == info_no_budget["n_markers_used"]
+        assert info_large["rsvd_subsampled"] is False
+
+    def test_ram_budget_none_no_subsample(self, synthetic_lrr):
+        """max_ram_gb=None produces no subsampling metadata."""
+        _, info = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+            max_ram_gb=None,
+        )
+        assert info["rsvd_subsampled"] is False
+        assert info["rsvd_marker_budget"] is None

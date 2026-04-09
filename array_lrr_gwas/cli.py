@@ -302,6 +302,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "any columns from --sample-sheet."
         ),
     )
+    correct.add_argument(
+        "--max-ram-gb",
+        type=float,
+        default=None,
+        dest="max_ram_gb",
+        help=(
+            "Maximum RAM in GB available for the RSVD decomposition step "
+            "(default: no limit). When the QC-passing marker set would "
+            "exceed this budget, markers are deterministically subsampled "
+            "to fit. Genome-uniform sampling ensures no region is over- or "
+            "under-represented. A value of 0 disables subsampling entirely."
+        ),
+    )
 
     # ---- associate sub-command ----
     assoc = sub.add_parser(
@@ -788,6 +801,12 @@ def _run_correct(args: argparse.Namespace) -> int:
 
     correct_kwargs = apply_to_correct_args(cfg, cli_overrides)
 
+    # Resolve max_ram_gb: CLI flag > YAML config > None
+    max_ram_gb = getattr(args, "max_ram_gb", None)
+    if max_ram_gb is None:
+        max_ram_gb = cfg.get("correction", {}).get("max_ram_gb")
+    correct_kwargs["max_ram_gb"] = max_ram_gb
+
     # Read input
     logger.info("Reading LRR from %s", input_path)
     lrr, samples, variants = read_lrr(input_path)
@@ -851,6 +870,37 @@ def _run_correct(args: argparse.Namespace) -> int:
             "upstream_qc.variant_qc_path).  Skipping ancestry-informed "
             "marker filtering for RSVD.  Provide collated_variant_qc.tsv "
             "for best-practice QC."
+        )
+
+    # Upfront RAM estimation: use sample count and estimated variant count
+    # from the QC sheet to warn early if subsampling will likely be needed.
+    if max_ram_gb is not None and max_ram_gb > 0:
+        from array_lrr_gwas.decomposition import estimate_rsvd_marker_budget
+
+        n_samples_est = len(samples)
+        # Use QC-passing variant count as the best available estimate
+        # of how many markers will enter the RSVD; fall back to total
+        # variant count when no QC sheet is available.
+        if upstream_qc_mask is not None:
+            n_variants_est = int(upstream_qc_mask.sum())
+        else:
+            n_variants_est = lrr.shape[0]
+        max_ram_bytes = int(max_ram_gb * 1024**3)
+        _est_k = correct_kwargs.get("k") or max(1, int(np.ceil(0.05 * n_samples_est)))
+        budget_est = estimate_rsvd_marker_budget(
+            n_samples_est, _est_k, max_ram_bytes=max_ram_bytes
+        )
+        est_ram_gb = (
+            2.5 * n_variants_est * n_samples_est * 8 / 1024**3
+        )
+        logger.info(
+            "RAM estimate: ~%.1f GB for %d variants × %d samples "
+            "(budget: %.1f GB, ~%d marker limit). %s",
+            est_ram_gb, n_variants_est, n_samples_est,
+            max_ram_gb, budget_est,
+            "Subsampling likely needed."
+            if n_variants_est > budget_est
+            else "Should fit within budget.",
         )
 
     # Run correction
@@ -937,6 +987,20 @@ def _run_correct(args: argparse.Namespace) -> int:
         audit.write_tsv(audit_dir / "correct_audit.tsv")
         audit.write_json(audit_dir / "correct_audit.json")
         audit.write_summary_tsv(audit_dir / "correct_audit_summary.tsv")
+
+        # Always write the RSVD marker audit when audit_dir is set
+        rsvd_audit_path = audit_dir / "rsvd_markers_used.tsv"
+        marker_mask_arr = np.asarray(info["marker_mask"], dtype=bool)
+        kept_idx = np.flatnonzero(marker_mask_arr)
+        with rsvd_audit_path.open("w", encoding="utf-8") as fh:
+            fh.write("variant_id\tchrom\tpos\n")
+            for idx in kept_idx:
+                var = variants[idx]
+                fh.write(f"{_variant_id(var)}\t{var['chrom']}\t{var['pos']}\n")
+        logger.info(
+            "Wrote RSVD marker audit (%d markers): %s",
+            len(kept_idx), rsvd_audit_path,
+        )
 
     logger.info("Done.")
     return 0

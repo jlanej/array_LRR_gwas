@@ -133,6 +133,7 @@ def correct_lrr(
     audit: object | None = None,
     variant_ids: list[str] | None = None,
     sample_ids: list[str] | None = None,
+    max_ram_gb: float | None = None,
 ) -> tuple[NDArray[np.floating], dict]:
     """End-to-end batch-effect correction for an LRR matrix.
 
@@ -175,6 +176,12 @@ def correct_lrr(
         Sample ID strings aligned to the columns of *lrr*.  Required when
         *audit* is not ``None`` so that per-sample HQ/LQ classification
         can be recorded.
+    max_ram_gb : float or None
+        Maximum RAM in GB available for the RSVD decomposition step.
+        When the QC-passing marker set would exceed this budget, markers
+        are deterministically subsampled to fit using genome-uniform
+        sampling.  ``None`` disables the budget (no subsampling).
+        ``0`` also disables subsampling.
 
     Returns
     -------
@@ -259,6 +266,57 @@ def correct_lrr(
             "No markers passed QC – relax filter thresholds."
         )
 
+    # 2b. Optionally subsample markers to fit within the RAM budget
+    n_candidates_pre_budget = int(marker_mask.sum())
+    budget = None
+    if max_ram_gb is not None and max_ram_gb > 0:
+        from array_lrr_gwas.decomposition import estimate_rsvd_marker_budget
+        from array_lrr_gwas.subsetting import subsample_markers_uniform
+
+        max_ram_bytes = int(max_ram_gb * 1024**3)
+        _pilot_k_for_budget = max(1, int(np.ceil(0.05 * n_hq))) if k is None else k
+        budget = estimate_rsvd_marker_budget(
+            n_hq, _pilot_k_for_budget, max_ram_bytes=max_ram_bytes
+        )
+        n_candidates = int(marker_mask.sum())
+        if n_candidates > budget:
+            logger.warning(
+                "RSVD marker budget exceeded: %d markers > %d budget "
+                "(%.1f GB limit). Subsampling to %d markers "
+                "with genome-uniform strategy.",
+                n_candidates, budget, max_ram_gb, budget,
+            )
+            if positions is not None and chromosomes is not None:
+                candidate_idx = np.flatnonzero(marker_mask)
+                selected_idx = subsample_markers_uniform(
+                    candidate_idx,
+                    chromosomes=chromosomes,
+                    positions=positions,
+                    target_n=budget,
+                    random_state=0,
+                )
+                new_mask = np.zeros(lrr.shape[0], dtype=bool)
+                new_mask[selected_idx] = True
+                marker_mask = new_mask
+            else:
+                # Without genomic coordinates, fall back to uniform random
+                candidate_idx = np.flatnonzero(marker_mask)
+                rng = np.random.default_rng(0)
+                chosen = rng.choice(candidate_idx, size=budget, replace=False)
+                new_mask = np.zeros(lrr.shape[0], dtype=bool)
+                new_mask[chosen] = True
+                marker_mask = new_mask
+            logger.info(
+                "Subsampled to %d markers for RSVD (seed=0).",
+                int(marker_mask.sum()),
+            )
+        else:
+            logger.info(
+                "RSVD marker count %d within %.1f GB budget (%d markers); "
+                "no subsampling needed.",
+                n_candidates, max_ram_gb, budget,
+            )
+
     # 3. Decompose HQ sub-matrix
     sub = lrr[np.ix_(marker_mask, hq_mask)]
     # Centre per marker row for later extrapolation
@@ -339,5 +397,11 @@ def correct_lrr(
         "n_hq_samples": int(np.sum(hq_mask)),
         "n_markers_used": int(np.sum(marker_mask)),
         "backend": backend if isinstance(backend, str) else "custom",
+        "rsvd_subsampled": (
+            max_ram_gb is not None
+            and max_ram_gb > 0
+            and int(marker_mask.sum()) < n_candidates_pre_budget
+        ),
+        "rsvd_marker_budget": budget,
     }
     return corrected, info
