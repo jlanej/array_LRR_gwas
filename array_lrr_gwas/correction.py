@@ -256,11 +256,19 @@ def residualize_qr(
     corrected : ndarray, shape (n_markers, n_samples)
     """
     Q, R, X = qr_precompute(Vt_k)
-    n_markers = lrr.shape[0]
+    n_markers, n_samples = lrr.shape
+    k = Vt_k.shape[0]
+    n_chunks = (n_markers + chunk_size - 1) // chunk_size
     corrected = np.empty_like(lrr)
 
+    logger.info(
+        "PC correction: regressing %d PCs out of %d markers × %d samples "
+        "in %d chunk(s) of %d",
+        k, n_markers, n_samples, n_chunks, chunk_size,
+    )
+
     n_skipped = 0
-    for start in range(0, n_markers, chunk_size):
+    for chunk_idx, start in enumerate(range(0, n_markers, chunk_size)):
         end = min(start + chunk_size, n_markers)
         chunk = lrr[start:end]
         corrected_chunk, chunk_skipped = _correct_chunk_qr(
@@ -268,6 +276,10 @@ def residualize_qr(
         )
         corrected[start:end] = corrected_chunk
         n_skipped += chunk_skipped
+        logger.debug(
+            "PC correction chunk %d/%d: markers %d–%d (%d skipped so far)",
+            chunk_idx + 1, n_chunks, start, end - 1, n_skipped,
+        )
 
     if n_skipped > 0:
         logger.info(
@@ -275,6 +287,8 @@ def residualize_qr(
             n_skipped,
             n_markers,
         )
+    else:
+        logger.info("PC correction complete: all %d markers corrected", n_markers)
 
     return corrected
 
@@ -383,6 +397,18 @@ def correct_lrr(
         ``n_hq_samples``, ``n_markers_used``, ``backend``
             Scalar summary statistics.
     """
+    # 0. Log upfront matrix dimensions and per-GB density estimate.
+    n_total_markers, n_total_samples = lrr.shape
+    bytes_per_element = lrr.dtype.itemsize if lrr.dtype.itemsize > 0 else 8
+    matrix_gb = (n_total_markers * n_total_samples * bytes_per_element) / 1024**3
+    variants_per_gb = (n_total_markers * n_total_samples) / max(matrix_gb, 1e-12)
+    logger.info(
+        "Input matrix: %d variants × %d samples (%.2f GB @ %d B/element; "
+        "%.3g variant×sample per GB)",
+        n_total_markers, n_total_samples, matrix_gb,
+        bytes_per_element, variants_per_gb,
+    )
+
     # 1. Classify samples using only autosomal markers for LRR_SD and callrate.
     # Non-autosomal (sex chromosome, MT) intensity signals encode biological sex
     # rather than technical noise and must not contribute to sample QC metrics.
@@ -493,6 +519,13 @@ def correct_lrr(
 
     # 3. Decompose HQ sub-matrix
     sub = lrr[np.ix_(marker_mask, hq_mask)]
+    n_sub_markers, n_sub_samples = sub.shape
+    sub_gb = (n_sub_markers * n_sub_samples * 8) / 1024**3
+    logger.info(
+        "Loading SVD sub-matrix: %d variants × %d HQ samples (%.2f GB) "
+        "from %d total variants",
+        n_sub_markers, n_sub_samples, sub_gb, n_total_markers,
+    )
     # Centre per marker row for later extrapolation
     row_means = np.nanmean(sub, axis=1, keepdims=True)
 
