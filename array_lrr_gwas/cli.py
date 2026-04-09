@@ -275,6 +275,33 @@ def _build_parser() -> argparse.ArgumentParser:
             "and UMAP projection is written next to the output BCF."
         ),
     )
+    correct.add_argument(
+        "--sample-sheet",
+        type=Path,
+        default=None,
+        dest="correct_sample_sheet",
+        help=(
+            "Optional path to compiled_sample_sheet.tsv.  When provided, "
+            "all columns are embedded in the diagnostic HTML report as "
+            "additional colour-overlay options for the PC scatter and UMAP "
+            "plots (e.g. call_rate, lrr_sd, sex_status, ancestry flags)."
+        ),
+    )
+    correct.add_argument(
+        "--illumina-sample-sheet",
+        type=Path,
+        default=None,
+        dest="correct_illumina_sample_sheet",
+        help=(
+            "Optional path to an Illumina-format SampleSheet.csv.  "
+            "Illumina sample sheets use a comma-separated format with "
+            "section headers ([Header], [Manifests], [Data]).  When "
+            "provided, columns from the [Data] section (e.g. Gender, "
+            "Sample_Plate, Sample_Group, CallRate) are added to the "
+            "diagnostic HTML report as colour-overlay options alongside "
+            "any columns from --sample-sheet."
+        ),
+    )
 
     # ---- associate sub-command ----
     assoc = sub.add_parser(
@@ -888,6 +915,8 @@ def _run_correct(args: argparse.Namespace) -> int:
                 chromosomes=chromosomes,
                 output_path=report_path,
                 metrics_tsv_path=metrics_tsv_path,
+                sample_sheet_path=getattr(args, "correct_sample_sheet", None),
+                illumina_sample_sheet_path=getattr(args, "correct_illumina_sample_sheet", None),
             )
             logger.info("Wrote interactive report: %s", report_path)
             logger.info("Wrote sample metrics TSV: %s", metrics_tsv_path)

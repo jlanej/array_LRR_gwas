@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import textwrap
 from pathlib import Path
 from typing import Any, Sequence
@@ -37,8 +38,94 @@ from numpy.typing import NDArray
 
 from array_lrr_gwas.select_k import _mp_upper_edge
 from array_lrr_gwas.subsetting import autosome_mask
+from array_lrr_gwas.sample_sheet import read_all_raw_rows
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Sample-sheet column parsing for report visualisation
+# ---------------------------------------------------------------------------
+
+def _parse_sample_sheet_columns(
+    path: str | Path,
+    samples: list[str],
+    *,
+    sample_id_col: str = "sample_id",
+) -> dict[str, Any]:
+    """Read all columns from a compiled sample sheet, aligned to *samples*.
+
+    Delegates raw CSV parsing to
+    :func:`~array_lrr_gwas.sample_sheet.read_all_raw_rows` (which reuses
+    the shared :func:`~array_lrr_gwas.sample_sheet._resolve_column` helper),
+    so there is no duplication of sheet-reading logic here.
+
+    Parameters
+    ----------
+    path : path-like
+        Path to a tab-separated compiled sample sheet.
+    samples : list of str
+        Report sample IDs (defines the output order).
+    sample_id_col : str
+        Column name containing sample IDs (case-insensitive lookup).
+
+    Returns
+    -------
+    dict with keys:
+
+    * ``columns`` – list of column names present in the sheet
+      (excluding the sample-ID column).
+    * ``numeric`` – parallel list of bool, ``True`` when the column
+      contains predominantly numeric values.
+    * ``data`` – dict mapping column name → per-sample list.
+      Numeric columns: ``float | None`` (``None`` for missing/non-numeric
+      or non-finite values).
+      Categorical columns: ``str`` (empty string for missing).
+    """
+    other_cols, raw = read_all_raw_rows(path, sample_id_col=sample_id_col)
+    if not other_cols:
+        return {"columns": [], "numeric": [], "data": {}}
+
+    # Determine numeric vs categorical per column.
+    numeric_flags: list[bool] = []
+    for col in other_cols:
+        parseable = 0
+        total = 0
+        for row_data in raw.values():
+            val = row_data.get(col, "").strip()
+            if val != "":
+                total += 1
+                try:
+                    float(val)
+                    parseable += 1
+                except ValueError:
+                    pass
+        # Consider numeric if ≥ 80% of non-empty values parse as float.
+        numeric_flags.append(total == 0 or parseable / total >= 0.8)
+
+    # Build per-sample aligned data lists.
+    data: dict[str, list] = {col: [] for col in other_cols}
+    for sid in samples:
+        row_data = raw.get(sid, {})
+        for col, is_num in zip(other_cols, numeric_flags):
+            raw_val = row_data.get(col, "").strip()
+            if is_num:
+                try:
+                    parsed = float(raw_val) if raw_val != "" else None
+                    # Reject non-finite floats (NaN, inf) — serialize as null
+                    if parsed is not None and not math.isfinite(parsed):
+                        parsed = None
+                    data[col].append(parsed)
+                except ValueError:
+                    data[col].append(None)
+            else:
+                data[col].append(raw_val)
+
+    return {
+        "columns": other_cols,
+        "numeric": numeric_flags,
+        "data": data,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +324,7 @@ def _build_html(
     scree: dict,
     scatter: dict,
     umap_data: dict | None,
+    sheet_data: dict | None = None,
     title: str = "LRR Correction Diagnostic Report",
 ) -> str:
     """Build a single self-contained HTML string with Plotly charts."""
@@ -244,6 +332,7 @@ def _build_html(
         "scree": scree,
         "scatter": scatter,
         "umap": umap_data,
+        "sheet": sheet_data,
     }
     data_json = json.dumps(report_data, allow_nan=False, default=_json_default)
 
@@ -330,6 +419,21 @@ def _build_html(
     // ── Embedded data ────────────────────────────────────────────────
     const DATA = """ + data_json + """;
 
+    // ── Sample-sheet colour options ──────────────────────────────────
+    (function() {
+        if (!DATA.sheet || !DATA.sheet.columns || DATA.sheet.columns.length === 0) return;
+        ["pc-color", "umap-color"].forEach(function(id) {
+            const sel = document.getElementById(id);
+            if (!sel) return;
+            DATA.sheet.columns.forEach(function(col) {
+                const opt = document.createElement("option");
+                opt.value = "sheet:" + col;
+                opt.textContent = col;
+                sel.appendChild(opt);
+            });
+        });
+    })();
+
     // ── Scree plot ───────────────────────────────────────────────────
     (function() {
         const s = DATA.scree;
@@ -363,23 +467,60 @@ def _build_html(
             annotations: [mpAnnotation],
             margin: {t: 30, b: 50},
             legend: {x: 0.7, y: 0.95},
+            height: 450,
         }, {responsive: true});
     })();
 
     // ── PC scatter helpers ───────────────────────────────────────────
+    function _sheetColValues(col) {
+        if (!DATA.sheet) return null;
+        return DATA.sheet.data[col] || null;
+    }
+    function _sheetColIsNumeric(col) {
+        if (!DATA.sheet) return false;
+        const idx = DATA.sheet.columns.indexOf(col);
+        return idx >= 0 && DATA.sheet.numeric[idx];
+    }
+    // Map categorical string values to discrete colours.
+    // Palette cycles for columns with more than 10 unique values.
+    // Missing values (null or empty string) are shown in grey (#cccccc).
+    function _catColors(vals) {
+        const palette = [
+            "#0f3460","#e94560","#f5a623","#7ed321","#9b59b6",
+            "#1abc9c","#e67e22","#3498db","#e74c3c","#2ecc71",
+        ];
+        const unique = [...new Set(vals.filter(v => v !== null && v !== ""))];
+        unique.sort();
+        const map = {};
+        unique.forEach((v, i) => { map[v] = palette[i % palette.length]; });
+        return vals.map(v => (v === null || v === "") ? "#cccccc" : (map[v] || "#cccccc"));
+    }
     function buildColorArray(key) {
         if (key === "hq") {
             return DATA.scatter.hq.map(v => v ? "#0f3460" : "#e94560");
         }
-        const vals = key === "LRR_SD" ? DATA.scatter.LRR_SD : DATA.scatter.callrate;
-        return vals;
+        if (key === "LRR_SD") return DATA.scatter.LRR_SD;
+        if (key === "callrate") return DATA.scatter.callrate;
+        if (key.startsWith("sheet:")) {
+            const col = key.slice(6);
+            const vals = _sheetColValues(col);
+            if (!vals) return DATA.scatter.samples.map(() => "#aaaaaa");
+            if (_sheetColIsNumeric(col)) return vals;
+            return _catColors(vals);
+        }
+        return DATA.scatter.samples.map(() => "#aaaaaa");
     }
     function colorScale(key) {
         if (key === "hq") return null;
+        if (key.startsWith("sheet:")) {
+            const col = key.slice(6);
+            return _sheetColIsNumeric(col) ? "Viridis" : null;
+        }
         return "Viridis";
     }
     function buildHoverText() {
-        return DATA.scatter.samples.map((s, i) => {
+        // Build base hover fields from scatter data.
+        const baseLines = DATA.scatter.samples.map((s, i) => {
             const hq = DATA.scatter.hq[i] ? "HQ" : "LQ";
             const lrrSd = DATA.scatter.LRR_SD[i];
             const lrrSdStr = lrrSd === null ? "N/A" : lrrSd.toFixed(4);
@@ -387,6 +528,18 @@ def _build_html(
                    "<br>callrate=" + DATA.scatter.callrate[i].toFixed(4) +
                    "<br>" + hq;
         });
+        // Append sample-sheet columns when available.
+        if (DATA.sheet && DATA.sheet.columns && DATA.sheet.columns.length > 0) {
+            return baseLines.map((line, i) => {
+                const extra = DATA.sheet.columns.map(col => {
+                    const val = DATA.sheet.data[col][i];
+                    const valStr = (val === null || val === undefined) ? "N/A" : String(val);
+                    return col + "=" + valStr;
+                }).join("<br>");
+                return line + "<br>" + extra;
+            });
+        }
+        return baseLines;
     }
 
     // ── Populate PC selectors ────────────────────────────────────────
@@ -410,6 +563,7 @@ def _build_html(
         const cKey = document.getElementById("pc-color").value;
         const colors = buildColorArray(cKey);
         const hover = buildHoverText();
+        const cs = colorScale(cKey);
         const trace = {
             x: DATA.scatter.pcs[xKey],
             y: DATA.scatter.pcs[yKey],
@@ -419,9 +573,9 @@ def _build_html(
             marker: {
                 size: 4,
                 color: colors,
-                colorscale: colorScale(cKey),
-                showscale: cKey !== "hq",
-                colorbar: cKey !== "hq" ? {title: cKey} : undefined,
+                colorscale: cs,
+                showscale: cs !== null,
+                colorbar: cs !== null ? {title: cKey} : undefined,
             },
             text: hover,
             hoverinfo: "text",
@@ -454,6 +608,7 @@ def _build_html(
             const cKey = document.getElementById("umap-color").value;
             const colors = buildColorArray(cKey);
             const hover = buildHoverText();
+            const cs = colorScale(cKey);
             const trace = {
                 x: DATA.umap.umap1,
                 y: DATA.umap.umap2,
@@ -462,9 +617,9 @@ def _build_html(
                 marker: {
                     size: 6,
                     color: colors,
-                    colorscale: colorScale(cKey),
-                    showscale: cKey !== "hq",
-                    colorbar: cKey !== "hq" ? {title: cKey} : undefined,
+                    colorscale: cs,
+                    showscale: cs !== null,
+                    colorbar: cs !== null ? {title: cKey} : undefined,
                 },
                 text: hover,
                 hoverinfo: "text",
@@ -500,6 +655,36 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
+def _merge_sheet_data(primary: dict, secondary: dict) -> dict:
+    """Merge two sheet-data dicts, with *primary* taking precedence on name collisions.
+
+    Parameters
+    ----------
+    primary, secondary : dict
+        Dicts as returned by :func:`_parse_sample_sheet_columns`, each with
+        keys ``columns`` (list of str), ``numeric`` (list of bool), and
+        ``data`` (dict column→list).
+
+    Returns
+    -------
+    dict
+        Merged sheet-data dict.  If a column name exists in both sheets the
+        secondary copy is suffixed with ``_illumina`` to avoid shadowing.
+    """
+    primary_cols: set[str] = set(primary.get("columns", []))
+    merged_columns: list[str] = list(primary.get("columns", []))
+    merged_numeric: list[bool] = list(primary.get("numeric", []))
+    merged_data: dict = dict(primary.get("data", {}))
+
+    for col, is_num in zip(secondary.get("columns", []), secondary.get("numeric", [])):
+        dest = col if col not in primary_cols else f"{col}_illumina"
+        merged_columns.append(dest)
+        merged_numeric.append(is_num)
+        merged_data[dest] = secondary["data"][col]
+
+    return {"columns": merged_columns, "numeric": merged_numeric, "data": merged_data}
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -512,6 +697,8 @@ def generate_report(
     *,
     chromosomes: NDArray | Sequence[str] | None = None,
     metrics_tsv_path: str | Path | None = None,
+    sample_sheet_path: str | Path | None = None,
+    illumina_sample_sheet_path: str | Path | None = None,
     skip_umap: bool = False,
 ) -> Path:
     """Generate an interactive HTML diagnostic report.
@@ -533,6 +720,17 @@ def generate_report(
         markers are used for LRR_SD and callrate in the sample metrics.
     metrics_tsv_path : path-like or None
         If provided, sample metrics (LRR_SD, callrate) are also saved to this TSV.
+    sample_sheet_path : path-like or None
+        Optional path to a compiled sample sheet TSV.  When provided, all
+        columns are parsed and embedded in the report for use as colour
+        overlays in the PC scatter and UMAP plots.
+    illumina_sample_sheet_path : path-like or None
+        Optional path to an Illumina-format SampleSheet.csv (comma-separated
+        with ``[Header]``/``[Data]`` section markers).  Columns from the
+        ``[Data]`` section are embedded alongside any columns from
+        *sample_sheet_path*.  Both sheets may be supplied at the same time.
+        On column-name collision the compiled sheet takes precedence and the
+        Illumina column is suffixed with ``_illumina``.
     skip_umap : bool
         If ``True``, skip the UMAP computation (useful when umap-learn is
         not installed or the dataset is very small).
@@ -578,8 +776,39 @@ def generate_report(
         except Exception:
             logger.warning("UMAP computation failed; skipping.", exc_info=True)
 
-    # 5. Build HTML
-    html = _build_html(scree, scatter, umap_data)
+    # 5. Sample-sheet columns (compiled TSV and/or Illumina CSV, both optional)
+    sheet_data: dict | None = None
+
+    def _try_parse(path: "str | Path", label: str) -> "dict | None":
+        try:
+            result = _parse_sample_sheet_columns(path, samples)
+            logger.info(
+                "Loaded %d %s columns for report visualisation",
+                len(result.get("columns", [])),
+                label,
+            )
+            return result
+        except Exception:
+            logger.warning(
+                "Failed to parse %s %s for report; skipping.",
+                label,
+                path,
+                exc_info=True,
+            )
+            return None
+
+    compiled = _try_parse(sample_sheet_path, "compiled sample sheet") if sample_sheet_path is not None else None
+    illumina = _try_parse(illumina_sample_sheet_path, "Illumina sample sheet") if illumina_sample_sheet_path is not None else None
+
+    if compiled is not None and illumina is not None:
+        sheet_data = _merge_sheet_data(compiled, illumina)
+    elif compiled is not None:
+        sheet_data = compiled
+    elif illumina is not None:
+        sheet_data = illumina
+
+    # 6. Build HTML
+    html = _build_html(scree, scatter, umap_data, sheet_data)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     logger.info("Interactive report written to %s", output_path)

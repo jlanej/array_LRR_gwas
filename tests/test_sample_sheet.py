@@ -9,6 +9,7 @@ from array_lrr_gwas.sample_sheet import (
     read_sample_sheet,
     align_samples,
     classify_samples_from_sheet,
+    read_all_raw_rows,
 )
 
 
@@ -168,3 +169,114 @@ class TestClassifySamplesFromSheet:
         tsv.write_text("")
         with pytest.raises(ValueError, match="empty"):
             classify_samples_from_sheet(tsv)
+
+
+class TestReadAllRawRows:
+    """Tests for ``read_all_raw_rows``."""
+
+    def test_basic(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("sample_id\tcall_rate\tgender\nS1\t0.99\tM\nS2\t0.97\tF\n")
+        cols, raw = read_all_raw_rows(tsv)
+        assert cols == ["call_rate", "gender"]
+        assert set(raw.keys()) == {"S1", "S2"}
+        assert raw["S1"]["call_rate"] == "0.99"
+        assert raw["S2"]["gender"] == "F"
+
+    def test_case_insensitive_sample_id(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("Sample_ID\tcall_rate\nS1\t0.99\n")
+        # Default sample_id_col='sample_id' should resolve to 'Sample_ID'
+        cols, raw = read_all_raw_rows(tsv)
+        assert "Sample_ID" not in cols
+        assert "S1" in raw
+
+    def test_missing_rows_excluded(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("sample_id\tcall_rate\n\t0.99\nS1\t0.98\n")
+        cols, raw = read_all_raw_rows(tsv)
+        # Empty sample ID should be skipped
+        assert "" not in raw
+        assert "S1" in raw
+
+    def test_empty_file_returns_empty(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("")
+        cols, raw = read_all_raw_rows(tsv)
+        assert cols == []
+        assert raw == {}
+
+    def test_header_only_returns_empty_raw(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("sample_id\tcall_rate\n")
+        cols, raw = read_all_raw_rows(tsv)
+        assert cols == ["call_rate"]
+        assert raw == {}
+
+    def test_illumina_format(self, tmp_path) -> None:
+        """Illumina multi-section CSV (comma-delimited with [Header]/[Data]) is parsed correctly."""
+        csv_content = (
+            "[Header]\n"
+            "Investigator Name,Test\n"
+            "Date,2024-01-01\n"
+            "\n"
+            "[Manifests]\n"
+            "A,SomeManifest\n"
+            "[Data]\n"
+            "Sample_ID,SentrixBarcode_A,Gender,CallRate\n"
+            "S1,123456,F,0.99\n"
+            "S2,789012,M,0.98\n"
+        )
+        csv_file = tmp_path / "SampleSheet.csv"
+        csv_file.write_text(csv_content)
+        cols, raw = read_all_raw_rows(csv_file)
+        assert cols == ["SentrixBarcode_A", "Gender", "CallRate"]
+        assert set(raw.keys()) == {"S1", "S2"}
+        assert raw["S1"]["Gender"] == "F"
+        assert raw["S2"]["CallRate"] == "0.98"
+        # Sample_ID column should not appear in other_columns
+        assert "Sample_ID" not in cols
+
+    def test_illumina_format_case_insensitive_data_section(self, tmp_path) -> None:
+        """[data] (lowercase) is also recognised."""
+        csv_content = (
+            "[Header]\n"
+            "Project,Test\n"
+            "[data]\n"
+            "Sample_ID,Gender\n"
+            "S1,F\n"
+        )
+        csv_file = tmp_path / "sheet.csv"
+        csv_file.write_text(csv_content)
+        cols, raw = read_all_raw_rows(csv_file)
+        assert "S1" in raw
+        assert raw["S1"]["Gender"] == "F"
+
+    def test_illumina_format_no_data_section_returns_empty(self, tmp_path) -> None:
+        """An Illumina-style file without a [Data] section returns empty."""
+        csv_content = "[Header]\nProject,Test\n[Manifests]\nA,Manifest\n"
+        csv_file = tmp_path / "sheet.csv"
+        csv_file.write_text(csv_content)
+        cols, raw = read_all_raw_rows(csv_file)
+        assert cols == []
+        assert raw == {}
+
+    def test_illumina_real_sample_sheet(self) -> None:
+        """Parse the real Illumina SampleSheet.csv from tests/data/sampleSheet."""
+        import pathlib
+        sheet = pathlib.Path(__file__).parent / "data" / "sampleSheet" / "SampleSheet.csv"
+        if not sheet.exists():
+            pytest.skip("SampleSheet.csv not present in test data")
+        cols, raw = read_all_raw_rows(sheet)
+        # Known columns in the real sheet
+        assert "Gender" in cols
+        assert "Sample_Plate" in cols
+        assert "CallRate" in cols
+        # Sample_ID should not appear as a data column
+        assert "Sample_ID" not in cols
+        # Should have parsed samples
+        assert len(raw) > 0
+        # Spot-check a known first-plate sample
+        expected_id = "1000G_OMNI2.5M_07-10_01_D05_PT-G23E_5426529111_R04C01"
+        if expected_id in raw:
+            assert raw[expected_id]["Gender"] == "F"
