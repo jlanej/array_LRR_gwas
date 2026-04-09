@@ -303,6 +303,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     correct.add_argument(
+        "--illumina-sample-id-col",
+        type=str,
+        default="Sample_Group",
+        dest="correct_illumina_sample_id_col",
+        help=(
+            "Column in the Illumina SampleSheet.csv [Data] section whose values "
+            "match the sample IDs used in the rest of the pipeline (e.g. NA19152).  "
+            "Defaults to 'Sample_Group' because Illumina sheets typically store the "
+            "short population/sample identifier in that column while 'Sample_ID' "
+            "holds a longer Illumina-internal barcode string.  If the specified "
+            "column is absent the first column of the [Data] section is used."
+        ),
+    )
+    correct.add_argument(
         "--max-ram-gb",
         type=float,
         default=None,
@@ -969,6 +983,7 @@ def _run_correct(args: argparse.Namespace) -> int:
                 metrics_tsv_path=metrics_tsv_path,
                 sample_sheet_path=getattr(args, "correct_sample_sheet", None),
                 illumina_sample_sheet_path=getattr(args, "correct_illumina_sample_sheet", None),
+                illumina_sample_id_col=getattr(args, "correct_illumina_sample_id_col", "Sample_Group"),
             )
             logger.info("Wrote interactive report: %s", report_path)
             logger.info("Wrote sample metrics TSV: %s", metrics_tsv_path)

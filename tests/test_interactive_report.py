@@ -721,6 +721,57 @@ class TestGenerateReportWithIlluminaSheet:
         html = out.read_text()
         assert '"sheet": null' in html
 
+    def _make_illumina_sheet_with_sample_group(self, tmp_path, short_ids):
+        """Create an Illumina-style SampleSheet.csv where Sample_ID is a long
+        Illumina barcode string and Sample_Group holds the short IDs (NA19152-style)
+        that match what the rest of the pipeline uses.  This mirrors the real-world
+        format described in the issue.
+        """
+        content = "[Header]\nProject,Test\n[Data]\n"
+        content += "Sample_ID,SentrixBarcode_A,SentrixPosition_A,Sample_Plate,Sample_Well,Sample_Group,Gender\n"
+        for i, sid in enumerate(short_ids):
+            long_id = f"1000G_OMNI2.5M_{i:04d}_{sid}_5426529111_R04C01"
+            content += f"{long_id},5426529111,R04C0{i + 1},WG0076878-AMP2,D0{i + 1},{sid},{'MF'[i % 2]}\n"
+        p = tmp_path / "SampleSheet_with_group.csv"
+        p.write_text(content)
+        return p
+
+    def test_sample_group_used_as_id_column(self, tmp_path):
+        """Regression: when Illumina Sample_ID is a long barcode but Sample_Group
+        holds the short IDs matching *samples*, columns like Sample_Plate and
+        Sample_Well must NOT be all-missing in the report."""
+        from array_lrr_gwas.interactive_report import generate_report
+
+        short_ids = ["NA19152", "NA18972", "NA20530", "NA19240", "NA18507"]
+        illum = self._make_illumina_sheet_with_sample_group(tmp_path, short_ids)
+
+        rng = np.random.default_rng(42)
+        lrr = rng.standard_normal((50, 5)) * 0.2
+        out = generate_report(
+            info=self._make_info(),
+            samples=short_ids,
+            lrr=lrr,
+            output_path=tmp_path / "rep_sample_group.html",
+            illumina_sample_sheet_path=illum,
+            illumina_sample_id_col="Sample_Group",
+            skip_umap=True,
+        )
+        html = out.read_text()
+        # Columns should be present
+        assert '"Sample_Plate"' in html
+        assert '"Sample_Well"' in html
+        assert '"Gender"' in html
+        # Sample_Plate values must not be all-empty — at least one real plate value
+        assert "WG0076878-AMP2" in html
+
+    def test_illumina_sample_id_col_default_is_sample_group(self, tmp_path):
+        """generate_report default illumina_sample_id_col should be 'Sample_Group'."""
+        from array_lrr_gwas.interactive_report import generate_report
+        import inspect
+
+        sig = inspect.signature(generate_report)
+        assert sig.parameters["illumina_sample_id_col"].default == "Sample_Group"
+
 
 # ---------------------------------------------------------------------------
 # JSON serialisation edge cases
