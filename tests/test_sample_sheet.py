@@ -212,3 +212,71 @@ class TestReadAllRawRows:
         cols, raw = read_all_raw_rows(tsv)
         assert cols == ["call_rate"]
         assert raw == {}
+
+    def test_illumina_format(self, tmp_path) -> None:
+        """Illumina multi-section CSV (comma-delimited with [Header]/[Data]) is parsed correctly."""
+        csv_content = (
+            "[Header]\n"
+            "Investigator Name,Test\n"
+            "Date,2024-01-01\n"
+            "\n"
+            "[Manifests]\n"
+            "A,SomeManifest\n"
+            "[Data]\n"
+            "Sample_ID,SentrixBarcode_A,Gender,CallRate\n"
+            "S1,123456,F,0.99\n"
+            "S2,789012,M,0.98\n"
+        )
+        csv_file = tmp_path / "SampleSheet.csv"
+        csv_file.write_text(csv_content)
+        cols, raw = read_all_raw_rows(csv_file)
+        assert cols == ["SentrixBarcode_A", "Gender", "CallRate"]
+        assert set(raw.keys()) == {"S1", "S2"}
+        assert raw["S1"]["Gender"] == "F"
+        assert raw["S2"]["CallRate"] == "0.98"
+        # Sample_ID column should not appear in other_columns
+        assert "Sample_ID" not in cols
+
+    def test_illumina_format_case_insensitive_data_section(self, tmp_path) -> None:
+        """[data] (lowercase) is also recognised."""
+        csv_content = (
+            "[Header]\n"
+            "Project,Test\n"
+            "[data]\n"
+            "Sample_ID,Gender\n"
+            "S1,F\n"
+        )
+        csv_file = tmp_path / "sheet.csv"
+        csv_file.write_text(csv_content)
+        cols, raw = read_all_raw_rows(csv_file)
+        assert "S1" in raw
+        assert raw["S1"]["Gender"] == "F"
+
+    def test_illumina_format_no_data_section_returns_empty(self, tmp_path) -> None:
+        """An Illumina-style file without a [Data] section returns empty."""
+        csv_content = "[Header]\nProject,Test\n[Manifests]\nA,Manifest\n"
+        csv_file = tmp_path / "sheet.csv"
+        csv_file.write_text(csv_content)
+        cols, raw = read_all_raw_rows(csv_file)
+        assert cols == []
+        assert raw == {}
+
+    def test_illumina_real_sample_sheet(self) -> None:
+        """Parse the real Illumina SampleSheet.csv from tests/data/sampleSheet."""
+        import pathlib
+        sheet = pathlib.Path(__file__).parent / "data" / "sampleSheet" / "SampleSheet.csv"
+        if not sheet.exists():
+            pytest.skip("SampleSheet.csv not present in test data")
+        cols, raw = read_all_raw_rows(sheet)
+        # Known columns in the real sheet
+        assert "Gender" in cols
+        assert "Sample_Plate" in cols
+        assert "CallRate" in cols
+        # Sample_ID should not appear as a data column
+        assert "Sample_ID" not in cols
+        # Should have parsed samples
+        assert len(raw) > 0
+        # Spot-check a known first-plate sample
+        expected_id = "1000G_OMNI2.5M_07-10_01_D05_PT-G23E_5426529111_R04C01"
+        if expected_id in raw:
+            assert raw[expected_id]["Gender"] == "F"

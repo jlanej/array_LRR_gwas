@@ -36,6 +36,7 @@ All exclusions are logged with per-category counts for full provenance.
 from __future__ import annotations
 
 import csv
+import io
 import logging
 import re
 from pathlib import Path
@@ -196,10 +197,21 @@ def read_all_raw_rows(
     :func:`~array_lrr_gwas.interactive_report._parse_sample_sheet_columns`
     to load all columns generically without assuming a fixed schema.
 
+    Supported formats
+    -----------------
+    * **Plain TSV** — tab-separated, no section headers.  Any file whose
+      first non-empty line does *not* start with ``[`` is treated as a
+      plain TSV (the standard ``compiled_sample_sheet.tsv`` format).
+    * **Illumina multi-section CSV** — files that begin with section
+      markers such as ``[Header]``, ``[Manifests]``, ``[Data]``.  Lines
+      before the ``[Data]`` marker are skipped; the data section is
+      parsed as comma-separated CSV.  This matches the sample-sheet
+      format produced by Illumina LIMS / GenomeStudio.
+
     Parameters
     ----------
     path : str or Path
-        Path to a tab-separated compiled sample sheet.
+        Path to a compiled sample sheet (TSV or Illumina CSV).
     sample_id_col : str
         Column name containing sample identifiers (case-insensitive lookup).
         Defaults to ``"sample_id"``.
@@ -215,23 +227,45 @@ def read_all_raw_rows(
     """
     path = Path(path)
     with path.open(newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh, delimiter="\t")
-        fieldnames: list[str] = list(reader.fieldnames or [])
-        if not fieldnames:
+        all_lines = fh.readlines()
+
+    if not all_lines:
+        return [], {}
+
+    # Detect Illumina multi-section format: first non-empty line starts with '['.
+    first_nonempty = next((ln for ln in all_lines if ln.strip()), "")
+    if first_nonempty.strip().startswith("["):
+        # Find the [Data] section (case-insensitive).
+        data_start: int | None = None
+        for idx, line in enumerate(all_lines):
+            if line.strip().lower() == "[data]":
+                data_start = idx + 1  # CSV header is on the very next line
+                break
+        if data_start is None or data_start >= len(all_lines):
             return [], {}
+        data_lines = all_lines[data_start:]
+        delimiter = ","
+    else:
+        data_lines = all_lines
+        delimiter = "\t"
 
-        # Use the shared resolver for case-insensitive column lookup.
-        sid_col = _resolve_column(fieldnames, sample_id_col)
-        if sid_col is None:
-            sid_col = fieldnames[0]
+    reader = csv.DictReader(io.StringIO("".join(data_lines)), delimiter=delimiter)
+    fieldnames: list[str] = list(reader.fieldnames or [])
+    if not fieldnames:
+        return [], {}
 
-        other_columns = [c for c in fieldnames if c != sid_col]
+    # Use the shared resolver for case-insensitive column lookup.
+    sid_col = _resolve_column(fieldnames, sample_id_col)
+    if sid_col is None:
+        sid_col = fieldnames[0]
 
-        raw: dict[str, dict[str, str]] = {}
-        for row in reader:
-            sid = row.get(sid_col, "").strip()
-            if sid:
-                raw[sid] = {c: row.get(c, "") for c in other_columns}
+    other_columns = [c for c in fieldnames if c != sid_col]
+
+    raw: dict[str, dict[str, str]] = {}
+    for row in reader:
+        sid = row.get(sid_col, "").strip()
+        if sid:
+            raw[sid] = {c: row.get(c, "") for c in other_columns}
 
     return other_columns, raw
 
