@@ -58,14 +58,19 @@ def compute_sample_metrics(
     Returns
     -------
     dict with keys ``SAMPLE``, ``LRR_SD``, ``callrate``,
-    and ``n_markers_used`` (non-NaN marker count per sample).
-    LRR_SD entries are ``None`` for samples with no valid (non-NaN) markers.
+    and ``n_markers_used`` (finite, non-NaN marker count per sample).
+    LRR_SD is computed over finite values only (NaN and inf excluded).
+    LRR_SD entries are ``None`` for samples with no finite markers.
     """
     n_markers = lrr.shape[0]
-    n_valid = np.sum(~np.isnan(lrr), axis=0)  # non-NaN count per sample
-    # np.nanstd returns nan when all values are NaN; replace those with None
-    # so they serialise as JSON null rather than raising ValueError.
-    raw_sd = np.nanstd(lrr, axis=0)
+    # Use np.isfinite to exclude both NaN and inf values.
+    # np.nanstd returns NaN when a column contains inf (inf - mean = NaN),
+    # even if most values are finite.  Replacing non-finite values with NaN
+    # first ensures nanstd only operates on valid LRR measurements.
+    finite_mask = np.isfinite(lrr)
+    n_valid = np.sum(finite_mask, axis=0)  # finite count per sample
+    lrr_finite = np.where(finite_mask, lrr, np.nan)
+    raw_sd = np.nanstd(lrr_finite, axis=0)
     lrr_sd: list[float | None] = [
         None if np.isnan(v) else float(v) for v in raw_sd
     ]

@@ -46,8 +46,13 @@ def classify_samples(
     hq_mask : ndarray of bool, shape (n_samples,)
     """
     n_markers = lrr.shape[0]
-    sd = np.nanstd(lrr, axis=0)
-    cr = np.sum(~np.isnan(lrr), axis=0) / n_markers
+    # Use isfinite to exclude both NaN and inf values.  np.nanstd returns NaN
+    # when a column contains inf (inf - mean = NaN), and inf values should not
+    # count toward the call rate since they are not valid measurements.
+    finite_mask = np.isfinite(lrr)
+    lrr_finite = np.where(finite_mask, lrr, np.nan)
+    sd = np.nanstd(lrr_finite, axis=0)
+    cr = np.sum(finite_mask, axis=0) / n_markers
     return (sd <= max_lrr_sd) & (cr >= min_call_rate)
 
 

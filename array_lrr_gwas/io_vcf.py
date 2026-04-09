@@ -59,7 +59,10 @@ def read_lrr(
             val = rec.samples[sname].get("LRR")
             if val is not None:
                 try:
-                    row[i] = float(val)
+                    v = float(val)
+                    if np.isfinite(v):
+                        row[i] = v
+                    # Non-finite (inf/-inf) treated as missing → leave as np.nan
                 except (TypeError, ValueError):
                     pass
         lrr_rows.append(row)

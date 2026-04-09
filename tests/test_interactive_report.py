@@ -97,6 +97,44 @@ class TestComputeSampleMetrics:
         decoded = json.loads(encoded)
         assert decoded["LRR_SD"][3] is None
 
+    def test_inf_values_treated_as_missing(self, sample_ids):
+        """Samples with inf LRR values must not produce NaN LRR_SD.
+
+        np.nanstd returns NaN when a column contains inf (inf - mean = NaN),
+        even if the majority of values are valid finite floats.  inf values are
+        treated the same as NaN: excluded from both LRR_SD and callrate.
+        """
+        import json
+        from array_lrr_gwas.interactive_report import compute_sample_metrics
+
+        rng = np.random.default_rng(7)
+        lrr = rng.standard_normal((1000, 15)) * 0.2
+        # Sample 5: inject a few inf values (simulates data-quality artefacts
+        # or specific BCF float encodings returned by pysam as inf)
+        lrr[:5, 5] = np.inf
+        # Sample 7: mix of NaN and inf
+        lrr[:3, 7] = np.nan
+        lrr[3:6, 7] = np.inf
+
+        m = compute_sample_metrics(lrr, sample_ids)
+
+        # LRR_SD must be a valid float (not NaN or None) for both affected samples
+        assert m["LRR_SD"][5] is not None
+        assert np.isfinite(m["LRR_SD"][5])
+        assert m["LRR_SD"][7] is not None
+        assert np.isfinite(m["LRR_SD"][7])
+
+        # n_markers_used must exclude both NaN and inf values
+        assert m["n_markers_used"][5] == 1000 - 5   # 5 inf excluded
+        assert m["n_markers_used"][7] == 1000 - 6   # 3 NaN + 3 inf excluded
+
+        # callrate must also reflect only finite values
+        assert m["callrate"][5] == pytest.approx((1000 - 5) / 1000, abs=1e-9)
+        assert m["callrate"][7] == pytest.approx((1000 - 6) / 1000, abs=1e-9)
+
+        # Result must be JSON-serialisable with allow_nan=False
+        json.dumps({"LRR_SD": m["LRR_SD"]}, allow_nan=False)
+
 
 # ---------------------------------------------------------------------------
 # write_sample_metrics_tsv

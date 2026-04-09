@@ -45,7 +45,8 @@ def call_rate_mask(
     if lrr.ndim != 2:
         raise ValueError("lrr must be a 2-D array (markers × samples)")
     n_samples = lrr.shape[1]
-    present = np.sum(~np.isnan(lrr), axis=1)
+    # Count finite values per marker; inf is not a valid measurement.
+    present = np.sum(np.isfinite(lrr), axis=1)
     return (present / n_samples) >= min_call_rate
 
 
