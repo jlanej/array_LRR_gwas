@@ -846,6 +846,7 @@ def generate_report(
     metrics_tsv_path: str | Path | None = None,
     sample_sheet_path: str | Path | None = None,
     illumina_sample_sheet_path: str | Path | None = None,
+    illumina_sample_id_col: str = "Sample_Group",
     skip_umap: bool = False,
 ) -> Path:
     """Generate an interactive HTML diagnostic report.
@@ -887,6 +888,13 @@ def generate_report(
         *sample_sheet_path*.  Both sheets may be supplied at the same time.
         On column-name collision the compiled sheet takes precedence and the
         Illumina column is suffixed with ``_illumina``.
+    illumina_sample_id_col : str
+        Column in the Illumina SampleSheet.csv ``[Data]`` section whose values
+        match the sample IDs in *samples*.  Defaults to ``"Sample_Group"``
+        because Illumina sheets typically store the short population/sample
+        identifier (e.g. ``NA19152``) in that column while ``Sample_ID``
+        holds a longer Illumina-internal barcode string.  If the column is not
+        found the first column of the ``[Data]`` section is used as a fallback.
     skip_umap : bool
         If ``True``, skip the UMAP computation (useful when umap-learn is
         not installed or the dataset is very small).
@@ -953,9 +961,9 @@ def generate_report(
     # 5. Sample-sheet columns (compiled TSV and/or Illumina CSV, both optional)
     sheet_data: dict | None = None
 
-    def _try_parse(path: "str | Path", label: str) -> "dict | None":
+    def _try_parse(path: "str | Path", label: str, *, sample_id_col: str = "sample_id") -> "dict | None":
         try:
-            result = _parse_sample_sheet_columns(path, samples)
+            result = _parse_sample_sheet_columns(path, samples, sample_id_col=sample_id_col)
             logger.info(
                 "Loaded %d %s columns for report visualisation",
                 len(result.get("columns", [])),
@@ -972,7 +980,7 @@ def generate_report(
             return None
 
     compiled = _try_parse(sample_sheet_path, "compiled sample sheet") if sample_sheet_path is not None else None
-    illumina = _try_parse(illumina_sample_sheet_path, "Illumina sample sheet") if illumina_sample_sheet_path is not None else None
+    illumina = _try_parse(illumina_sample_sheet_path, "Illumina sample sheet", sample_id_col=illumina_sample_id_col) if illumina_sample_sheet_path is not None else None
 
     if compiled is not None and illumina is not None:
         sheet_data = _merge_sheet_data(compiled, illumina)
