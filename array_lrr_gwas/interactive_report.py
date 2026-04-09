@@ -26,7 +26,6 @@ programmatically::
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 import math
@@ -39,6 +38,7 @@ from numpy.typing import NDArray
 
 from array_lrr_gwas.select_k import _mp_upper_edge
 from array_lrr_gwas.subsetting import autosome_mask
+from array_lrr_gwas.sample_sheet import read_all_raw_rows
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,11 @@ def _parse_sample_sheet_columns(
     sample_id_col: str = "sample_id",
 ) -> dict[str, Any]:
     """Read all columns from a compiled sample sheet, aligned to *samples*.
+
+    Delegates raw CSV parsing to
+    :func:`~array_lrr_gwas.sample_sheet.read_all_raw_rows` (which reuses
+    the shared :func:`~array_lrr_gwas.sample_sheet._resolve_column` helper),
+    so there is no duplication of sheet-reading logic here.
 
     Parameters
     ----------
@@ -73,33 +78,13 @@ def _parse_sample_sheet_columns(
     * ``numeric`` – parallel list of bool, ``True`` when the column
       contains predominantly numeric values.
     * ``data`` – dict mapping column name → per-sample list.
-      Numeric columns: ``float | None`` (``None`` for missing/non-numeric).
+      Numeric columns: ``float | None`` (``None`` for missing/non-numeric
+      or non-finite values).
       Categorical columns: ``str`` (empty string for missing).
     """
-    path = Path(path)
-    with path.open(newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh, delimiter="\t")
-        fieldnames: list[str] = list(reader.fieldnames or [])
-        if not fieldnames:
-            return {"columns": [], "numeric": [], "data": {}}
-
-        # Case-insensitive resolution of the sample-ID column.
-        sid_col: str | None = None
-        for fn in fieldnames:
-            if fn.lower() == sample_id_col.lower():
-                sid_col = fn
-                break
-        if sid_col is None:
-            sid_col = fieldnames[0]
-
-        other_cols = [c for c in fieldnames if c != sid_col]
-
-        # Read all rows into a dict keyed by sample ID.
-        raw: dict[str, dict[str, str]] = {}
-        for row in reader:
-            sid = row.get(sid_col, "").strip()
-            if sid:
-                raw[sid] = {c: row.get(c, "") for c in other_cols}
+    other_cols, raw = read_all_raw_rows(path, sample_id_col=sample_id_col)
+    if not other_cols:
+        return {"columns": [], "numeric": [], "data": {}}
 
     # Determine numeric vs categorical per column.
     numeric_flags: list[bool] = []

@@ -9,6 +9,7 @@ from array_lrr_gwas.sample_sheet import (
     read_sample_sheet,
     align_samples,
     classify_samples_from_sheet,
+    read_all_raw_rows,
 )
 
 
@@ -168,3 +169,46 @@ class TestClassifySamplesFromSheet:
         tsv.write_text("")
         with pytest.raises(ValueError, match="empty"):
             classify_samples_from_sheet(tsv)
+
+
+class TestReadAllRawRows:
+    """Tests for ``read_all_raw_rows``."""
+
+    def test_basic(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("sample_id\tcall_rate\tgender\nS1\t0.99\tM\nS2\t0.97\tF\n")
+        cols, raw = read_all_raw_rows(tsv)
+        assert cols == ["call_rate", "gender"]
+        assert set(raw.keys()) == {"S1", "S2"}
+        assert raw["S1"]["call_rate"] == "0.99"
+        assert raw["S2"]["gender"] == "F"
+
+    def test_case_insensitive_sample_id(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("Sample_ID\tcall_rate\nS1\t0.99\n")
+        # Default sample_id_col='sample_id' should resolve to 'Sample_ID'
+        cols, raw = read_all_raw_rows(tsv)
+        assert "Sample_ID" not in cols
+        assert "S1" in raw
+
+    def test_missing_rows_excluded(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("sample_id\tcall_rate\n\t0.99\nS1\t0.98\n")
+        cols, raw = read_all_raw_rows(tsv)
+        # Empty sample ID should be skipped
+        assert "" not in raw
+        assert "S1" in raw
+
+    def test_empty_file_returns_empty(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("")
+        cols, raw = read_all_raw_rows(tsv)
+        assert cols == []
+        assert raw == {}
+
+    def test_header_only_returns_empty_raw(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text("sample_id\tcall_rate\n")
+        cols, raw = read_all_raw_rows(tsv)
+        assert cols == ["call_rate"]
+        assert raw == {}

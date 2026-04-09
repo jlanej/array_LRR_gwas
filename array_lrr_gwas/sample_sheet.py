@@ -185,6 +185,57 @@ def align_samples(
     return aligned
 
 
+def read_all_raw_rows(
+    path: str | Path,
+    *,
+    sample_id_col: str = "sample_id",
+) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """Read every row of a compiled sample sheet into a raw string dict.
+
+    This is the low-level primitive used by
+    :func:`~array_lrr_gwas.interactive_report._parse_sample_sheet_columns`
+    to load all columns generically without assuming a fixed schema.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a tab-separated compiled sample sheet.
+    sample_id_col : str
+        Column name containing sample identifiers (case-insensitive lookup).
+        Defaults to ``"sample_id"``.
+
+    Returns
+    -------
+    other_columns : list of str
+        Ordered list of column names present in the sheet, excluding the
+        resolved sample-ID column.
+    raw : dict mapping sample ID → dict of {column_name: raw_string_value}
+        Row data for every sample found in the sheet.  Values are raw
+        (unparsed) strings; missing values are empty strings.
+    """
+    path = Path(path)
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        fieldnames: list[str] = list(reader.fieldnames or [])
+        if not fieldnames:
+            return [], {}
+
+        # Use the shared resolver for case-insensitive column lookup.
+        sid_col = _resolve_column(fieldnames, sample_id_col)
+        if sid_col is None:
+            sid_col = fieldnames[0]
+
+        other_columns = [c for c in fieldnames if c != sid_col]
+
+        raw: dict[str, dict[str, str]] = {}
+        for row in reader:
+            sid = row.get(sid_col, "").strip()
+            if sid:
+                raw[sid] = {c: row.get(c, "") for c in other_columns}
+
+    return other_columns, raw
+
+
 def classify_samples_from_sheet(
     path: str | Path,
     *,
