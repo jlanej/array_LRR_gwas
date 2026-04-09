@@ -63,7 +63,8 @@ class TestCorrectChunkQr:
 
         n_markers = 20
         Y = rng.normal(0, 1, (n_markers, n))
-        corrected = _correct_chunk_qr(Y, Q, X)
+        corrected, n_skip = _correct_chunk_qr(Y, Q, X)
+        assert n_skip == 0
 
         # Each corrected row should be orthogonal to every column of Q
         for i in range(n_markers):
@@ -75,7 +76,7 @@ class TestCorrectChunkQr:
         Vt = rng.normal(0, 1, (2, 15))
         Q, _, X = qr_precompute(Vt)
         chunk = rng.normal(0, 1, (10, 15))
-        corrected = _correct_chunk_qr(chunk, Q, X)
+        corrected, _ = _correct_chunk_qr(chunk, Q, X)
         assert corrected.shape == (10, 15)
 
     def test_nan_marker_corrected_on_valid(self):
@@ -88,7 +89,7 @@ class TestCorrectChunkQr:
         chunk = rng.normal(0, 1, (5, n))
         chunk[0, :3] = np.nan  # first marker has 3 missing
 
-        corrected = _correct_chunk_qr(chunk, Q, X)
+        corrected, _ = _correct_chunk_qr(chunk, Q, X)
         # NaN positions remain NaN
         assert np.all(np.isnan(corrected[0, :3]))
         # Valid positions are corrected (not identical to input)
@@ -104,8 +105,9 @@ class TestCorrectChunkQr:
         chunk = rng.normal(0, 1, (3, n))
         chunk[1, :] = np.nan
 
-        corrected = _correct_chunk_qr(chunk, Q, X)
+        corrected, n_skip = _correct_chunk_qr(chunk, Q, X)
         assert np.all(np.isnan(corrected[1]))
+        assert n_skip == 1
 
     def test_mostly_nan_marker_skipped(self):
         """A marker below the min_valid_frac threshold is left uncorrected."""
@@ -118,9 +120,10 @@ class TestCorrectChunkQr:
         # Leave only 4 valid out of 20 (20% < 50% default)
         chunk[0, 4:] = np.nan
 
-        corrected = _correct_chunk_qr(chunk, Q, X, min_valid_frac=0.5)
+        corrected, n_skip = _correct_chunk_qr(chunk, Q, X, min_valid_frac=0.5)
         # Marker 0 should be unchanged (skipped)
         np.testing.assert_array_equal(corrected[0], chunk[0])
+        assert n_skip == 1
 
     def test_inf_values_handled(self):
         """Markers containing inf are handled via the slow path."""
@@ -133,12 +136,17 @@ class TestCorrectChunkQr:
         chunk[0, 0] = np.inf
         chunk[1, 5] = -np.inf
 
-        corrected = _correct_chunk_qr(chunk, Q, X, min_valid_frac=0.1)
+        corrected, n_skip = _correct_chunk_qr(chunk, Q, X, min_valid_frac=0.1)
+        assert n_skip == 0
         # inf positions remain inf
         assert np.isinf(corrected[0, 0])
         assert np.isinf(corrected[1, 5])
-        # Valid positions of markers with inf should still be corrected
-        assert not np.allclose(corrected[0, 1:], chunk[0, 1:])
+        # Valid positions should be orthogonal to Q (like the fast path)
+        valid_0 = np.isfinite(chunk[0])
+        X_v0 = X[valid_0]
+        Q_v0, _ = np.linalg.qr(X_v0, mode="reduced")
+        dots_0 = Q_v0.T @ corrected[0, valid_0]
+        np.testing.assert_allclose(dots_0, 0.0, atol=1e-10)
 
     def test_pure_batch_fully_removed(self):
         """If y = X @ beta exactly, the corrected residual is zero."""
@@ -149,7 +157,8 @@ class TestCorrectChunkQr:
 
         beta = rng.normal(0, 1, (5, k))  # 5 markers
         Y = beta @ X.T  # (5, n) – pure batch
-        corrected = _correct_chunk_qr(Y, Q, X)
+        corrected, n_skip = _correct_chunk_qr(Y, Q, X)
+        assert n_skip == 0
         np.testing.assert_allclose(corrected, 0.0, atol=1e-10)
 
 

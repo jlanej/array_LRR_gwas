@@ -185,10 +185,14 @@ def _correct_chunk_qr(
     Returns
     -------
     corrected : ndarray, shape (n_chunk, n_samples)
+    n_skipped : int
+        Number of markers that were left uncorrected due to insufficient
+        valid data.
     """
     n_chunk, n_samples = chunk.shape
     k = Q.shape[1]
     corrected = chunk.copy()
+    n_skipped = 0
 
     # Identify markers with / without non-finite values (NaN or inf)
     has_nonfinite = ~np.all(np.isfinite(chunk), axis=1)
@@ -210,6 +214,7 @@ def _correct_chunk_qr(
 
         if n_valid < min_valid:
             # Not enough data – leave uncorrected
+            n_skipped += 1
             continue
 
         X_v = X[valid]
@@ -217,7 +222,7 @@ def _correct_chunk_qr(
         beta, _, _, _ = np.linalg.lstsq(X_v, y_v, rcond=None)
         corrected[idx, valid] = y_v - X_v @ beta
 
-    return corrected
+    return corrected, n_skipped
 
 
 def residualize_qr(
@@ -250,7 +255,7 @@ def residualize_qr(
     -------
     corrected : ndarray, shape (n_markers, n_samples)
     """
-    Q, _R, X = qr_precompute(Vt_k)
+    Q, R, X = qr_precompute(Vt_k)
     n_markers = lrr.shape[0]
     corrected = np.empty_like(lrr)
 
@@ -258,17 +263,11 @@ def residualize_qr(
     for start in range(0, n_markers, chunk_size):
         end = min(start + chunk_size, n_markers)
         chunk = lrr[start:end]
-        corrected[start:end] = _correct_chunk_qr(
+        corrected_chunk, chunk_skipped = _correct_chunk_qr(
             chunk, Q, X, min_valid_frac=min_valid_frac,
         )
-        # Count markers that were skipped (unchanged from input)
-        chunk_has_nonfinite = ~np.all(np.isfinite(chunk), axis=1)
-        k = Q.shape[1]
-        min_valid = max(k + 1, int(np.ceil(min_valid_frac * chunk.shape[1])))
-        for local_idx in np.flatnonzero(chunk_has_nonfinite):
-            n_valid = int(np.isfinite(chunk[local_idx]).sum())
-            if n_valid < min_valid:
-                n_skipped += 1
+        corrected[start:end] = corrected_chunk
+        n_skipped += chunk_skipped
 
     if n_skipped > 0:
         logger.info(
