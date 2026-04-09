@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 
 from array_lrr_gwas.decomposition import decompose, DecompCallable
 from array_lrr_gwas.select_k import select_k_mp
-from array_lrr_gwas.subsetting import subset_markers
+from array_lrr_gwas.subsetting import autosome_mask, subset_markers
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +46,13 @@ def classify_samples(
     hq_mask : ndarray of bool, shape (n_samples,)
     """
     n_markers = lrr.shape[0]
-    sd = np.nanstd(lrr, axis=0)
-    cr = np.sum(~np.isnan(lrr), axis=0) / n_markers
+    # Use isfinite to exclude both NaN and inf values.  np.nanstd returns NaN
+    # when a column contains inf (inf - mean = NaN), and inf values should not
+    # count toward the call rate since they are not valid measurements.
+    finite_mask = np.isfinite(lrr)
+    lrr_finite = np.where(finite_mask, lrr, np.nan)
+    sd = np.nanstd(lrr_finite, axis=0)
+    cr = np.sum(finite_mask, axis=0) / n_markers
     return (sd <= max_lrr_sd) & (cr >= min_call_rate)
 
 
@@ -197,9 +202,16 @@ def correct_lrr(
         ``n_hq_samples``, ``n_markers_used``, ``backend``
             Scalar summary statistics.
     """
-    # 1. Classify samples
+    # 1. Classify samples using only autosomal markers for LRR_SD and callrate.
+    # Non-autosomal (sex chromosome, MT) intensity signals encode biological sex
+    # rather than technical noise and must not contribute to sample QC metrics.
+    if chromosomes is not None:
+        auto_m = autosome_mask(chromosomes)
+        lrr_for_qc = lrr[auto_m]
+    else:
+        lrr_for_qc = lrr
     hq_mask = classify_samples(
-        lrr, max_lrr_sd=max_lrr_sd, min_call_rate=min_sample_call_rate
+        lrr_for_qc, max_lrr_sd=max_lrr_sd, min_call_rate=min_sample_call_rate
     )
     n_hq = int(np.sum(hq_mask))
     n_total_samples = lrr.shape[1]

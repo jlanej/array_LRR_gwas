@@ -30,12 +30,13 @@ import json
 import logging
 import textwrap
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
 from array_lrr_gwas.select_k import _mp_upper_edge
+from array_lrr_gwas.subsetting import autosome_mask
 
 logger = logging.getLogger(__name__)
 
@@ -47,25 +48,49 @@ logger = logging.getLogger(__name__)
 def compute_sample_metrics(
     lrr: NDArray[np.floating],
     samples: list[str],
+    chromosomes: NDArray | Sequence[str] | None = None,
 ) -> dict[str, list]:
-    """Compute per-sample LRR_SD and callrate.
+    """Compute per-sample LRR_SD and callrate using autosomal markers only.
 
     Parameters
     ----------
     lrr : ndarray, shape (n_markers, n_samples)
     samples : list of str
+    chromosomes : array-like of str, shape (n_markers,), optional
+        Chromosome label for each marker.  When provided, only autosomal
+        markers are used for LRR_SD and callrate.  Non-autosomal markers
+        (X, Y, MT) carry sex-linked intensity signals that inflate or
+        distort per-sample QC metrics.
 
     Returns
     -------
-    dict with keys ``SAMPLE``, ``LRR_SD``, ``callrate``.
+    dict with keys ``SAMPLE``, ``LRR_SD``, ``callrate``,
+    and ``n_markers_used`` (autosomal finite marker count per sample).
+    LRR_SD is computed over autosomal finite values only (NaN and inf excluded).
+    LRR_SD entries are ``None`` for samples with no finite autosomal markers.
     """
+    # Restrict to autosomal markers when chromosome labels are available.
+    if chromosomes is not None:
+        auto_m = autosome_mask(chromosomes)
+        lrr = lrr[auto_m]
     n_markers = lrr.shape[0]
-    lrr_sd = np.nanstd(lrr, axis=0).tolist()
-    callrate = (np.sum(~np.isnan(lrr), axis=0) / n_markers).tolist()
+    # Use np.isfinite to exclude both NaN and inf values.
+    # np.nanstd returns NaN when a column contains inf (inf - mean = NaN),
+    # even if most values are finite.  Replacing non-finite values with NaN
+    # first ensures nanstd only operates on valid LRR measurements.
+    finite_mask = np.isfinite(lrr)
+    n_valid = np.sum(finite_mask, axis=0)  # finite count per sample
+    lrr_finite = np.where(finite_mask, lrr, np.nan)
+    raw_sd = np.nanstd(lrr_finite, axis=0)
+    lrr_sd: list[float | None] = [
+        None if np.isnan(v) else float(v) for v in raw_sd
+    ]
+    callrate = (n_valid / n_markers).tolist()
     return {
         "SAMPLE": list(samples),
         "LRR_SD": lrr_sd,
         "callrate": callrate,
+        "n_markers_used": n_valid.tolist(),
     }
 
 
@@ -85,11 +110,20 @@ def write_sample_metrics_tsv(
     Path to the written file.
     """
     path = Path(path)
+    n_markers_used = metrics.get("n_markers_used")
+    has_n_markers = n_markers_used is not None
+    header = "SAMPLE\tLRR_SD\tcallrate"
+    if has_n_markers:
+        header += "\tn_markers_used"
     with path.open("w", encoding="utf-8") as fh:
-        fh.write("SAMPLE\tLRR_SD\tcallrate\n")
+        fh.write(header + "\n")
         for i, sample in enumerate(metrics["SAMPLE"]):
-            fh.write(f"{sample}\t{metrics['LRR_SD'][i]:.6g}\t"
-                     f"{metrics['callrate'][i]:.6g}\n")
+            lrr_sd_val = metrics["LRR_SD"][i]
+            lrr_sd_str = "nan" if lrr_sd_val is None else f"{lrr_sd_val:.6g}"
+            line = f"{sample}\t{lrr_sd_str}\t{metrics['callrate'][i]:.6g}"
+            if has_n_markers:
+                line += f"\t{n_markers_used[i]}"
+            fh.write(line + "\n")
     return path
 
 
@@ -347,7 +381,9 @@ def _build_html(
     function buildHoverText() {
         return DATA.scatter.samples.map((s, i) => {
             const hq = DATA.scatter.hq[i] ? "HQ" : "LQ";
-            return s + "<br>LRR_SD=" + DATA.scatter.LRR_SD[i].toFixed(4) +
+            const lrrSd = DATA.scatter.LRR_SD[i];
+            const lrrSdStr = lrrSd === null ? "N/A" : lrrSd.toFixed(4);
+            return s + "<br>LRR_SD=" + lrrSdStr +
                    "<br>callrate=" + DATA.scatter.callrate[i].toFixed(4) +
                    "<br>" + hq;
         });
@@ -474,6 +510,7 @@ def generate_report(
     lrr: NDArray[np.floating],
     output_path: str | Path,
     *,
+    chromosomes: NDArray | Sequence[str] | None = None,
     metrics_tsv_path: str | Path | None = None,
     skip_umap: bool = False,
 ) -> Path:
@@ -491,6 +528,9 @@ def generate_report(
         Original (uncorrected) LRR matrix.
     output_path : path-like
         Where to write the HTML file.
+    chromosomes : array-like of str, shape (n_markers,), optional
+        Chromosome label for each marker.  When provided, only autosomal
+        markers are used for LRR_SD and callrate in the sample metrics.
     metrics_tsv_path : path-like or None
         If provided, sample metrics (LRR_SD, callrate) are also saved to this TSV.
     skip_umap : bool
@@ -509,8 +549,8 @@ def generate_report(
     n_hq = int(info["n_hq_samples"])
     n_markers = int(info["n_markers_used"])
 
-    # 1. Compute sample metrics
-    metrics = compute_sample_metrics(lrr, samples)
+    # 1. Compute sample metrics (autosomal markers only when chromosomes provided)
+    metrics = compute_sample_metrics(lrr, samples, chromosomes=chromosomes)
     if metrics_tsv_path is not None:
         write_sample_metrics_tsv(metrics, metrics_tsv_path)
         logger.info("Wrote sample metrics: %s", metrics_tsv_path)

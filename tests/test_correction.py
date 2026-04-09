@@ -231,3 +231,32 @@ class TestCorrectLrr:
             min_var=0.0,
         )
         assert info_none["n_markers_used"] == info_no_arg["n_markers_used"]
+
+    def test_sample_classification_uses_autosomal_only(self, synthetic_lrr):
+        """Sample HQ/LQ classification must ignore non-autosomal markers.
+
+        If a sex-chromosome marker has inf/-inf LRR, classify_samples must
+        not see it — only the autosomal subset is passed for QC.
+        """
+        n_markers, n_samples = synthetic_lrr.shape
+        # Build chromosome labels: all autosomes except last 5 rows (chrY)
+        chroms = np.array(["chr1"] * (n_markers - 5) + ["chrY"] * 5)
+
+        # Inject -inf into every chrY marker for every sample.
+        # Without autosomal filtering classify_samples would see inf and
+        # np.nanstd would return nan → no HQ samples → ValueError.
+        lrr_with_inf = synthetic_lrr.copy()
+        lrr_with_inf[-5:, :] = np.inf
+
+        corrected, info = correct_lrr(
+            lrr_with_inf,
+            chromosomes=chroms,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+        # Correction must succeed and output shape must match input
+        assert corrected.shape == lrr_with_inf.shape
+        assert info["n_hq_samples"] > 0
