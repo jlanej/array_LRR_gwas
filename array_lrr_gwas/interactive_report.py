@@ -655,6 +655,36 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
+def _merge_sheet_data(primary: dict, secondary: dict) -> dict:
+    """Merge two sheet-data dicts, with *primary* taking precedence on name collisions.
+
+    Parameters
+    ----------
+    primary, secondary : dict
+        Dicts as returned by :func:`_parse_sample_sheet_columns`, each with
+        keys ``columns`` (list of str), ``numeric`` (list of bool), and
+        ``data`` (dict column→list).
+
+    Returns
+    -------
+    dict
+        Merged sheet-data dict.  If a column name exists in both sheets the
+        secondary copy is suffixed with ``_illumina`` to avoid shadowing.
+    """
+    primary_cols: set[str] = set(primary.get("columns", []))
+    merged_columns: list[str] = list(primary.get("columns", []))
+    merged_numeric: list[bool] = list(primary.get("numeric", []))
+    merged_data: dict = dict(primary.get("data", {}))
+
+    for col, is_num in zip(secondary.get("columns", []), secondary.get("numeric", [])):
+        dest = col if col not in primary_cols else f"{col}_illumina"
+        merged_columns.append(dest)
+        merged_numeric.append(is_num)
+        merged_data[dest] = secondary["data"][col]
+
+    return {"columns": merged_columns, "numeric": merged_numeric, "data": merged_data}
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -668,6 +698,7 @@ def generate_report(
     chromosomes: NDArray | Sequence[str] | None = None,
     metrics_tsv_path: str | Path | None = None,
     sample_sheet_path: str | Path | None = None,
+    illumina_sample_sheet_path: str | Path | None = None,
     skip_umap: bool = False,
 ) -> Path:
     """Generate an interactive HTML diagnostic report.
@@ -693,6 +724,13 @@ def generate_report(
         Optional path to a compiled sample sheet TSV.  When provided, all
         columns are parsed and embedded in the report for use as colour
         overlays in the PC scatter and UMAP plots.
+    illumina_sample_sheet_path : path-like or None
+        Optional path to an Illumina-format SampleSheet.csv (comma-separated
+        with ``[Header]``/``[Data]`` section markers).  Columns from the
+        ``[Data]`` section are embedded alongside any columns from
+        *sample_sheet_path*.  Both sheets may be supplied at the same time.
+        On column-name collision the compiled sheet takes precedence and the
+        Illumina column is suffixed with ``_illumina``.
     skip_umap : bool
         If ``True``, skip the UMAP computation (useful when umap-learn is
         not installed or the dataset is very small).
@@ -738,21 +776,36 @@ def generate_report(
         except Exception:
             logger.warning("UMAP computation failed; skipping.", exc_info=True)
 
-    # 5. Sample-sheet columns (optional)
+    # 5. Sample-sheet columns (compiled TSV and/or Illumina CSV, both optional)
     sheet_data: dict | None = None
-    if sample_sheet_path is not None:
+
+    def _try_parse(path: "str | Path", label: str) -> "dict | None":
         try:
-            sheet_data = _parse_sample_sheet_columns(sample_sheet_path, samples)
+            result = _parse_sample_sheet_columns(path, samples)
             logger.info(
-                "Loaded %d sample-sheet columns for report visualisation",
-                len(sheet_data.get("columns", [])),
+                "Loaded %d %s columns for report visualisation",
+                len(result.get("columns", [])),
+                label,
             )
+            return result
         except Exception:
             logger.warning(
-                "Failed to parse sample sheet %s for report; skipping.",
-                sample_sheet_path,
+                "Failed to parse %s %s for report; skipping.",
+                label,
+                path,
                 exc_info=True,
             )
+            return None
+
+    compiled = _try_parse(sample_sheet_path, "compiled sample sheet") if sample_sheet_path is not None else None
+    illumina = _try_parse(illumina_sample_sheet_path, "Illumina sample sheet") if illumina_sample_sheet_path is not None else None
+
+    if compiled is not None and illumina is not None:
+        sheet_data = _merge_sheet_data(compiled, illumina)
+    elif compiled is not None:
+        sheet_data = compiled
+    elif illumina is not None:
+        sheet_data = illumina
 
     # 6. Build HTML
     html = _build_html(scree, scatter, umap_data, sheet_data)

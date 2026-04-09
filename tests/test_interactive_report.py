@@ -525,6 +525,161 @@ class TestGenerateReportWithSampleSheet:
         assert '"sheet": null' in html
 
 
+class TestMergeSheetData:
+    """Tests for ``_merge_sheet_data``."""
+
+    def _make_sheet(self, cols, numeric, data):
+        return {"columns": cols, "numeric": numeric, "data": data}
+
+    def test_no_collision(self):
+        from array_lrr_gwas.interactive_report import _merge_sheet_data
+
+        primary = self._make_sheet(["a"], [True], {"a": [1.0]})
+        secondary = self._make_sheet(["b"], [False], {"b": ["X"]})
+        merged = _merge_sheet_data(primary, secondary)
+        assert merged["columns"] == ["a", "b"]
+        assert merged["numeric"] == [True, False]
+        assert merged["data"] == {"a": [1.0], "b": ["X"]}
+
+    def test_collision_suffixes_secondary(self):
+        from array_lrr_gwas.interactive_report import _merge_sheet_data
+
+        primary = self._make_sheet(["Gender"], [False], {"Gender": ["F"]})
+        secondary = self._make_sheet(["Gender", "Plate"], [False, False], {"Gender": ["M"], "Plate": ["P1"]})
+        merged = _merge_sheet_data(primary, secondary)
+        assert "Gender" in merged["columns"]
+        assert "Gender_illumina" in merged["columns"]
+        assert "Plate" in merged["columns"]
+        assert merged["data"]["Gender"] == ["F"]
+        assert merged["data"]["Gender_illumina"] == ["M"]
+
+    def test_primary_empty(self):
+        from array_lrr_gwas.interactive_report import _merge_sheet_data
+
+        primary = self._make_sheet([], [], {})
+        secondary = self._make_sheet(["x"], [True], {"x": [1.0]})
+        merged = _merge_sheet_data(primary, secondary)
+        assert merged["columns"] == ["x"]
+        assert merged["data"]["x"] == [1.0]
+
+
+class TestGenerateReportWithIlluminaSheet:
+    """generate_report with --illumina-sample-sheet (and combined)."""
+
+    def _make_info(self, n_samples: int = 5, k: int = 2) -> dict:
+        rng = np.random.default_rng(11)
+        return {
+            "k": k,
+            "singular_values": np.array([5.0, 2.0]),
+            "sample_scores": rng.standard_normal((k, n_samples)),
+            "hq_sample_mask": np.ones(n_samples, dtype=bool),
+            "n_hq_samples": n_samples,
+            "n_markers_used": 100,
+        }
+
+    def _make_illumina_sheet(self, tmp_path, samples):
+        content = (
+            "[Header]\nProject,Test\n[Data]\n"
+            "Sample_ID,Gender,Sample_Plate\n"
+        )
+        for i, sid in enumerate(samples):
+            content += f"{sid},{'MF'[i % 2]},Plate{i // 2 + 1}\n"
+        p = tmp_path / "SampleSheet.csv"
+        p.write_text(content)
+        return p
+
+    def test_illumina_only_embeds_columns(self, tmp_path):
+        from array_lrr_gwas.interactive_report import generate_report
+
+        samples = [f"S{i}" for i in range(5)]
+        illum = self._make_illumina_sheet(tmp_path, samples)
+        rng = np.random.default_rng(11)
+        lrr = rng.standard_normal((50, 5)) * 0.2
+        out = generate_report(
+            info=self._make_info(),
+            samples=samples,
+            lrr=lrr,
+            output_path=tmp_path / "rep_illum.html",
+            illumina_sample_sheet_path=illum,
+            skip_umap=True,
+        )
+        html = out.read_text()
+        assert '"sheet"' in html
+        assert '"Gender"' in html
+        assert '"Sample_Plate"' in html
+
+    def test_both_sheets_merged(self, tmp_path):
+        from array_lrr_gwas.interactive_report import generate_report
+
+        samples = [f"S{i}" for i in range(5)]
+        illum = self._make_illumina_sheet(tmp_path, samples)
+
+        # Minimal compiled TSV
+        tsv = tmp_path / "compiled.tsv"
+        rows = "sample_id\tcall_rate\n" + "".join(f"{s}\t0.{99 - i}\n" for i, s in enumerate(samples))
+        tsv.write_text(rows)
+
+        rng = np.random.default_rng(11)
+        lrr = rng.standard_normal((50, 5)) * 0.2
+        out = generate_report(
+            info=self._make_info(),
+            samples=samples,
+            lrr=lrr,
+            output_path=tmp_path / "rep_both.html",
+            sample_sheet_path=tsv,
+            illumina_sample_sheet_path=illum,
+            skip_umap=True,
+        )
+        html = out.read_text()
+        # Both sources should be represented
+        assert '"call_rate"' in html
+        assert '"Gender"' in html
+        assert '"Sample_Plate"' in html
+
+    def test_both_sheets_collision_resolved(self, tmp_path):
+        from array_lrr_gwas.interactive_report import generate_report
+
+        samples = ["S0", "S1"]
+        illum = self._make_illumina_sheet(tmp_path, samples)
+
+        # Compiled sheet that also has a 'Gender' column → collision
+        tsv = tmp_path / "compiled.tsv"
+        tsv.write_text("sample_id\tGender\nS0\tFemale\nS1\tMale\n")
+
+        rng = np.random.default_rng(11)
+        lrr = rng.standard_normal((50, 2)) * 0.2
+        out = generate_report(
+            info=self._make_info(n_samples=2),
+            samples=samples,
+            lrr=lrr,
+            output_path=tmp_path / "rep_collision.html",
+            sample_sheet_path=tsv,
+            illumina_sample_sheet_path=illum,
+            skip_umap=True,
+        )
+        html = out.read_text()
+        # Primary 'Gender' and suffixed 'Gender_illumina' both present
+        assert '"Gender"' in html
+        assert '"Gender_illumina"' in html
+
+    def test_invalid_illumina_path_warns_not_crashes(self, tmp_path):
+        from array_lrr_gwas.interactive_report import generate_report
+
+        rng = np.random.default_rng(11)
+        lrr = rng.standard_normal((50, 5)) * 0.2
+        out = generate_report(
+            info=self._make_info(),
+            samples=[f"S{i}" for i in range(5)],
+            lrr=lrr,
+            output_path=tmp_path / "rep_bad_illum.html",
+            illumina_sample_sheet_path=tmp_path / "nonexistent.csv",
+            skip_umap=True,
+        )
+        assert out.exists()
+        html = out.read_text()
+        assert '"sheet": null' in html
+
+
 # ---------------------------------------------------------------------------
 # JSON serialisation edge cases
 # ---------------------------------------------------------------------------
