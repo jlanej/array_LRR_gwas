@@ -3,7 +3,54 @@
 import numpy as np
 import pytest
 
-from array_lrr_gwas.decomposition import decompose, rsvd
+from array_lrr_gwas.decomposition import decompose, rsvd, estimate_rsvd_marker_budget
+
+
+class TestEstimateRsvdMarkerBudget:
+    def test_basic(self):
+        """For 1000 samples, budget should be reasonable and increase with RAM."""
+        b1 = estimate_rsvd_marker_budget(
+            1000, 10, max_ram_bytes=1 * 1024**3
+        )
+        b2 = estimate_rsvd_marker_budget(
+            1000, 10, max_ram_bytes=2 * 1024**3
+        )
+        assert b1 >= 1
+        assert b2 > b1  # more RAM → more markers
+
+    def test_min_one(self):
+        """Always returns at least 1, even with tiny RAM."""
+        b = estimate_rsvd_marker_budget(
+            10000, 50, max_ram_bytes=1
+        )
+        assert b >= 1
+
+    def test_zero_ram(self):
+        """Zero RAM returns 1."""
+        b = estimate_rsvd_marker_budget(
+            1000, 10, max_ram_bytes=0
+        )
+        assert b >= 1
+
+    def test_larger_samples_smaller_budget(self):
+        """More samples → fewer markers for the same RAM."""
+        b_small = estimate_rsvd_marker_budget(
+            100, 10, max_ram_bytes=1 * 1024**3
+        )
+        b_large = estimate_rsvd_marker_budget(
+            10000, 10, max_ram_bytes=1 * 1024**3
+        )
+        assert b_small > b_large
+
+    def test_safety_factor_reduces_budget(self):
+        """Higher safety factor → fewer markers."""
+        b_low = estimate_rsvd_marker_budget(
+            1000, 10, max_ram_bytes=1 * 1024**3, safety_factor=2.0
+        )
+        b_high = estimate_rsvd_marker_budget(
+            1000, 10, max_ram_bytes=1 * 1024**3, safety_factor=3.0
+        )
+        assert b_low > b_high
 
 
 class TestRsvd:

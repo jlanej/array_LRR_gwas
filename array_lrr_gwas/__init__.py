@@ -1,7 +1,7 @@
 """array_lrr_gwas: Batch effect correction and LMM GWAS for array-based LRR values."""
 
-from array_lrr_gwas.subsetting import subset_markers
-from array_lrr_gwas.decomposition import rsvd, decompose
+from array_lrr_gwas.subsetting import subset_markers, subsample_markers_uniform
+from array_lrr_gwas.decomposition import rsvd, decompose, estimate_rsvd_marker_budget
 from array_lrr_gwas.correction import correct_lrr
 from array_lrr_gwas.select_k import select_k_mp, select_k_elbow
 from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
@@ -15,8 +15,10 @@ from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
 __all__ = [
     "subset_markers",
+    "subsample_markers_uniform",
     "rsvd",
     "decompose",
+    "estimate_rsvd_marker_budget",
     "correct_lrr",
     "select_k_mp",
     "select_k_elbow",

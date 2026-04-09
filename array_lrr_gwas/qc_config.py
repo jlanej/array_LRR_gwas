@@ -163,6 +163,10 @@ _DEFAULTS: dict[str, Any] = {
         "backend": "rsvd",
         # Skip genomic-complexity region exclusion if True.
         "no_complexity_filter": False,
+        # Maximum RAM (GB) for the RSVD step; None = no limit.
+        # When the QC-passing marker set would exceed this budget,
+        # markers are deterministically subsampled to fit.
+        "max_ram_gb": None,
     },
     "upstream_qc": {
         # Path to collated_variant_qc.tsv for ancestry-informed marker QC.
@@ -277,6 +281,7 @@ def apply_to_correct_args(
         "k": cfg["correction"]["k"],
         "n_components": cfg["correction"]["n_components"],
         "backend": cfg["correction"]["backend"],
+        "max_ram_gb": cfg["correction"].get("max_ram_gb"),
     }
 
     if cli_overrides:

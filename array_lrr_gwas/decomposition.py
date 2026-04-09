@@ -87,6 +87,43 @@ def _fbpca_backend(
     return U, s, Vt
 
 
+def estimate_rsvd_marker_budget(
+    n_hq_samples: int,
+    n_components: int,
+    *,
+    max_ram_bytes: int,
+    bytes_per_element: int = 8,
+    safety_factor: float = 2.5,
+) -> int:
+    """Return the maximum number of markers that fit within *max_ram_bytes*.
+
+    The dominant memory cost of the RSVD decomposition is the input matrix
+    copy plus internal working matrices, which scale as
+    ``safety_factor × n_markers × n_hq_samples × bytes_per_element``.
+
+    Parameters
+    ----------
+    n_hq_samples : int
+        Number of high-quality samples (columns of the RSVD input).
+    n_components : int
+        Number of components *k* (used to refine the estimate).
+    max_ram_bytes : int
+        Maximum RAM budget in bytes.
+    bytes_per_element : int
+        Bytes per matrix element (8 for float64).
+    safety_factor : float
+        Multiplier applied to the theoretical minimum to account for
+        Python overhead, sklearn temporaries, and OS buffers.
+    """
+    if max_ram_bytes <= 0:
+        return 1
+    denominator = safety_factor * n_hq_samples * bytes_per_element
+    if denominator <= 0:
+        return 1
+    budget = int(max_ram_bytes / denominator)
+    return max(1, budget)
+
+
 def decompose(
     lrr: NDArray[np.floating],
     k: int,
