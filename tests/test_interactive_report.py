@@ -810,3 +810,192 @@ class TestNanLrrSdRegression:
         assert out.exists()
         html = out.read_text()
         assert "<!DOCTYPE html>" in html
+
+
+# ---------------------------------------------------------------------------
+# Post-correction LRR metrics
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSampleMetricsWithUpstreamQc:
+    """compute_sample_metrics with upstream_qc_mask restricts markers."""
+
+    def test_qc_mask_restricts_markers(self, sample_ids):
+        from array_lrr_gwas.interactive_report import compute_sample_metrics
+
+        rng = np.random.default_rng(12)
+        lrr = rng.standard_normal((100, 15)) * 0.2
+        # Upstream QC mask: first 60 markers pass, rest fail
+        qc_mask = np.array([True] * 60 + [False] * 40)
+        m_all = compute_sample_metrics(lrr, sample_ids)
+        m_qc = compute_sample_metrics(lrr, sample_ids, upstream_qc_mask=qc_mask)
+        # With QC mask, denominator is 60 (not 100)
+        assert all(v == 60 for v in m_qc["n_markers_used"])
+        # Without QC mask, denominator is 100
+        assert all(v == 100 for v in m_all["n_markers_used"])
+
+    def test_qc_mask_with_chromosomes(self, sample_ids):
+        """QC mask AND autosomal filter are combined."""
+        from array_lrr_gwas.interactive_report import compute_sample_metrics
+
+        rng = np.random.default_rng(13)
+        lrr = rng.standard_normal((100, 15)) * 0.2
+        chroms = np.array(["chr1"] * 80 + ["chrX"] * 20)
+        # QC mask: first 50 pass, rest fail
+        qc_mask = np.array([True] * 50 + [False] * 50)
+        m = compute_sample_metrics(
+            lrr, sample_ids, chromosomes=chroms, upstream_qc_mask=qc_mask,
+        )
+        # Autosomal markers: 80. QC passing: first 50. Intersection: 50.
+        assert all(v == 50 for v in m["n_markers_used"])
+
+
+class TestWriteSampleMetricsTsvWithPost:
+    """write_sample_metrics_tsv includes post-correction columns."""
+
+    def test_post_columns_present(self, synthetic_lrr, sample_ids, tmp_path):
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            write_sample_metrics_tsv,
+        )
+
+        pre = compute_sample_metrics(synthetic_lrr, sample_ids)
+        # Simulate corrected LRR (slightly reduced noise)
+        corrected_lrr = synthetic_lrr * 0.8
+        post = compute_sample_metrics(corrected_lrr, sample_ids)
+        out = write_sample_metrics_tsv(pre, tmp_path / "m.tsv", post_metrics=post)
+        lines = out.read_text().splitlines()
+        assert "LRR_SD_post" in lines[0]
+        assert "callrate_post" in lines[0]
+        # Each data row should have 6 columns (including post)
+        for line in lines[1:]:
+            parts = line.split("\t")
+            assert len(parts) == 6
+
+    def test_no_post_metrics_backward_compat(self, synthetic_lrr, sample_ids, tmp_path):
+        """Without post_metrics, output is unchanged."""
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            write_sample_metrics_tsv,
+        )
+
+        pre = compute_sample_metrics(synthetic_lrr, sample_ids)
+        out = write_sample_metrics_tsv(pre, tmp_path / "m.tsv")
+        lines = out.read_text().splitlines()
+        assert "LRR_SD_post" not in lines[0]
+        assert lines[0] == "SAMPLE\tLRR_SD\tcallrate\tn_markers_used"
+
+
+class TestLrrComparisonData:
+    """_lrr_comparison_data returns correct structure."""
+
+    def test_keys_and_length(self, sample_ids):
+        from array_lrr_gwas.interactive_report import _lrr_comparison_data
+
+        pre = {
+            "SAMPLE": sample_ids,
+            "LRR_SD": [0.1 * i for i in range(15)],
+            "callrate": [0.99] * 15,
+        }
+        post = {
+            "SAMPLE": sample_ids,
+            "LRR_SD": [0.05 * i for i in range(15)],
+            "callrate": [0.99] * 15,
+        }
+        hq_mask = np.array([True] * 12 + [False] * 3, dtype=bool)
+        comp = _lrr_comparison_data(pre, post, hq_mask)
+        assert set(comp.keys()) == {
+            "samples", "LRR_SD_pre", "LRR_SD_post",
+            "callrate_pre", "callrate_post", "hq",
+        }
+        assert len(comp["samples"]) == 15
+        assert len(comp["hq"]) == 15
+        assert comp["LRR_SD_pre"] == pre["LRR_SD"]
+        assert comp["LRR_SD_post"] == post["LRR_SD"]
+
+
+class TestGenerateReportWithCorrectedLrr:
+    """generate_report with corrected_lrr produces comparison plots."""
+
+    def test_comparison_in_html(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        from array_lrr_gwas.interactive_report import generate_report
+
+        corrected = synthetic_lrr * 0.7  # simulate reduced noise
+        out = generate_report(
+            info=synthetic_info,
+            samples=sample_ids,
+            lrr=synthetic_lrr,
+            corrected_lrr=corrected,
+            output_path=tmp_path / "report_post.html",
+            metrics_tsv_path=tmp_path / "metrics_post.tsv",
+            skip_umap=True,
+        )
+        html = out.read_text()
+        assert "lrr-scatter" in html
+        assert "bland-altman" in html
+        assert '"lrr_comparison"' in html
+        assert '"lrr_comparison": null' not in html
+
+    def test_metrics_tsv_has_post_columns(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        from array_lrr_gwas.interactive_report import generate_report
+
+        corrected = synthetic_lrr * 0.7
+        generate_report(
+            info=synthetic_info,
+            samples=sample_ids,
+            lrr=synthetic_lrr,
+            corrected_lrr=corrected,
+            output_path=tmp_path / "report.html",
+            metrics_tsv_path=tmp_path / "metrics.tsv",
+            skip_umap=True,
+        )
+        tsv = (tmp_path / "metrics.tsv").read_text()
+        header = tsv.splitlines()[0]
+        assert "LRR_SD_post" in header
+        assert "callrate_post" in header
+
+    def test_no_corrected_lrr_no_comparison(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        """Without corrected_lrr, comparison data is null."""
+        from array_lrr_gwas.interactive_report import generate_report
+
+        out = generate_report(
+            info=synthetic_info,
+            samples=sample_ids,
+            lrr=synthetic_lrr,
+            output_path=tmp_path / "report_no_post.html",
+            skip_umap=True,
+        )
+        html = out.read_text()
+        assert '"lrr_comparison": null' in html
+
+    def test_post_lrr_sd_lower_after_correction(
+        self, synthetic_info, sample_ids, tmp_path
+    ):
+        """Post-correction LRR_SD should be lower when noise is reduced."""
+        from array_lrr_gwas.interactive_report import generate_report
+
+        rng = np.random.default_rng(42)
+        lrr = rng.standard_normal((100, 15)) * 0.3
+        corrected = lrr * 0.5  # reduce noise
+        generate_report(
+            info=synthetic_info,
+            samples=sample_ids,
+            lrr=lrr,
+            corrected_lrr=corrected,
+            output_path=tmp_path / "report.html",
+            metrics_tsv_path=tmp_path / "metrics.tsv",
+            skip_umap=True,
+        )
+        lines = (tmp_path / "metrics.tsv").read_text().splitlines()
+        for line in lines[1:]:
+            parts = line.split("\t")
+            pre_sd = float(parts[1])
+            post_sd = float(parts[4])
+            if pre_sd > 0:
+                assert post_sd < pre_sd

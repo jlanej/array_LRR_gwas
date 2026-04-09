@@ -136,6 +136,7 @@ def compute_sample_metrics(
     lrr: NDArray[np.floating],
     samples: list[str],
     chromosomes: NDArray | Sequence[str] | None = None,
+    upstream_qc_mask: NDArray[np.bool_] | None = None,
 ) -> dict[str, list]:
     """Compute per-sample LRR_SD and callrate using autosomal markers only.
 
@@ -148,6 +149,10 @@ def compute_sample_metrics(
         markers are used for LRR_SD and callrate.  Non-autosomal markers
         (X, Y, MT) carry sex-linked intensity signals that inflate or
         distort per-sample QC metrics.
+    upstream_qc_mask : ndarray of bool, shape (n_markers,), optional
+        Pre-computed upstream variant QC mask.  When provided, the mask is
+        AND-ed with the autosomal filter so that only QC-passing autosomal
+        markers contribute to the metrics.
 
     Returns
     -------
@@ -156,10 +161,15 @@ def compute_sample_metrics(
     LRR_SD is computed over autosomal finite values only (NaN and inf excluded).
     LRR_SD entries are ``None`` for samples with no finite autosomal markers.
     """
-    # Restrict to autosomal markers when chromosome labels are available.
+    # Restrict to autosomal markers when chromosome labels are available,
+    # and optionally intersect with upstream variant QC mask.
+    marker_mask = np.ones(lrr.shape[0], dtype=bool)
     if chromosomes is not None:
-        auto_m = autosome_mask(chromosomes)
-        lrr = lrr[auto_m]
+        marker_mask &= autosome_mask(chromosomes)
+    if upstream_qc_mask is not None:
+        marker_mask &= upstream_qc_mask
+    if not marker_mask.all():
+        lrr = lrr[marker_mask]
     n_markers = lrr.shape[0]
     # Use np.isfinite to exclude both NaN and inf values.
     # np.nanstd returns NaN when a column contains inf (inf - mean = NaN),
@@ -184,13 +194,18 @@ def compute_sample_metrics(
 def write_sample_metrics_tsv(
     metrics: dict[str, list],
     path: str | Path,
+    post_metrics: dict[str, list] | None = None,
 ) -> Path:
     """Persist sample QC metrics to a TSV file.
 
     Parameters
     ----------
     metrics : dict from :func:`compute_sample_metrics`
+        Pre-correction sample metrics.
     path : output file path
+    post_metrics : dict from :func:`compute_sample_metrics`, optional
+        Post-correction sample metrics.  When provided, ``LRR_SD_post``
+        and ``callrate_post`` columns are appended for direct comparison.
 
     Returns
     -------
@@ -202,6 +217,8 @@ def write_sample_metrics_tsv(
     header = "SAMPLE\tLRR_SD\tcallrate"
     if has_n_markers:
         header += "\tn_markers_used"
+    if post_metrics is not None:
+        header += "\tLRR_SD_post\tcallrate_post"
     with path.open("w", encoding="utf-8") as fh:
         fh.write(header + "\n")
         for i, sample in enumerate(metrics["SAMPLE"]):
@@ -210,6 +227,10 @@ def write_sample_metrics_tsv(
             line = f"{sample}\t{lrr_sd_str}\t{metrics['callrate'][i]:.6g}"
             if has_n_markers:
                 line += f"\t{n_markers_used[i]}"
+            if post_metrics is not None:
+                post_sd = post_metrics["LRR_SD"][i]
+                post_sd_str = "nan" if post_sd is None else f"{post_sd:.6g}"
+                line += f"\t{post_sd_str}\t{post_metrics['callrate'][i]:.6g}"
             fh.write(line + "\n")
     return path
 
@@ -320,11 +341,28 @@ def _pc_scatter_data(
     }
 
 
+def _lrr_comparison_data(
+    pre_metrics: dict[str, list],
+    post_metrics: dict[str, list],
+    hq_mask: NDArray[np.bool_],
+) -> dict[str, Any]:
+    """Prepare pre- vs post-correction LRR comparison data for embedding."""
+    return {
+        "samples": pre_metrics["SAMPLE"],
+        "LRR_SD_pre": pre_metrics["LRR_SD"],
+        "LRR_SD_post": post_metrics["LRR_SD"],
+        "callrate_pre": pre_metrics["callrate"],
+        "callrate_post": post_metrics["callrate"],
+        "hq": hq_mask.tolist(),
+    }
+
+
 def _build_html(
     scree: dict,
     scatter: dict,
     umap_data: dict | None,
     sheet_data: dict | None = None,
+    lrr_comparison: dict | None = None,
     title: str = "LRR Correction Diagnostic Report",
 ) -> str:
     """Build a single self-contained HTML string with Plotly charts."""
@@ -333,6 +371,7 @@ def _build_html(
         "scatter": scatter,
         "umap": umap_data,
         "sheet": sheet_data,
+        "lrr_comparison": lrr_comparison,
     }
     data_json = json.dumps(report_data, allow_nan=False, default=_json_default)
 
@@ -408,6 +447,28 @@ def _build_html(
         </select></label>
     </div>
     <div id="umap-plot" class="plot-container"></div>
+
+    <!-- LRR Comparison (only rendered when post-correction data is available) -->
+    <div id="lrr-comparison-section" style="display:none;">
+    <h2>Pre vs Post-Correction LRR_SD Comparison</h2>
+    <div class="info">
+        Scatter plot comparing pre-correction and post-correction LRR standard
+        deviation for each sample.  Points on the unity line (y&nbsp;=&nbsp;x,
+        dashed grey) indicate no change; points below the line indicate
+        reduced noise after PC correction.  Colour: blue&nbsp;=&nbsp;HQ,
+        red&nbsp;=&nbsp;LQ.
+    </div>
+    <div id="lrr-scatter" class="plot-container"></div>
+
+    <h2>Bland&ndash;Altman Plot &mdash; LRR_SD Agreement</h2>
+    <div class="info">
+        Bland&ndash;Altman plot showing the difference
+        (pre&nbsp;&minus;&nbsp;post) vs the mean of pre and post LRR_SD per
+        sample.  Horizontal lines mark the mean difference (blue) and
+        &pm;1.96&nbsp;SD limits of agreement (red dashed).
+    </div>
+    <div id="bland-altman" class="plot-container"></div>
+    </div>
 
     <footer>
         Generated by <code>array-lrr-gwas correct</code> &mdash;
@@ -635,6 +696,90 @@ def _build_html(
         renderUMAP();
         document.getElementById("umap-color").addEventListener("change", renderUMAP);
     })();
+
+    // ── LRR Pre vs Post Comparison plots ────────────────────────────
+    (function() {
+        if (!DATA.lrr_comparison) return;
+        document.getElementById("lrr-comparison-section").style.display = "";
+        const comp = DATA.lrr_comparison;
+        const pre = comp.LRR_SD_pre;
+        const post = comp.LRR_SD_post;
+        const samples = comp.samples;
+        const hq = comp.hq;
+
+        // Keep only samples with finite pre and post values.
+        const vi = [];
+        for (let i = 0; i < pre.length; i++) {
+            if (pre[i] !== null && post[i] !== null) vi.push(i);
+        }
+        if (vi.length === 0) return;
+        const vPre = vi.map(i => pre[i]);
+        const vPost = vi.map(i => post[i]);
+        const vSamples = vi.map(i => samples[i]);
+        const vHq = vi.map(i => hq[i]);
+
+        // ── Scatter: pre vs post LRR_SD ──
+        const allV = vPre.concat(vPost);
+        const minV = Math.min(...allV);
+        const maxV = Math.max(...allV);
+        const pad = (maxV - minV) * 0.05 || 0.01;
+        Plotly.newPlot("lrr-scatter", [{
+            x: vPre, y: vPost,
+            mode: "markers", type: "scatter",
+            marker: {size: 7, color: vHq.map(v => v ? "#0f3460" : "#e94560")},
+            text: vSamples.map((s, i) =>
+                s + "<br>Pre: " + vPre[i].toFixed(4) + "<br>Post: " + vPost[i].toFixed(4)),
+            hoverinfo: "text",
+        }], {
+            xaxis: {title: "LRR_SD (pre-correction)", range: [minV - pad, maxV + pad]},
+            yaxis: {title: "LRR_SD (post-correction)", range: [minV - pad, maxV + pad]},
+            shapes: [{type: "line",
+                      x0: minV - pad, y0: minV - pad,
+                      x1: maxV + pad, y1: maxV + pad,
+                      line: {color: "#999", width: 1.5, dash: "dash"}}],
+            margin: {t: 20, b: 50, l: 60, r: 20}, height: 500,
+        }, {responsive: true});
+
+        // ── Bland-Altman: mean vs difference ──
+        const means = vPre.map((v, i) => (v + vPost[i]) / 2);
+        const diffs = vPre.map((v, i) => v - vPost[i]);
+        const meanDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+        const sdDiff = Math.sqrt(
+            diffs.map(d => (d - meanDiff) ** 2).reduce((a, b) => a + b, 0) / diffs.length);
+        const upper = meanDiff + 1.96 * sdDiff;
+        const lower = meanDiff - 1.96 * sdDiff;
+        const minM = Math.min(...means);
+        const maxM = Math.max(...means);
+        const mPad = (maxM - minM) * 0.05 || 0.01;
+        Plotly.newPlot("bland-altman", [{
+            x: means, y: diffs,
+            mode: "markers", type: "scatter",
+            marker: {size: 7, color: vHq.map(v => v ? "#0f3460" : "#e94560")},
+            text: vSamples.map((s, i) =>
+                s + "<br>Mean: " + means[i].toFixed(4) + "<br>Diff: " + diffs[i].toFixed(4)),
+            hoverinfo: "text",
+        }], {
+            xaxis: {title: "Mean LRR_SD  (pre + post) / 2"},
+            yaxis: {title: "Difference  (pre \u2212 post)"},
+            shapes: [
+                {type:"line", x0:minM-mPad, x1:maxM+mPad, y0:meanDiff, y1:meanDiff,
+                 line:{color:"#0f3460", width:2}},
+                {type:"line", x0:minM-mPad, x1:maxM+mPad, y0:upper, y1:upper,
+                 line:{color:"#e94560", width:1.5, dash:"dash"}},
+                {type:"line", x0:minM-mPad, x1:maxM+mPad, y0:lower, y1:lower,
+                 line:{color:"#e94560", width:1.5, dash:"dash"}},
+            ],
+            annotations: [
+                {x:maxM+mPad, y:meanDiff, text:"Mean: "+meanDiff.toFixed(4),
+                 xanchor:"right", showarrow:false, font:{size:11,color:"#0f3460"}},
+                {x:maxM+mPad, y:upper, text:"+1.96 SD",
+                 xanchor:"right", showarrow:false, font:{size:11,color:"#e94560"}},
+                {x:maxM+mPad, y:lower, text:"\u22121.96 SD",
+                 xanchor:"right", showarrow:false, font:{size:11,color:"#e94560"}},
+            ],
+            margin: {t: 20, b: 50, l: 60, r: 80}, height: 500,
+        }, {responsive: true});
+    })();
     </script>
     </body>
     </html>
@@ -695,7 +840,9 @@ def generate_report(
     lrr: NDArray[np.floating],
     output_path: str | Path,
     *,
+    corrected_lrr: NDArray[np.floating] | None = None,
     chromosomes: NDArray | Sequence[str] | None = None,
+    upstream_qc_mask: NDArray[np.bool_] | None = None,
     metrics_tsv_path: str | Path | None = None,
     sample_sheet_path: str | Path | None = None,
     illumina_sample_sheet_path: str | Path | None = None,
@@ -715,9 +862,18 @@ def generate_report(
         Original (uncorrected) LRR matrix.
     output_path : path-like
         Where to write the HTML file.
+    corrected_lrr : ndarray, shape (n_markers, n_samples), optional
+        Post-correction LRR matrix.  When provided, post-correction LRR_SD
+        and callrate are computed on the same marker set as pre-correction
+        and included in the metrics TSV and interactive comparison plots
+        (scatter and Bland–Altman).
     chromosomes : array-like of str, shape (n_markers,), optional
         Chromosome label for each marker.  When provided, only autosomal
         markers are used for LRR_SD and callrate in the sample metrics.
+    upstream_qc_mask : ndarray of bool, shape (n_markers,), optional
+        Pre-computed upstream variant QC mask.  When provided, only
+        QC-passing autosomal markers contribute to sample metrics,
+        ensuring consistency between pre- and post-correction comparisons.
     metrics_tsv_path : path-like or None
         If provided, sample metrics (LRR_SD, callrate) are also saved to this TSV.
     sample_sheet_path : path-like or None
@@ -747,10 +903,28 @@ def generate_report(
     n_hq = int(info["n_hq_samples"])
     n_markers = int(info["n_markers_used"])
 
-    # 1. Compute sample metrics (autosomal markers only when chromosomes provided)
-    metrics = compute_sample_metrics(lrr, samples, chromosomes=chromosomes)
+    # 1. Compute pre-correction sample metrics
+    metrics = compute_sample_metrics(
+        lrr, samples, chromosomes=chromosomes,
+        upstream_qc_mask=upstream_qc_mask,
+    )
+
+    # 1b. Compute post-correction metrics on the same marker set
+    post_metrics: dict[str, list] | None = None
+    lrr_comparison: dict | None = None
+    if corrected_lrr is not None:
+        post_metrics = compute_sample_metrics(
+            corrected_lrr, samples, chromosomes=chromosomes,
+            upstream_qc_mask=upstream_qc_mask,
+        )
+        lrr_comparison = _lrr_comparison_data(metrics, post_metrics, hq_mask)
+        logger.info(
+            "Computed post-correction LRR metrics for %d samples",
+            len(samples),
+        )
+
     if metrics_tsv_path is not None:
-        write_sample_metrics_tsv(metrics, metrics_tsv_path)
+        write_sample_metrics_tsv(metrics, metrics_tsv_path, post_metrics=post_metrics)
         logger.info("Wrote sample metrics: %s", metrics_tsv_path)
 
     # 2. Scree data
@@ -808,7 +982,8 @@ def generate_report(
         sheet_data = illumina
 
     # 6. Build HTML
-    html = _build_html(scree, scatter, umap_data, sheet_data)
+    html = _build_html(scree, scatter, umap_data, sheet_data,
+                       lrr_comparison=lrr_comparison)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     logger.info("Interactive report written to %s", output_path)

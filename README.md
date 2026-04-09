@@ -803,9 +803,19 @@ The report contains:
   colour overlays by LRR_SD, call rate, and HQ/LQ status.
 - **UMAP projection** — 2-D UMAP computed from `max(3, k_MP)` PCs, with
   the same colour overlay options.
+- **Pre vs Post-Correction LRR_SD scatter** — paired scatter plot comparing
+  pre- and post-correction LRR_SD for each sample, with a unity line
+  (y = x).  Points below the line indicate reduced noise after PC
+  correction.  Colour distinguishes HQ (blue) and LQ (red) samples.
+- **Bland–Altman plot** — difference (pre − post) vs mean LRR_SD per sample,
+  with mean-difference and ±1.96 SD limits-of-agreement lines for QC
+  assessment of correction efficacy.
 
-The sample metrics TSV has columns `SAMPLE`, `LRR_SD`, `callrate` and is
-suitable for loading into downstream notebooks or overlay in the report.
+The sample metrics TSV has columns `SAMPLE`, `LRR_SD`, `callrate`,
+`n_markers_used`, and — when PC correction is applied — `LRR_SD_post` and
+`callrate_post`.  Pre- and post-correction metrics are computed on the same
+autosomal marker set (intersected with upstream variant QC when available)
+to enable direct comparison.
 
 Interactive report dependencies are now included in the base package install:
 
