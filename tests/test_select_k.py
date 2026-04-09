@@ -115,8 +115,7 @@ class TestSelectKMp:
         sigma2 = 1.0
         # Pure noise SVs at the expected value (eigenvalue = sigma2 per entry)
         s_noise = np.sqrt(float(n_markers) * sigma2)
-        # MP upper edge (on s²): n_markers * sigma2 * (1 + sqrt(gamma))^2
-        gamma = n_markers / n_samples
+        # MP upper edge on s²: n_markers * sigma2 * (1 + sqrt(n_samples/n_markers))^2
         mp_upper_s2 = n_markers * sigma2 * (1 + np.sqrt(n_samples / n_markers)) ** 2
 
         s_above = np.sqrt(mp_upper_s2 * 1.01)  # just above threshold
