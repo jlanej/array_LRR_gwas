@@ -206,22 +206,39 @@ def _correct_chunk_qr(
         proj = coeffs @ Q.T             # (n_clean, n_samples)
         corrected[no_nan_idx] = Y - proj
 
-    # --- slow path (per-marker with non-finite values) ------------------
+    # --- slow path (markers with non-finite values) ----------------------
+    # Group markers by their missingness pattern so that markers sharing the
+    # same set of valid samples can be solved with a single lstsq call.
     min_valid = max(k + 1, int(np.ceil(min_valid_frac * n_samples)))
-    for idx in np.flatnonzero(has_nonfinite):
-        y = chunk[idx]
-        valid = np.isfinite(y)
-        n_valid = int(valid.sum())
+    nan_indices = np.flatnonzero(has_nonfinite)
 
-        if n_valid < min_valid:
-            # Not enough data – leave uncorrected
-            n_skipped += 1
-            continue
+    if len(nan_indices) > 0:
+        # Build boolean valid-mask for each NaN-row and group by pattern
+        pattern_groups: dict[bytes, list[int]] = {}
+        for idx in nan_indices:
+            valid = np.isfinite(chunk[idx])
+            n_valid = int(valid.sum())
+            if n_valid < min_valid:
+                n_skipped += 1
+                continue
+            key = valid.tobytes()
+            pattern_groups.setdefault(key, []).append(int(idx))
 
-        X_v = X[valid]
-        y_v = y[valid]
-        beta, _, _, _ = np.linalg.lstsq(X_v, y_v, rcond=None)
-        corrected[idx, valid] = y_v - X_v @ beta
+        # Batch-solve each unique missingness pattern
+        for key, group_indices in pattern_groups.items():
+            valid = np.frombuffer(key, dtype=np.bool_).copy()
+            X_v = X[valid]
+            if len(group_indices) == 1:
+                idx = group_indices[0]
+                y_v = chunk[idx, valid]
+                beta, _, _, _ = np.linalg.lstsq(X_v, y_v, rcond=None)
+                corrected[idx, valid] = y_v - X_v @ beta
+            else:
+                idx_arr = np.array(group_indices)
+                Y_v = chunk[np.ix_(idx_arr, valid)]  # (n_group, n_valid)
+                # Solve for all markers in the group at once: X_v @ B = Y_v.T
+                B, _, _, _ = np.linalg.lstsq(X_v, Y_v.T, rcond=None)
+                corrected[np.ix_(idx_arr, valid)] = Y_v - (X_v @ B).T
 
     return corrected, n_skipped
 
