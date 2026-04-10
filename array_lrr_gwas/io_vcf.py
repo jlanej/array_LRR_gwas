@@ -342,9 +342,6 @@ def stream_correct_write(
     for c in vcf_scan.header.contigs:
         if c not in hdr.contigs:
             hdr.add_meta("contig", items=[("ID", c)])
-
-    # Count total variants for progress bar (header-level count unavailable,
-    # but we can count during the streaming pass below instead).
     vcf_scan.close()
 
     # Open input for streaming
