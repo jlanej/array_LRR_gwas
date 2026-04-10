@@ -1188,15 +1188,19 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
         audit=audit, audit_stage="correction_variant_qc",
     )
 
-    # 7. Run SVD + QR correction on the subset (fits in budget)
+    # 7. Run SVD on the subset to compute PC scores.
+    # Use skip_residualize=True so that markers are NOT corrected in
+    # memory here — correction will happen exactly once in step 8 when
+    # stream_correct_write() processes ALL markers from the original file.
     # max_ram_gb=None since we already pre-selected to fit within budget
     subset_kwargs = {k: v for k, v in correct_kwargs.items() if k != "max_ram_gb"}
     logger.info(
-        "Running batch-effect correction on subset (k=%s, n_components=%s)",
+        "Computing PC scores from %d-marker subset (k=%s, n_components=%s)",
+        lrr_subset.shape[0],
         subset_kwargs.get("k") or "auto",
         subset_kwargs.get("n_components") or "auto(5% of HQ samples)",
     )
-    corrected_subset, info = correct_lrr(
+    _, info = correct_lrr(
         lrr_subset,
         positions=positions_sub,
         chromosomes=chromosomes_sub,
@@ -1206,10 +1210,11 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
         variant_ids=variant_ids_sub,
         sample_ids=samples,
         max_ram_gb=None,
+        skip_residualize=True,
         **subset_kwargs,
     )
     logger.info(
-        "Subset correction complete: k=%d, %d HQ samples, %d markers used",
+        "SVD complete: k=%d, %d HQ samples, %d markers used for decomposition",
         info["k"], info["n_hq_samples"], info["n_markers_used"],
     )
 
@@ -1217,11 +1222,16 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
     info["rsvd_subsampled"] = n_passing > budget
     info["rsvd_marker_budget"] = budget
 
-    # 8. Extract PC scores and stream-correct ALL markers → output
+    # 8. Extract PC scores and stream-correct ALL markers → output.
+    # This is the SINGLE correction pass: every marker in the original
+    # BCF is PC-corrected exactly once from the uncorrected source.
     k = info["k"]
     Vt_k = np.asarray(info["sample_scores"])[:k, :]
 
-    logger.info("Streaming PC regression to %s", args.output)
+    logger.info(
+        "Streaming single-pass PC correction of ALL markers to %s",
+        args.output,
+    )
     all_variants, n_skipped = stream_correct_write(
         input_path,
         args.output,
@@ -1233,11 +1243,28 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
         min_valid_frac=correct_kwargs.get("min_valid_frac", 0.5),
     )
     logger.info(
-        "Streaming correction done: %d variants, %d skipped",
+        "Streaming correction done: %d variants corrected, %d skipped",
         len(all_variants), n_skipped,
     )
 
-    # 9. Write SVD outputs, report, and audit trail.
+    # 9. Compute diagnostic correction for the subset (for the report).
+    # This is a lightweight in-memory correction of the small subset only,
+    # separate from the streaming output, so markers are not
+    # double-corrected in the output file.
+    from array_lrr_gwas.correction import residualize_qr
+
+    logger.info(
+        "Computing diagnostic correction on %d-marker subset for report",
+        lrr_subset.shape[0],
+    )
+    corrected_subset = residualize_qr(
+        lrr_subset,
+        Vt_k,
+        chunk_size=correct_kwargs.get("chunk_size", 5000),
+        min_valid_frac=correct_kwargs.get("min_valid_frac", 0.5),
+    )
+
+    # 10. Write SVD outputs, report, and audit trail.
     # For the diagnostic report, use the pre-selected subset (which
     # is representative and fits in memory).
     _write_outputs(
