@@ -358,16 +358,15 @@ def stream_correct_write(
     all_variants: list[dict] = []
     total_skipped = 0
 
-    # Online accumulators for diagnostic marker metrics (Welford-style).
+    # Online accumulators for diagnostic marker metrics.
     # We track per-sample: count of finite corrected values, running sum,
     # and running sum-of-squares so that LRR_SD and callrate can be
     # computed at the end without storing the corrected values.
-    _diag_ids: set[str] | None = diagnostic_marker_ids
     _diag_n_total = 0  # total diagnostic markers seen (denominator for callrate)
     _diag_count: NDArray | None = None  # (n_samples,) finite count
     _diag_sum: NDArray | None = None    # (n_samples,) running sum
     _diag_sum_sq: NDArray | None = None  # (n_samples,) running sum of squares
-    if _diag_ids is not None:
+    if diagnostic_marker_ids is not None:
         _diag_count = np.zeros(n_samples, dtype=np.int64)
         _diag_sum = np.zeros(n_samples, dtype=np.float64)
         _diag_sum_sq = np.zeros(n_samples, dtype=np.float64)
@@ -397,7 +396,7 @@ def stream_correct_write(
 
         # Identify which rows in this chunk are diagnostic markers
         diag_row_indices: list[int] | None = None
-        if _diag_ids is not None:
+        if diagnostic_marker_ids is not None:
             diag_row_indices = []
             for i, var_meta in enumerate(recs):
                 vid = var_meta.get("id")
@@ -407,7 +406,7 @@ def stream_correct_write(
                         f"{var_meta['chrom']}:{var_meta['pos']}"
                         f":{var_meta.get('ref', '')}:{':'.join(alts)}"
                     )
-                if vid in _diag_ids:
+                if vid in diagnostic_marker_ids:
                     diag_row_indices.append(i)
 
         for i, var_meta in enumerate(recs):
@@ -442,7 +441,7 @@ def stream_correct_write(
             safe = np.where(finite, diag_chunk, 0.0)
             _diag_count[:] += finite.sum(axis=0)
             _diag_sum[:] += safe.sum(axis=0)
-            _diag_sum_sq[:] += (safe ** 2).sum(axis=0)
+            _diag_sum_sq[:] += (safe * safe).sum(axis=0)
 
     with tqdm(
         total=n_total_variants,
@@ -489,7 +488,7 @@ def stream_correct_write(
 
     # Compute final post-correction diagnostic metrics if requested
     post_metrics: dict | None = None
-    if _diag_ids is not None and _diag_n_total > 0:
+    if diagnostic_marker_ids is not None and _diag_n_total > 0:
         # LRR_SD = sqrt(E[X²] - E[X]²) (population std, matching nanstd ddof=0)
         with np.errstate(invalid="ignore"):
             mean = _diag_sum / np.maximum(_diag_count, 1)

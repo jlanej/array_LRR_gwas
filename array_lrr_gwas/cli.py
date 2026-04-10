@@ -1277,7 +1277,7 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
     # no separate in-memory correction step is needed.
     _write_outputs(
         args, info, samples, variants_subset,
-        lrr_subset, None,
+        lrr_subset, None,  # corrected_lrr not needed; post_metrics below
         chromosomes_sub, upstream_qc_mask_sub, audit,
         post_metrics=post_metrics,
     )
