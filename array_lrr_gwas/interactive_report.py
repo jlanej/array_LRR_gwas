@@ -841,6 +841,7 @@ def generate_report(
     output_path: str | Path,
     *,
     corrected_lrr: NDArray[np.floating] | None = None,
+    post_metrics: dict[str, list] | None = None,
     chromosomes: NDArray | Sequence[str] | None = None,
     upstream_qc_mask: NDArray[np.bool_] | None = None,
     metrics_tsv_path: str | Path | None = None,
@@ -868,6 +869,13 @@ def generate_report(
         and callrate are computed on the same marker set as pre-correction
         and included in the metrics TSV and interactive comparison plots
         (scatter and Bland–Altman).
+    post_metrics : dict, optional
+        Pre-computed post-correction sample metrics (with keys ``SAMPLE``,
+        ``LRR_SD``, ``callrate``, ``n_markers_used``), as returned by
+        :func:`compute_sample_metrics` or accumulated during streaming
+        correction.  When provided, these are used directly instead of
+        computing from *corrected_lrr*.  Takes precedence over
+        *corrected_lrr* if both are given.
     chromosomes : array-like of str, shape (n_markers,), optional
         Chromosome label for each marker.  When provided, only autosomal
         markers are used for LRR_SD and callrate in the sample metrics.
@@ -917,22 +925,28 @@ def generate_report(
         upstream_qc_mask=upstream_qc_mask,
     )
 
-    # 1b. Compute post-correction metrics on the same marker set
-    post_metrics: dict[str, list] | None = None
+    # 1b. Compute or use pre-computed post-correction metrics
+    _post: dict[str, list] | None = post_metrics
     lrr_comparison: dict | None = None
-    if corrected_lrr is not None:
-        post_metrics = compute_sample_metrics(
+    if _post is None and corrected_lrr is not None:
+        _post = compute_sample_metrics(
             corrected_lrr, samples, chromosomes=chromosomes,
             upstream_qc_mask=upstream_qc_mask,
         )
-        lrr_comparison = _lrr_comparison_data(metrics, post_metrics, hq_mask)
         logger.info(
             "Computed post-correction LRR metrics for %d samples",
             len(samples),
         )
+    if _post is not None:
+        lrr_comparison = _lrr_comparison_data(metrics, _post, hq_mask)
+        if post_metrics is not None:
+            logger.info(
+                "Using pre-computed post-correction metrics for %d samples",
+                len(samples),
+            )
 
     if metrics_tsv_path is not None:
-        write_sample_metrics_tsv(metrics, metrics_tsv_path, post_metrics=post_metrics)
+        write_sample_metrics_tsv(metrics, metrics_tsv_path, post_metrics=_post)
         logger.info("Wrote sample metrics: %s", metrics_tsv_path)
 
     # 2. Scree data
