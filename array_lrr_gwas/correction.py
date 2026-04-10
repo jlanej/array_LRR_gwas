@@ -20,6 +20,7 @@ from typing import Callable
 import numpy as np
 from numpy.typing import NDArray
 from scipy.linalg import qr as _scipy_qr
+from tqdm.auto import tqdm
 
 from array_lrr_gwas.decomposition import decompose, DecompCallable
 from array_lrr_gwas.select_k import select_k_mp
@@ -256,18 +257,43 @@ def residualize_qr(
     corrected : ndarray, shape (n_markers, n_samples)
     """
     Q, R, X = qr_precompute(Vt_k)
-    n_markers = lrr.shape[0]
+    n_markers, n_samples = lrr.shape
+    k = Vt_k.shape[0]
+    n_chunks = (n_markers + chunk_size - 1) // chunk_size
     corrected = np.empty_like(lrr)
 
+    logger.info(
+        "PC correction: regressing %d PCs out of %d markers × %d samples "
+        "in %d chunk(s) of %d",
+        k, n_markers, n_samples, n_chunks, chunk_size,
+    )
+
     n_skipped = 0
-    for start in range(0, n_markers, chunk_size):
-        end = min(start + chunk_size, n_markers)
-        chunk = lrr[start:end]
-        corrected_chunk, chunk_skipped = _correct_chunk_qr(
-            chunk, Q, X, min_valid_frac=min_valid_frac,
-        )
-        corrected[start:end] = corrected_chunk
-        n_skipped += chunk_skipped
+    with tqdm(
+        total=n_markers,
+        desc="PC regression",
+        unit="marker",
+        leave=False,
+        dynamic_ncols=True,
+    ) as pbar:
+        for chunk_idx, start in enumerate(range(0, n_markers, chunk_size)):
+            end = min(start + chunk_size, n_markers)
+            chunk = lrr[start:end]
+            corrected_chunk, chunk_skipped = _correct_chunk_qr(
+                chunk, Q, X, min_valid_frac=min_valid_frac,
+            )
+            corrected[start:end] = corrected_chunk
+            n_skipped += chunk_skipped
+            pbar.update(end - start)
+            pbar.set_postfix(
+                chunk=f"{chunk_idx + 1}/{n_chunks}",
+                skipped=n_skipped,
+                refresh=False,
+            )
+            logger.debug(
+                "PC correction chunk %d/%d: markers %d–%d (%d skipped so far)",
+                chunk_idx + 1, n_chunks, start, end - 1, n_skipped,
+            )
 
     if n_skipped > 0:
         logger.info(
@@ -275,6 +301,8 @@ def residualize_qr(
             n_skipped,
             n_markers,
         )
+    else:
+        logger.info("PC correction complete: all %d markers corrected", n_markers)
 
     return corrected
 
@@ -383,9 +411,33 @@ def correct_lrr(
         ``n_hq_samples``, ``n_markers_used``, ``backend``
             Scalar summary statistics.
     """
+    # 0. Log upfront matrix dimensions and per-GB density estimate.
+    n_total_markers, n_total_samples = lrr.shape
+    bytes_per_element = lrr.dtype.itemsize if lrr.dtype.itemsize > 0 else 8
+    matrix_gb = (n_total_markers * n_total_samples * bytes_per_element) / 1024**3
+    variants_per_gb = (n_total_markers * n_total_samples) / max(matrix_gb, 1e-12)
+    logger.info(
+        "Input matrix: %d variants × %d samples (%.2f GB @ %d B/element; "
+        "%.3g variant×sample per GB)",
+        n_total_markers, n_total_samples, matrix_gb,
+        bytes_per_element, variants_per_gb,
+    )
+
+    # Pipeline-level progress bar.  We start with a fixed set of core stages
+    # and dynamically extend the total if optional stages run.
+    _core_stages = 5  # sample QC, marker subset, SVD load, decompose, PC regression
+    pbar = tqdm(
+        total=_core_stages,
+        desc="correct_lrr",
+        unit="step",
+        leave=True,
+        dynamic_ncols=True,
+    )
+
     # 1. Classify samples using only autosomal markers for LRR_SD and callrate.
     # Non-autosomal (sex chromosome, MT) intensity signals encode biological sex
     # rather than technical noise and must not contribute to sample QC metrics.
+    pbar.set_description("sample QC")
     if chromosomes is not None:
         auto_m = autosome_mask(chromosomes)
         lrr_for_qc = lrr[auto_m]
@@ -403,10 +455,13 @@ def correct_lrr(
         n_total_samples - n_hq,
     )
     if not np.any(hq_mask):
+        pbar.close()
         raise ValueError(
             "No samples passed the HQ threshold – relax max_lrr_sd / "
             "min_sample_call_rate or check input data."
         )
+    pbar.set_postfix(HQ=n_hq, LQ=n_total_samples - n_hq, refresh=False)
+    pbar.update(1)
 
     # Record sample HQ/LQ classification in the audit trail
     if audit is not None and sample_ids is not None:
@@ -423,6 +478,7 @@ def correct_lrr(
         )
 
     # 2. Subset markers
+    pbar.set_description("marker subsetting")
     marker_mask = subset_markers(
         lrr,
         positions=positions,
@@ -436,9 +492,12 @@ def correct_lrr(
         variant_ids=variant_ids,
     )
     if not np.any(marker_mask):
+        pbar.close()
         raise ValueError(
             "No markers passed QC – relax filter thresholds."
         )
+    pbar.set_postfix(markers=int(marker_mask.sum()), refresh=False)
+    pbar.update(1)
 
     # 2b. Optionally subsample markers to fit within the RAM budget
     n_candidates_pre_budget = int(marker_mask.sum())
@@ -447,6 +506,8 @@ def correct_lrr(
         from array_lrr_gwas.decomposition import estimate_rsvd_marker_budget
         from array_lrr_gwas.subsetting import subsample_markers_uniform
 
+        pbar.total += 1
+        pbar.set_description("budget subsampling")
         max_ram_bytes = int(max_ram_gb * 1024**3)
         k_for_budget = max(1, int(np.ceil(0.05 * n_hq))) if k is None else k
         budget = estimate_rsvd_marker_budget(
@@ -490,23 +551,42 @@ def correct_lrr(
                 "no subsampling needed.",
                 n_candidates, max_ram_gb, budget,
             )
+        pbar.set_postfix(markers=int(marker_mask.sum()), budget=budget, refresh=False)
+        pbar.update(1)
 
     # 3. Decompose HQ sub-matrix
+    pbar.set_description("loading SVD matrix")
     sub = lrr[np.ix_(marker_mask, hq_mask)]
+    n_sub_markers, n_sub_samples = sub.shape
+    sub_gb = (n_sub_markers * n_sub_samples * 8) / 1024**3
+    logger.info(
+        "Loading SVD sub-matrix: %d variants × %d HQ samples (%.2f GB) "
+        "from %d total variants",
+        n_sub_markers, n_sub_samples, sub_gb, n_total_markers,
+    )
     # Centre per marker row for later extrapolation
     row_means = np.nanmean(sub, axis=1, keepdims=True)
+    pbar.set_postfix(
+        svd_shape=f"{n_sub_markers}×{n_sub_samples}",
+        svd_gb=f"{sub_gb:.2f}",
+        refresh=False,
+    )
+    pbar.update(1)
 
     # Determine k
     max_possible_k = min(sub.shape) - 1
     if max_possible_k < 1:
+        pbar.close()
         raise ValueError(
             "Sub-matrix too small for decomposition after filtering."
         )
+    pbar.set_description("SVD decomposition")
     if k is None:
         if n_components is None:
             pilot_k = max(1, int(np.ceil(0.05 * sub.shape[1])))
         else:
             if n_components < 1:
+                pbar.close()
                 raise ValueError("n_components must be >= 1.")
             pilot_k = n_components
         pilot_k = min(max_possible_k, pilot_k)
@@ -531,6 +611,7 @@ def correct_lrr(
         U_all, s_all, Vt_hq_all = U_full_pilot, s_pilot, Vt_hq_pilot
     else:
         if k > max_possible_k:
+            pbar.close()
             raise ValueError(
                 f"k={k} exceeds max feasible components ({max_possible_k})."
             )
@@ -538,11 +619,15 @@ def correct_lrr(
         n_computed = k
         U, s, Vt_hq = decompose(sub, k, backend=backend)
         U_all, s_all, Vt_hq_all = U, s, Vt_hq
+    pbar.set_postfix(k=k, refresh=False)
+    pbar.update(1)
 
     # 4. Extrapolate PCs to LQ samples (using all computed components)
     lq_mask = ~hq_mask
     n_lq = int(np.sum(lq_mask))
     if n_lq > 0:
+        pbar.total += 1
+        pbar.set_description("PC extrapolation")
         Vt_lq_all = extrapolate_pcs(
             lrr[np.ix_(marker_mask, lq_mask)], row_means, U_all, s_all
         )
@@ -550,6 +635,8 @@ def correct_lrr(
         Vt_full_all = np.empty((n_computed, lrr.shape[1]), dtype=np.float64)
         Vt_full_all[:, hq_mask] = Vt_hq_all
         Vt_full_all[:, lq_mask] = Vt_lq_all
+        pbar.set_postfix(k=k, LQ_projected=n_lq, refresh=False)
+        pbar.update(1)
     else:
         Vt_full_all = Vt_hq_all
 
@@ -557,12 +644,17 @@ def correct_lrr(
     # Unlike the old SVD-based residualize() which only corrected the
     # marker subset used for decomposition, QR regression corrects every
     # marker by regressing its LRR values against the global PC scores.
+    pbar.set_description("PC regression")
     corrected = residualize_qr(
         lrr,
         Vt_full_all[:k, :],
         chunk_size=chunk_size,
         min_valid_frac=min_valid_frac,
     )
+    pbar.set_postfix(k=k, markers_corrected=n_total_markers, refresh=False)
+    pbar.update(1)
+    pbar.set_description("done")
+    pbar.close()
 
     info = {
         "k": k,
