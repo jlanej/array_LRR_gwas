@@ -87,18 +87,28 @@ class TestReadLrrSelected:
                 all_ids.append(f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(alts)}")
 
         # Select first 5 IDs
-        selected = set(all_ids[:5])
-        lrr_sub, _, _ = read_lrr_selected(test_bcf_path, selected)
+        target_ids = all_ids[:5]
+        selected = set(target_ids)
+        lrr_sub, _, variants_sub = read_lrr_selected(test_bcf_path, selected)
 
-        # Values should match
-        for i, vid in enumerate(all_ids[:5]):
-            if vid in selected:
-                # Find the row index in lrr_sub
-                # (order may differ, but for first 5 in order it should match)
-                pass
-        # At minimum, shapes should be reasonable
-        assert lrr_sub.shape[0] <= 5
-        assert lrr_sub.shape[1] == lrr_full.shape[1]
+        # Build a mapping from variant ID → row index in the subset
+        sub_ids = []
+        for v in variants_sub:
+            vid = v.get("id")
+            if vid is not None and vid != ".":
+                sub_ids.append(vid)
+            else:
+                alts = v.get("alts") or ()
+                sub_ids.append(f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(alts)}")
+
+        # Verify each selected variant's LRR values match the full read
+        for sub_row, sub_vid in enumerate(sub_ids):
+            full_row = all_ids.index(sub_vid)
+            np.testing.assert_array_equal(
+                lrr_sub[sub_row],
+                lrr_full[full_row],
+                err_msg=f"LRR mismatch for variant {sub_vid}",
+            )
 
 
 class TestStreamCorrectWrite:
