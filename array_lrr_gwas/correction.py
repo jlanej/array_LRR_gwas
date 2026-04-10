@@ -373,8 +373,8 @@ def correct_lrr(
     max_ram_gb : float or None
         Maximum RAM in GB available for the RSVD decomposition step.
         When the QC-passing marker set would exceed this budget, markers
-        are deterministically subsampled to fit using genome-uniform
-        sampling.  ``None`` disables the budget (no subsampling).
+        are deterministically subsampled to fit using every-Nth selection.
+        ``None`` disables the budget (no subsampling).
         ``0`` also disables subsampling.
     chunk_size : int
         Number of marker rows processed per streaming QR-regression
@@ -499,12 +499,13 @@ def correct_lrr(
     pbar.set_postfix(markers=int(marker_mask.sum()), refresh=False)
     pbar.update(1)
 
-    # 2b. Optionally subsample markers to fit within the RAM budget
+    # 2b. Optionally subsample markers to fit within the RAM budget.
+    # Uses simple every-Nth selection for deterministic, order-preserving
+    # subsampling that provides approximately uniform genomic coverage.
     n_candidates_pre_budget = int(marker_mask.sum())
     budget = None
     if max_ram_gb is not None and max_ram_gb > 0:
         from array_lrr_gwas.decomposition import estimate_rsvd_marker_budget
-        from array_lrr_gwas.subsetting import subsample_markers_uniform
 
         pbar.total += 1
         pbar.set_description("budget subsampling")
@@ -518,32 +519,18 @@ def correct_lrr(
             logger.warning(
                 "RSVD marker budget exceeded: %d markers > %d budget "
                 "(%.1f GB limit). Subsampling to %d markers "
-                "with genome-uniform strategy.",
+                "with every-Nth selection.",
                 n_candidates, budget, max_ram_gb, budget,
             )
-            if positions is not None and chromosomes is not None:
-                candidate_idx = np.flatnonzero(marker_mask)
-                selected_idx = subsample_markers_uniform(
-                    candidate_idx,
-                    chromosomes=chromosomes,
-                    positions=positions,
-                    target_n=budget,
-                    random_state=0,
-                )
-                new_mask = np.zeros(lrr.shape[0], dtype=bool)
-                new_mask[selected_idx] = True
-                marker_mask = new_mask
-            else:
-                # Without genomic coordinates, fall back to uniform random
-                candidate_idx = np.flatnonzero(marker_mask)
-                rng = np.random.default_rng(0)
-                chosen = rng.choice(candidate_idx, size=budget, replace=False)
-                new_mask = np.zeros(lrr.shape[0], dtype=bool)
-                new_mask[chosen] = True
-                marker_mask = new_mask
+            candidate_idx = np.flatnonzero(marker_mask)
+            step = max(1, n_candidates // budget)
+            selected_idx = candidate_idx[::step][:budget]
+            new_mask = np.zeros(lrr.shape[0], dtype=bool)
+            new_mask[selected_idx] = True
+            marker_mask = new_mask
             logger.info(
-                "Subsampled to %d markers for RSVD (seed=0).",
-                int(marker_mask.sum()),
+                "Subsampled to %d markers for RSVD (every-%d selection).",
+                int(marker_mask.sum()), step,
             )
         else:
             logger.info(

@@ -323,10 +323,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="max_ram_gb",
         help=(
             "Maximum RAM in GB available for the RSVD decomposition step "
-            "(default: no limit). When the QC-passing marker set would "
-            "exceed this budget, markers are deterministically subsampled "
-            "to fit. Genome-uniform sampling ensures no region is over- or "
-            "under-represented. A value of 0 disables subsampling entirely."
+            "(default: no limit). When both --max-ram-gb and --variant-qc "
+            "are provided, markers are pre-selected before loading: every "
+            "Nth QC-passing marker is chosen so only the budgeted subset is "
+            "read from the BCF, and the remaining markers are corrected via "
+            "streaming QR regression that never loads the full matrix. "
+            "When --variant-qc is absent, the full matrix is loaded and "
+            "every-Nth subsampling is applied in memory. "
+            "A value of 0 disables subsampling entirely."
         ),
     )
 
@@ -781,7 +785,13 @@ def _run_correct(args: argparse.Namespace) -> int:
     from array_lrr_gwas.audit import AuditLogger
     from array_lrr_gwas.correction import correct_lrr
     from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
-    from array_lrr_gwas.io_vcf import read_lrr, write_corrected
+    from array_lrr_gwas.io_vcf import (
+        read_bcf_sample_ids,
+        read_lrr,
+        read_lrr_selected,
+        stream_correct_write,
+        write_corrected,
+    )
     from array_lrr_gwas.qc_config import defaults, load_config, apply_to_correct_args
     from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
@@ -823,65 +833,14 @@ def _run_correct(args: argparse.Namespace) -> int:
     max_ram_gb = getattr(args, "max_ram_gb", None)
     if max_ram_gb is None:
         max_ram_gb = cfg.get("correction", {}).get("max_ram_gb")
-    correct_kwargs["max_ram_gb"] = max_ram_gb
-
-    # Read input
-    logger.info("Reading LRR from %s", input_path)
-    lrr, samples, variants = read_lrr(input_path)
-    logger.info(
-        "Loaded %d variants × %d samples", lrr.shape[0], lrr.shape[1]
-    )
-
-    # Extract positions and chromosomes from variants
-    positions = np.array([v["pos"] for v in variants], dtype=np.intp)
-    chromosomes = np.array([v["chrom"] for v in variants], dtype=str)
-
-    # Determine exclusion regions
-    exclude_regions = None
-    no_complexity = (
-        args.no_complexity_filter
-        or cfg["correction"].get("no_complexity_filter", False)
-    )
-    if not no_complexity:
-        build = args.build
-        if build is None:
-            build = detect_build(input_path)
-        if build is None:
-            logger.error(
-                "Could not detect genome build from input file. "
-                "Please supply --build (GRCh37, GRCh38, or T2T-CHM13)."
-            )
-            return 1
-        logger.info("Using genome build: %s", build)
-        exclude_regions = get_exclusion_regions(
-            build, chromosomes=list(set(chromosomes))
-        )
-        n_regions = sum(len(v) for v in exclude_regions.values())
-        logger.info(
-            "Applying %d default exclusion regions (%s)",
-            n_regions,
-            build,
-        )
 
     # Load upstream variant QC mask for RSVD marker selection
     variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
-    upstream_qc_mask = None
+    qc_data = None
     if variant_qc_path is not None:
         variant_qc_path = Path(variant_qc_path)
         logger.info("Loading upstream variant QC from %s", variant_qc_path)
         qc_data = read_collated_variant_qc(variant_qc_path)
-        variant_ids = [_variant_id(v) for v in variants]
-        upstream_qc_mask = variant_qc_mask(
-            variant_ids, qc_data,
-            require_call_rate=True, require_hwe=True, require_maf=False,
-            audit=audit, audit_stage="correction_variant_qc",
-        )
-        n_pass = int(upstream_qc_mask.sum())
-        logger.info(
-            "Upstream variant QC (RSVD): %d / %d markers pass "
-            "(call rate + HWE; MAF not required)",
-            n_pass, len(upstream_qc_mask),
-        )
     else:
         logger.warning(
             "No upstream variant QC file provided (--variant-qc or "
@@ -890,72 +849,65 @@ def _run_correct(args: argparse.Namespace) -> int:
             "for best-practice QC."
         )
 
-    # Upfront RAM estimation: use sample count and estimated variant count
-    # from the QC sheet to warn early if subsampling will likely be needed.
-    if max_ram_gb is not None and max_ram_gb > 0:
-        from array_lrr_gwas.decomposition import estimate_rsvd_marker_budget
+    # ----------------------------------------------------------------
+    # Decide whether to use the memory-efficient streaming path.
+    # Streaming mode is enabled when BOTH max_ram_gb is active AND an
+    # upstream variant QC file is available (so we can pre-select
+    # markers before scanning the BCF).
+    # ----------------------------------------------------------------
+    use_streaming = (
+        max_ram_gb is not None
+        and max_ram_gb > 0
+        and qc_data is not None
+    )
 
-        n_samples_est = len(samples)
-        # Use QC-passing variant count as the best available estimate
-        # of how many markers will enter the RSVD; fall back to total
-        # variant count when no QC sheet is available.
-        if upstream_qc_mask is not None:
-            n_variants_est = int(upstream_qc_mask.sum())
-        else:
-            n_variants_est = lrr.shape[0]
-        max_ram_bytes = int(max_ram_gb * 1024**3)
-        estimated_k = correct_kwargs.get("k") or max(1, int(np.ceil(0.05 * n_samples_est)))
-        budget_est = estimate_rsvd_marker_budget(
-            n_samples_est, estimated_k, max_ram_bytes=max_ram_bytes
+    if use_streaming:
+        return _run_correct_streaming(
+            args, input_path, audit, cfg, correct_kwargs,
+            max_ram_gb, qc_data, variant_qc_path,
         )
-        est_ram_gb = (
-            2.5 * n_variants_est * n_samples_est * 8 / 1024**3
-        )
-        logger.info(
-            "RAM estimate: ~%.1f GB for %d variants × %d samples "
-            "(budget: %.1f GB, ~%d marker limit). %s",
-            est_ram_gb, n_variants_est, n_samples_est,
-            max_ram_gb, budget_est,
-            "Subsampling likely needed."
-            if n_variants_est > budget_est
-            else "Should fit within budget.",
+    else:
+        correct_kwargs["max_ram_gb"] = max_ram_gb
+        return _run_correct_full(
+            args, input_path, audit, cfg, correct_kwargs,
+            max_ram_gb, qc_data,
         )
 
-    # Run correction
+
+def _resolve_exclusion_regions(args, cfg, input_path, chromosomes):
+    """Shared helper: resolve genome build and complexity-exclusion regions."""
+    from array_lrr_gwas.genome_build import detect_build, get_exclusion_regions
+
+    no_complexity = (
+        args.no_complexity_filter
+        or cfg["correction"].get("no_complexity_filter", False)
+    )
+    if no_complexity:
+        return None
+    build = args.build
+    if build is None:
+        build = detect_build(input_path)
+    if build is None:
+        logger.error(
+            "Could not detect genome build from input file. "
+            "Please supply --build (GRCh37, GRCh38, or T2T-CHM13)."
+        )
+        return "error"
+    logger.info("Using genome build: %s", build)
+    exclude_regions = get_exclusion_regions(
+        build, chromosomes=list(set(chromosomes))
+    )
+    n_regions = sum(len(v) for v in exclude_regions.values())
     logger.info(
-        "Running batch-effect correction (k=%s, n_components=%s)",
-        correct_kwargs.get("k") or "auto",
-        correct_kwargs.get("n_components") or "auto(5% of HQ samples)",
+        "Applying %d default exclusion regions (%s)",
+        n_regions, build,
     )
-    variant_ids = [_variant_id(v) for v in variants]
-    corrected, info = correct_lrr(
-        lrr,
-        positions=positions,
-        chromosomes=chromosomes,
-        exclude_regions=exclude_regions,
-        upstream_qc_mask=upstream_qc_mask,
-        audit=audit,
-        variant_ids=variant_ids,
-        sample_ids=samples,
-        **correct_kwargs,
-    )
-    logger.info(
-        "Correction complete: k=%d, %d HQ samples, %d markers used",
-        info["k"],
-        info["n_hq_samples"],
-        info["n_markers_used"],
-    )
+    return exclude_regions
 
-    # Write output
-    logger.info("Writing corrected LRR to %s", args.output)
-    write_corrected(
-        args.output,
-        corrected,
-        samples,
-        variants,
-        info,
-        path_template=input_path,
-    )
+
+def _write_outputs(args, info, samples, variants, lrr, corrected,
+                   chromosomes, upstream_qc_mask, audit):
+    """Shared helper: write SVD text outputs, report, and audit trail."""
     svd_prefix = args.svd_output_prefix or Path(f"{args.output}.svd")
     svd_paths = _write_svd_text_outputs(
         svd_prefix,
@@ -1021,7 +973,280 @@ def _run_correct(args: argparse.Namespace) -> int:
             len(kept_idx), rsvd_audit_path,
         )
 
+
+def _run_correct_full(args, input_path, audit, cfg, correct_kwargs,
+                      max_ram_gb, qc_data):
+    """Non-streaming correction path: loads the full LRR matrix."""
+    from array_lrr_gwas.correction import correct_lrr
+    from array_lrr_gwas.io_vcf import read_lrr, write_corrected
+    from array_lrr_gwas.variant_qc import variant_qc_mask
+
+    # Read full input
+    logger.info("Reading LRR from %s", input_path)
+    lrr, samples, variants = read_lrr(input_path)
+    logger.info(
+        "Loaded %d variants × %d samples", lrr.shape[0], lrr.shape[1]
+    )
+
+    # Extract positions and chromosomes from variants
+    positions = np.array([v["pos"] for v in variants], dtype=np.intp)
+    chromosomes = np.array([v["chrom"] for v in variants], dtype=str)
+
+    # Determine exclusion regions
+    exclude_regions = _resolve_exclusion_regions(args, cfg, input_path, chromosomes)
+    if exclude_regions == "error":
+        return 1
+
+    # Build upstream variant QC mask
+    upstream_qc_mask = None
+    if qc_data is not None:
+        variant_ids = [_variant_id(v) for v in variants]
+        upstream_qc_mask = variant_qc_mask(
+            variant_ids, qc_data,
+            require_call_rate=True, require_hwe=True, require_maf=False,
+            audit=audit, audit_stage="correction_variant_qc",
+        )
+        n_pass = int(upstream_qc_mask.sum())
+        logger.info(
+            "Upstream variant QC (RSVD): %d / %d markers pass "
+            "(call rate + HWE; MAF not required)",
+            n_pass, len(upstream_qc_mask),
+        )
+
+    # Upfront RAM estimation
+    if max_ram_gb is not None and max_ram_gb > 0:
+        from array_lrr_gwas.decomposition import estimate_rsvd_marker_budget
+
+        n_samples_est = len(samples)
+        if upstream_qc_mask is not None:
+            n_variants_est = int(upstream_qc_mask.sum())
+        else:
+            n_variants_est = lrr.shape[0]
+        max_ram_bytes = int(max_ram_gb * 1024**3)
+        estimated_k = correct_kwargs.get("k") or max(1, int(np.ceil(0.05 * n_samples_est)))
+        budget_est = estimate_rsvd_marker_budget(
+            n_samples_est, estimated_k, max_ram_bytes=max_ram_bytes
+        )
+        est_ram_gb = (
+            2.5 * n_variants_est * n_samples_est * 8 / 1024**3
+        )
+        logger.info(
+            "RAM estimate: ~%.1f GB for %d variants × %d samples "
+            "(budget: %.1f GB, ~%d marker limit). %s",
+            est_ram_gb, n_variants_est, n_samples_est,
+            max_ram_gb, budget_est,
+            "Subsampling likely needed."
+            if n_variants_est > budget_est
+            else "Should fit within budget.",
+        )
+
+    # Run correction
+    logger.info(
+        "Running batch-effect correction (k=%s, n_components=%s)",
+        correct_kwargs.get("k") or "auto",
+        correct_kwargs.get("n_components") or "auto(5% of HQ samples)",
+    )
+    variant_ids = [_variant_id(v) for v in variants]
+    corrected, info = correct_lrr(
+        lrr,
+        positions=positions,
+        chromosomes=chromosomes,
+        exclude_regions=exclude_regions,
+        upstream_qc_mask=upstream_qc_mask,
+        audit=audit,
+        variant_ids=variant_ids,
+        sample_ids=samples,
+        **correct_kwargs,
+    )
+    logger.info(
+        "Correction complete: k=%d, %d HQ samples, %d markers used",
+        info["k"],
+        info["n_hq_samples"],
+        info["n_markers_used"],
+    )
+
+    # Write output
+    logger.info("Writing corrected LRR to %s", args.output)
+    write_corrected(
+        args.output,
+        corrected,
+        samples,
+        variants,
+        info,
+        path_template=input_path,
+    )
+
+    _write_outputs(args, info, samples, variants, lrr, corrected,
+                   chromosomes, upstream_qc_mask, audit)
+
     logger.info("Done.")
+    return 0
+
+
+def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
+                           max_ram_gb, qc_data, variant_qc_path):
+    """Memory-efficient streaming correction path.
+
+    Pre-selects markers from the variant QC file, loads only the selected
+    subset for SVD, then streams through the full BCF/VCF for QR regression
+    and writes corrected output without ever holding the full matrix in RAM.
+    """
+    from array_lrr_gwas.correction import correct_lrr
+    from array_lrr_gwas.decomposition import estimate_rsvd_marker_budget
+    from array_lrr_gwas.io_vcf import (
+        read_bcf_sample_ids,
+        read_lrr_selected,
+        stream_correct_write,
+    )
+    from array_lrr_gwas.subsetting import select_every_nth
+    from array_lrr_gwas.variant_qc import variant_qc_mask
+
+    logger.info(
+        "Using memory-efficient streaming path (max_ram_gb=%.1f, "
+        "variant QC from %s)",
+        max_ram_gb, variant_qc_path,
+    )
+
+    # 1. Get sample count from BCF header (no LRR loading)
+    samples = read_bcf_sample_ids(input_path)
+    n_samples = len(samples)
+    logger.info("BCF contains %d samples", n_samples)
+
+    # 2. Build list of QC-passing variant IDs (in QC file order)
+    passing_ids = [
+        vid for vid, rec in qc_data.items()
+        if rec.call_rate_pass and rec.hwe_pass
+    ]
+    logger.info(
+        "Upstream variant QC: %d / %d variants pass (call rate + HWE)",
+        len(passing_ids), len(qc_data),
+    )
+
+    if not passing_ids:
+        logger.error("No variants pass upstream QC — cannot proceed.")
+        return 1
+
+    # 3. Estimate marker budget and select every-Nth
+    estimated_k = correct_kwargs.get("k") or max(1, int(np.ceil(0.05 * n_samples)))
+    max_ram_bytes = int(max_ram_gb * 1024**3)
+    budget = estimate_rsvd_marker_budget(
+        n_samples, estimated_k, max_ram_bytes=max_ram_bytes,
+    )
+    n_passing = len(passing_ids)
+
+    if n_passing > budget:
+        selected_ids = select_every_nth(passing_ids, budget)
+        step = max(1, n_passing // budget)
+        logger.info(
+            "Pre-selected %d / %d QC-passing markers (every-%d, "
+            "budget=%d for %.1f GB limit)",
+            len(selected_ids), n_passing, step, budget, max_ram_gb,
+        )
+    else:
+        selected_ids = passing_ids
+        logger.info(
+            "All %d QC-passing markers fit within %.1f GB budget (%d limit); "
+            "no subsampling needed.",
+            n_passing, max_ram_gb, budget,
+        )
+
+    # 4. Load only selected markers from BCF
+    logger.info("Scanning BCF to load %d selected markers", len(selected_ids))
+    lrr_subset, samples, variants_subset = read_lrr_selected(
+        input_path, set(selected_ids),
+    )
+    logger.info(
+        "Loaded subset: %d variants × %d samples (%.2f GB)",
+        lrr_subset.shape[0], lrr_subset.shape[1],
+        lrr_subset.nbytes / 1024**3,
+    )
+
+    if lrr_subset.shape[0] == 0:
+        logger.error(
+            "No selected markers found in BCF — check that variant IDs in "
+            "the QC file match the BCF.  Selected %d IDs but none matched.",
+            len(selected_ids),
+        )
+        return 1
+
+    # 5. Extract positions and chromosomes from the subset
+    positions_sub = np.array([v["pos"] for v in variants_subset], dtype=np.intp)
+    chromosomes_sub = np.array([v["chrom"] for v in variants_subset], dtype=str)
+
+    # Determine exclusion regions (using subset chromosomes)
+    exclude_regions = _resolve_exclusion_regions(
+        args, cfg, input_path, chromosomes_sub,
+    )
+    if exclude_regions == "error":
+        return 1
+
+    # 6. Build upstream QC mask for the subset (all True, since pre-selected)
+    variant_ids_sub = [_variant_id(v) for v in variants_subset]
+    upstream_qc_mask_sub = variant_qc_mask(
+        variant_ids_sub, qc_data,
+        require_call_rate=True, require_hwe=True, require_maf=False,
+        audit=audit, audit_stage="correction_variant_qc",
+    )
+
+    # 7. Run SVD + QR correction on the subset (fits in budget)
+    # max_ram_gb=None since we already pre-selected to fit within budget
+    subset_kwargs = {k: v for k, v in correct_kwargs.items() if k != "max_ram_gb"}
+    logger.info(
+        "Running batch-effect correction on subset (k=%s, n_components=%s)",
+        subset_kwargs.get("k") or "auto",
+        subset_kwargs.get("n_components") or "auto(5% of HQ samples)",
+    )
+    corrected_subset, info = correct_lrr(
+        lrr_subset,
+        positions=positions_sub,
+        chromosomes=chromosomes_sub,
+        exclude_regions=exclude_regions,
+        upstream_qc_mask=upstream_qc_mask_sub,
+        audit=audit,
+        variant_ids=variant_ids_sub,
+        sample_ids=samples,
+        max_ram_gb=None,
+        **subset_kwargs,
+    )
+    logger.info(
+        "Subset correction complete: k=%d, %d HQ samples, %d markers used",
+        info["k"], info["n_hq_samples"], info["n_markers_used"],
+    )
+
+    # Record budget metadata in info
+    info["rsvd_subsampled"] = n_passing > budget
+    info["rsvd_marker_budget"] = budget
+
+    # 8. Extract PC scores and stream-correct ALL markers → output
+    k = info["k"]
+    Vt_k = np.asarray(info["sample_scores"])[:k, :]
+
+    logger.info("Streaming PC regression to %s", args.output)
+    all_variants, n_skipped = stream_correct_write(
+        input_path,
+        args.output,
+        Vt_k,
+        samples,
+        info,
+        path_template=input_path,
+        chunk_size=correct_kwargs.get("chunk_size", 5000),
+        min_valid_frac=correct_kwargs.get("min_valid_frac", 0.5),
+    )
+    logger.info(
+        "Streaming correction done: %d variants, %d skipped",
+        len(all_variants), n_skipped,
+    )
+
+    # 9. Write SVD outputs, report, and audit trail.
+    # For the diagnostic report, use the pre-selected subset (which
+    # is representative and fits in memory).
+    _write_outputs(
+        args, info, samples, variants_subset,
+        lrr_subset, corrected_subset,
+        chromosomes_sub, upstream_qc_mask_sub, audit,
+    )
+
+    logger.info("Done (streaming mode).")
     return 0
 
 
