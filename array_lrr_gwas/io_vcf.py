@@ -68,14 +68,13 @@ def read_lrr(
     variants: list[dict] = []
     for rec in vcf_in:
         row = np.full(n_samples, np.nan, dtype=np.float64)
-        for i, sname in enumerate(samples):
-            val = rec.samples[sname].get("LRR")
+        for i, sample_data in enumerate(rec.samples.values()):
+            val = sample_data.get("LRR")
             if val is not None:
                 try:
                     v = float(val)
                     if np.isfinite(v):
                         row[i] = v
-                    # Non-finite (inf/-inf) treated as missing → leave as np.nan
                 except (TypeError, ValueError):
                     pass
         lrr_rows.append(row)
@@ -121,8 +120,8 @@ def _variant_id_from_rec(rec) -> str:
 def _parse_rec_row(rec, n_samples: int, samples: list[str]):
     """Parse a single pysam record into an LRR row and variant metadata."""
     row = np.full(n_samples, np.nan, dtype=np.float64)
-    for i, sname in enumerate(samples):
-        val = rec.samples[sname].get("LRR")
+    for i, sample_data in enumerate(rec.samples.values()):
+        val = sample_data.get("LRR")
         if val is not None:
             try:
                 v = float(val)
@@ -338,17 +337,12 @@ def stream_correct_write(
         if s not in hdr.samples:
             hdr.add_sample(s)
 
-    # First pass: collect contig names (needed for output header)
+    # Copy contig definitions from input header (avoids a full file scan)
     vcf_scan = pysam.VariantFile(path_in)
-    contig_set: set[str] = set()
-    n_total_variants = 0
-    for rec in vcf_scan:
-        n_total_variants += 1
-        contig_set.add(rec.chrom)
-    vcf_scan.close()
-    for c in sorted(contig_set):
+    for c in vcf_scan.header.contigs:
         if c not in hdr.contigs:
             hdr.add_meta("contig", items=[("ID", c)])
+    vcf_scan.close()
 
     # Open input for streaming
     vcf_in = pysam.VariantFile(path_in)
@@ -375,12 +369,13 @@ def stream_correct_write(
     chunk_rows: list[NDArray] = []
     chunk_recs: list[dict] = []
 
-    n_chunks = (n_total_variants + chunk_size - 1) // chunk_size
+    # Cache sample list once outside the loop to avoid repeated conversion
+    _samples_list = list(samples)
 
     logger.info(
-        "Streaming PC correction: regressing %d PCs out of %d markers × "
-        "%d samples in %d chunk(s) of %d",
-        k, n_total_variants, n_samples, n_chunks, chunk_size,
+        "Streaming PC correction: regressing %d PCs out of "
+        "%d samples in chunk(s) of %d",
+        k, n_samples, chunk_size,
     )
 
     def _flush_chunk(rows, recs):
@@ -425,12 +420,12 @@ def stream_correct_write(
                 alleles=(var_meta["ref"],) + alts,
                 id=var_meta.get("id"),
             )
-            for j, sname in enumerate(samples):
+            for j, sample_data in enumerate(out_rec.samples.values()):
                 val = corrected_chunk[i, j]
                 if np.isnan(val):
-                    out_rec.samples[sname]["LRR"] = None
+                    sample_data["LRR"] = None
                 else:
-                    out_rec.samples[sname]["LRR"] = float(val)
+                    sample_data["LRR"] = float(val)
             vcf_out.write(out_rec)
 
         # Accumulate post-correction stats for diagnostic markers
@@ -444,14 +439,13 @@ def stream_correct_write(
             _diag_sum_sq[:] += (safe * safe).sum(axis=0)
 
     with tqdm(
-        total=n_total_variants,
         desc="Streaming PC regression",
         unit="marker",
         leave=False,
         dynamic_ncols=True,
     ) as pbar:
         for rec in vcf_in:
-            row, var_meta = _parse_rec_row(rec, n_samples, list(samples))
+            row, var_meta = _parse_rec_row(rec, n_samples, _samples_list)
             all_variants.append(var_meta)
             chunk_rows.append(row)
             chunk_recs.append(var_meta)
@@ -474,6 +468,7 @@ def stream_correct_write(
     vcf_in.close()
     vcf_out.close()
 
+    n_total_variants = len(all_variants)
     if total_skipped > 0:
         logger.info(
             "Streaming QR regression: %d / %d markers skipped "
@@ -636,12 +631,12 @@ def write_corrected(
             alleles=(var["ref"],) + alts,
             id=var.get("id"),
         )
-        for j, sname in enumerate(samples):
+        for j, sample_data in enumerate(rec.samples.values()):
             val = corrected_lrr[i, j]
             if np.isnan(val):
-                rec.samples[sname]["LRR"] = None
+                sample_data["LRR"] = None
             else:
-                rec.samples[sname]["LRR"] = float(val)
+                sample_data["LRR"] = float(val)
         vcf_out.write(rec)
 
     vcf_out.close()
