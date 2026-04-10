@@ -365,11 +365,19 @@ def stream_correct_write(
         )
         total_skipped += chunk_skipped
         for i, var_meta in enumerate(recs):
+            # pysam requires at least 2 alleles (REF + ALT).  Intensity-only
+            # markers from illumina_idat_processing have no ALT allele
+            # (rec.alts is None), so we must supply the VCF missing-ALT
+            # placeholder "." to avoid ``ValueError: must set at least
+            # 2 alleles``.
+            alts = tuple(var_meta.get("alts", ()))
+            if not alts:
+                alts = (".",)
             out_rec = vcf_out.new_record(
                 contig=var_meta["chrom"],
                 start=var_meta["pos"] - 1,
                 stop=var_meta["pos"],
-                alleles=(var_meta["ref"],) + tuple(var_meta.get("alts", ())),
+                alleles=(var_meta["ref"],) + alts,
                 id=var_meta.get("id"),
             )
             for j, sname in enumerate(samples):
@@ -530,11 +538,16 @@ def write_corrected(
     vcf_out = pysam.VariantFile(path_out, mode, header=hdr)
 
     for i, var in enumerate(variants):
+        # pysam requires at least 2 alleles (REF + ALT).  Intensity-only
+        # markers have no ALT, so supply the VCF missing placeholder ".".
+        alts = tuple(var.get("alts", ()))
+        if not alts:
+            alts = (".",)
         rec = vcf_out.new_record(
             contig=var["chrom"],
             start=var["pos"] - 1,  # pysam uses 0-based
             stop=var["pos"],
-            alleles=(var["ref"],) + tuple(var.get("alts", ())),
+            alleles=(var["ref"],) + alts,
             id=var.get("id"),
         )
         for j, sname in enumerate(samples):

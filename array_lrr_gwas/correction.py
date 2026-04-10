@@ -328,7 +328,8 @@ def correct_lrr(
     max_ram_gb: float | None = None,
     chunk_size: int = 5000,
     min_valid_frac: float = 0.5,
-) -> tuple[NDArray[np.floating], dict]:
+    skip_residualize: bool = False,
+) -> tuple[NDArray[np.floating] | None, dict]:
     """End-to-end batch-effect correction for an LRR matrix.
 
     Parameters
@@ -384,11 +385,20 @@ def correct_lrr(
         Minimum fraction of finite (non-``NaN``) samples required per
         marker for QR regression.  Markers below this threshold (or with
         fewer than ``k + 1`` valid values) are left uncorrected.
+    skip_residualize : bool
+        When ``True``, skip the in-memory QR regression step that corrects
+        all input markers.  The SVD decomposition, sample classification,
+        and marker subsetting still run, and the returned *info* dict
+        contains the PC scores needed for downstream streaming correction.
+        The first return element will be ``None`` instead of the corrected
+        matrix.  Use this when correction will be performed separately
+        (e.g. via :func:`~array_lrr_gwas.io_vcf.stream_correct_write`).
 
     Returns
     -------
-    corrected : ndarray, shape (n_markers, n_samples)
-        Batch-corrected LRR values.
+    corrected : ndarray, shape (n_markers, n_samples), or None
+        Batch-corrected LRR values, or ``None`` when *skip_residualize*
+        is ``True``.
     info : dict
         Metadata about the correction.  Keys:
 
@@ -631,14 +641,28 @@ def correct_lrr(
     # Unlike the old SVD-based residualize() which only corrected the
     # marker subset used for decomposition, QR regression corrects every
     # marker by regressing its LRR values against the global PC scores.
-    pbar.set_description("PC regression")
-    corrected = residualize_qr(
-        lrr,
-        Vt_full_all[:k, :],
-        chunk_size=chunk_size,
-        min_valid_frac=min_valid_frac,
-    )
-    pbar.set_postfix(k=k, markers_corrected=n_total_markers, refresh=False)
+    #
+    # When skip_residualize=True, this step is skipped entirely — the
+    # caller is expected to apply correction via stream_correct_write()
+    # or residualize_qr() separately.  This avoids double-correcting
+    # markers when the streaming path handles all markers from the
+    # original file.
+    if skip_residualize:
+        corrected = None
+        logger.info(
+            "Skipping in-memory QR regression (skip_residualize=True); "
+            "PC scores ready for downstream streaming correction"
+        )
+        pbar.set_postfix(k=k, skip_residualize=True, refresh=False)
+    else:
+        pbar.set_description("PC regression")
+        corrected = residualize_qr(
+            lrr,
+            Vt_full_all[:k, :],
+            chunk_size=chunk_size,
+            min_valid_frac=min_valid_frac,
+        )
+        pbar.set_postfix(k=k, markers_corrected=n_total_markers, refresh=False)
     pbar.update(1)
     pbar.set_description("done")
     pbar.close()

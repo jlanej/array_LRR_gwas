@@ -335,3 +335,52 @@ class TestCorrectLrr:
         )
         assert info["rsvd_subsampled"] is False
         assert info["rsvd_marker_budget"] is None
+
+    def test_skip_residualize(self, synthetic_lrr):
+        """skip_residualize=True returns None for corrected and valid info."""
+        corrected, info = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+            skip_residualize=True,
+        )
+        assert corrected is None
+        assert info["k"] == 2
+        assert "singular_values" in info
+        assert "sample_scores" in info
+        assert info["sample_scores"].shape[0] >= info["k"]
+        assert info["sample_scores"].shape[1] == synthetic_lrr.shape[1]
+
+    def test_skip_residualize_info_matches(self, synthetic_lrr):
+        """skip_residualize produces the same info as a full correction."""
+        _, info_full = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+        _, info_skip = correct_lrr(
+            synthetic_lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+            skip_residualize=True,
+        )
+        assert info_skip["k"] == info_full["k"]
+        assert info_skip["n_hq_samples"] == info_full["n_hq_samples"]
+        assert info_skip["n_markers_used"] == info_full["n_markers_used"]
+        np.testing.assert_array_equal(
+            info_skip["singular_values"],
+            info_full["singular_values"],
+        )
+        np.testing.assert_array_equal(
+            info_skip["sample_scores"],
+            info_full["sample_scores"],
+        )

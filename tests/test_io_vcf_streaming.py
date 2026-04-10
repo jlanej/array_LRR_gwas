@@ -178,3 +178,122 @@ class TestStreamCorrectWrite:
         )
         assert out_path.exists()
         assert len(all_variants) == len(variants)
+
+    def test_streaming_with_intensity_only_markers(self, tmp_path):
+        """stream_correct_write handles intensity-only markers (no ALT allele).
+
+        Intensity-only probes from illumina_idat_processing have no ALT
+        allele.  pysam requires at least 2 alleles when creating a new
+        record, so the code must add a '.' placeholder ALT.  This test
+        verifies the fix for the ValueError crash.
+        """
+        import pysam
+        from array_lrr_gwas.correction import correct_lrr
+
+        rng = np.random.default_rng(42)
+        n_samples = 6
+        sample_names = [f"S{i}" for i in range(n_samples)]
+
+        # Build a BCF with a mix of regular and intensity-only markers
+        bcf_path = tmp_path / "with_io.bcf"
+        hdr = pysam.VariantHeader()
+        hdr.add_meta(
+            "FORMAT",
+            items=[
+                ("ID", "LRR"), ("Number", "1"),
+                ("Type", "Float"), ("Description", "Log R Ratio"),
+            ],
+        )
+        hdr.add_meta(
+            "FORMAT",
+            items=[
+                ("ID", "GT"), ("Number", "1"),
+                ("Type", "String"), ("Description", "Genotype"),
+            ],
+        )
+        hdr.add_meta(
+            "INFO",
+            items=[
+                ("ID", "INTENSITY_ONLY"), ("Number", "0"),
+                ("Type", "Flag"),
+                ("Description", "Intensity-only probe"),
+            ],
+        )
+        hdr.add_meta("contig", items=[("ID", "chr1")])
+        for s in sample_names:
+            hdr.add_sample(s)
+
+        vcf_out = pysam.VariantFile(str(bcf_path), "wb", header=hdr)
+
+        n_regular = 30
+        n_io = 20
+        total = n_regular + n_io
+
+        for i in range(n_regular):
+            rec = vcf_out.new_record(
+                contig="chr1",
+                start=1000 * (i + 1),
+                stop=1000 * (i + 1) + 1,
+                alleles=("A", "C"),
+                id=f"rs{i}",
+            )
+            for s in sample_names:
+                rec.samples[s]["LRR"] = float(rng.normal(0, 0.1))
+            vcf_out.write(rec)
+
+        for i in range(n_io):
+            # Intensity-only: REF only, no ALT (use "." placeholder)
+            rec = vcf_out.new_record(
+                contig="chr1",
+                start=1000 * (n_regular + i + 1),
+                stop=1000 * (n_regular + i + 1) + 1,
+                alleles=("G", "."),
+                id=f"io{i}",
+            )
+            rec.info["INTENSITY_ONLY"] = True
+            for s in sample_names:
+                rec.samples[s]["LRR"] = float(rng.normal(0, 0.05))
+            vcf_out.write(rec)
+
+        vcf_out.close()
+
+        # Read and correct
+        lrr, samples, variants = read_lrr(bcf_path)
+        assert lrr.shape == (total, n_samples)
+
+        corrected, info = correct_lrr(
+            lrr,
+            k=2,
+            max_lrr_sd=10.0,
+            min_sample_call_rate=0.0,
+            min_marker_call_rate=0.5,
+            min_var=0.0,
+        )
+        k = info["k"]
+        Vt_k = np.asarray(info["sample_scores"])[:k, :]
+
+        # Stream-correct (this used to crash with ValueError:
+        # must set at least 2 alleles)
+        out_path = tmp_path / "io_corrected.bcf"
+        all_variants, n_skipped = stream_correct_write(
+            bcf_path,
+            out_path,
+            Vt_k,
+            samples,
+            info,
+            path_template=bcf_path,
+        )
+
+        assert len(all_variants) == total
+        assert out_path.exists()
+
+        # Verify output is readable and has all markers
+        lrr_out, samples_out, variants_out = read_lrr(out_path)
+        assert lrr_out.shape == (total, n_samples)
+        assert samples_out == samples
+
+        # Verify intensity-only markers are flagged in metadata
+        io_count = sum(
+            1 for v in all_variants if v.get("intensity_only", False)
+        )
+        assert io_count == n_io
