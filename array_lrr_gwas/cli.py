@@ -1047,17 +1047,21 @@ def _run_correct_full(args, input_path, audit, cfg, correct_kwargs,
         correct_kwargs.get("n_components") or "auto(5% of HQ samples)",
     )
     variant_ids = [_variant_id(v) for v in variants]
-    corrected, info = correct_lrr(
-        lrr,
-        positions=positions,
-        chromosomes=chromosomes,
-        exclude_regions=exclude_regions,
-        upstream_qc_mask=upstream_qc_mask,
-        audit=audit,
-        variant_ids=variant_ids,
-        sample_ids=samples,
-        **correct_kwargs,
-    )
+    try:
+        corrected, info = correct_lrr(
+            lrr,
+            positions=positions,
+            chromosomes=chromosomes,
+            exclude_regions=exclude_regions,
+            upstream_qc_mask=upstream_qc_mask,
+            audit=audit,
+            variant_ids=variant_ids,
+            sample_ids=samples,
+            **correct_kwargs,
+        )
+    except ValueError as exc:
+        logger.error("Correction failed: %s", exc)
+        return 1
     logger.info(
         "Correction complete: k=%d, %d HQ samples, %d markers used",
         info["k"],
@@ -1196,18 +1200,22 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
         subset_kwargs.get("k") or "auto",
         subset_kwargs.get("n_components") or "auto(5% of HQ samples)",
     )
-    corrected_subset, info = correct_lrr(
-        lrr_subset,
-        positions=positions_sub,
-        chromosomes=chromosomes_sub,
-        exclude_regions=exclude_regions,
-        upstream_qc_mask=upstream_qc_mask_sub,
-        audit=audit,
-        variant_ids=variant_ids_sub,
-        sample_ids=samples,
-        max_ram_gb=None,
-        **subset_kwargs,
-    )
+    try:
+        corrected_subset, info = correct_lrr(
+            lrr_subset,
+            positions=positions_sub,
+            chromosomes=chromosomes_sub,
+            exclude_regions=exclude_regions,
+            upstream_qc_mask=upstream_qc_mask_sub,
+            audit=audit,
+            variant_ids=variant_ids_sub,
+            sample_ids=samples,
+            max_ram_gb=None,
+            **subset_kwargs,
+        )
+    except ValueError as exc:
+        logger.error("Correction failed: %s", exc)
+        return 1
     logger.info(
         "Subset correction complete: k=%d, %d HQ samples, %d markers used",
         info["k"], info["n_hq_samples"], info["n_markers_used"],

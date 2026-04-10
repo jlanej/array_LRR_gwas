@@ -254,6 +254,87 @@ class TestCli:
         assert rc == 0
         assert out.exists()
 
+    def test_correct_streaming_path(self, test_bcf_path, tmp_path):
+        """--max-ram-gb + --variant-qc triggers the streaming correction path."""
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, _, variants = read_lrr(test_bcf_path)
+        qc_tsv = tmp_path / "collated_variant_qc.tsv"
+        lines = [
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass"
+        ]
+        for v in variants:
+            vid = v.get("id") or (
+                f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:"
+                f"{':'.join(v.get('alts', ()))}"
+            )
+            lines.append(f"{vid}\tTrue\tTrue\tTrue")
+        qc_tsv.write_text("\n".join(lines) + "\n")
+
+        out = tmp_path / "out.bcf"
+        rc = main([
+            "correct",
+            str(test_bcf_path),
+            "-o", str(out),
+            "--no-complexity-filter",
+            "--max-lrr-sd", "10.0",
+            "--min-sample-call-rate", "0.0",
+            "--min-marker-call-rate", "0.5",
+            "--min-var", "0.0",
+            "--max-ram-gb", "0.001",
+            "--variant-qc", str(qc_tsv),
+            "--no-interactive-report",
+        ])
+        assert rc == 0
+        assert out.exists()
+
+    def test_correct_all_lq_samples_returns_error(self, test_bcf_path, tmp_path):
+        """Correction exits with code 1 when no samples pass HQ threshold."""
+        out = tmp_path / "out.bcf"
+        rc = main([
+            "correct",
+            str(test_bcf_path),
+            "-o", str(out),
+            "--max-lrr-sd", "0.001",   # far too strict → all samples LQ
+            "--no-complexity-filter",
+            "--no-interactive-report",
+        ])
+        assert rc == 1
+        assert not out.exists()
+
+    def test_correct_streaming_all_lq_samples_returns_error(self, test_bcf_path, tmp_path):
+        """Streaming correction exits with code 1 when no samples pass HQ threshold."""
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, _, variants = read_lrr(test_bcf_path)
+        qc_tsv = tmp_path / "collated_variant_qc.tsv"
+        lines = [
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass"
+        ]
+        for v in variants:
+            vid = v.get("id") or (
+                f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:"
+                f"{':'.join(v.get('alts', ()))}"
+            )
+            lines.append(f"{vid}\tTrue\tTrue\tTrue")
+        qc_tsv.write_text("\n".join(lines) + "\n")
+
+        out = tmp_path / "out.bcf"
+        rc = main([
+            "correct",
+            str(test_bcf_path),
+            "-o", str(out),
+            "--max-lrr-sd", "0.001",   # far too strict → all samples LQ
+            "--max-ram-gb", "0.001",
+            "--variant-qc", str(qc_tsv),
+            "--no-complexity-filter",
+            "--no-interactive-report",
+        ])
+        assert rc == 1
+        assert not out.exists()
+
     def test_correct_writes_svd_text_outputs(self, tmp_path, monkeypatch):
         fake_bcf = tmp_path / "in.bcf"
         fake_bcf.write_text("stub")
