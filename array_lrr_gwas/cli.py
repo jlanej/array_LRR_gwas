@@ -906,7 +906,8 @@ def _resolve_exclusion_regions(args, cfg, input_path, chromosomes):
 
 
 def _write_outputs(args, info, samples, variants, lrr, corrected,
-                   chromosomes, upstream_qc_mask, audit):
+                   chromosomes, upstream_qc_mask, audit,
+                   post_metrics=None):
     """Shared helper: write SVD text outputs, report, and audit trail."""
     svd_prefix = args.svd_output_prefix or Path(f"{args.output}.svd")
     svd_paths = _write_svd_text_outputs(
@@ -933,6 +934,7 @@ def _write_outputs(args, info, samples, variants, lrr, corrected,
                 samples=samples,
                 lrr=lrr,
                 corrected_lrr=corrected,
+                post_metrics=post_metrics,
                 chromosomes=chromosomes,
                 upstream_qc_mask=upstream_qc_mask,
                 output_path=report_path,
@@ -1225,14 +1227,36 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
     # 8. Extract PC scores and stream-correct ALL markers → output.
     # This is the SINGLE correction pass: every marker in the original
     # BCF is PC-corrected exactly once from the uncorrected source.
+    # Post-correction diagnostic metrics are accumulated during streaming
+    # for the subset markers, avoiding a separate in-memory correction.
     k = info["k"]
     Vt_k = np.asarray(info["sample_scores"])[:k, :]
+
+    # Build the set of diagnostic marker IDs for streaming accumulation.
+    # These are the autosomal, QC-passing markers from the subset — the
+    # same set that compute_sample_metrics() would use for pre-correction
+    # metrics, ensuring identical marker alignment pre/post.
+    from array_lrr_gwas.subsetting import autosome_mask as _auto_mask
+    _diag_mask = np.ones(len(variants_subset), dtype=bool)
+    if chromosomes_sub is not None:
+        _diag_mask &= _auto_mask(chromosomes_sub)
+    if upstream_qc_mask_sub is not None:
+        _diag_mask &= upstream_qc_mask_sub
+    diagnostic_ids = {
+        _variant_id(variants_subset[i])
+        for i in range(len(variants_subset))
+        if _diag_mask[i]
+    }
+    logger.info(
+        "Tracking %d diagnostic markers during streaming for post-correction metrics",
+        len(diagnostic_ids),
+    )
 
     logger.info(
         "Streaming single-pass PC correction of ALL markers to %s",
         args.output,
     )
-    all_variants, n_skipped = stream_correct_write(
+    all_variants, n_skipped, post_metrics = stream_correct_write(
         input_path,
         args.output,
         Vt_k,
@@ -1241,36 +1265,21 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
         path_template=input_path,
         chunk_size=correct_kwargs.get("chunk_size", 5000),
         min_valid_frac=correct_kwargs.get("min_valid_frac", 0.5),
+        diagnostic_marker_ids=diagnostic_ids,
     )
     logger.info(
         "Streaming correction done: %d variants corrected, %d skipped",
         len(all_variants), n_skipped,
     )
 
-    # 9. Compute diagnostic correction for the subset (for the report).
-    # This is a lightweight in-memory correction of the small subset only,
-    # separate from the streaming output, so markers are not
-    # double-corrected in the output file.
-    from array_lrr_gwas.correction import residualize_qr
-
-    logger.info(
-        "Computing diagnostic correction on %d-marker subset for report",
-        lrr_subset.shape[0],
-    )
-    corrected_subset = residualize_qr(
-        lrr_subset,
-        Vt_k,
-        chunk_size=correct_kwargs.get("chunk_size", 5000),
-        min_valid_frac=correct_kwargs.get("min_valid_frac", 0.5),
-    )
-
-    # 10. Write SVD outputs, report, and audit trail.
-    # For the diagnostic report, use the pre-selected subset (which
-    # is representative and fits in memory).
+    # 9. Write SVD outputs, report, and audit trail.
+    # Post-correction metrics were accumulated during streaming;
+    # no separate in-memory correction step is needed.
     _write_outputs(
         args, info, samples, variants_subset,
-        lrr_subset, corrected_subset,
+        lrr_subset, None,
         chromosomes_sub, upstream_qc_mask_sub, audit,
+        post_metrics=post_metrics,
     )
 
     logger.info("Done (streaming mode).")

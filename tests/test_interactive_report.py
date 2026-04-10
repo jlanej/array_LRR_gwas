@@ -1092,3 +1092,69 @@ class TestGenerateReportWithCorrectedLrr:
             post_sd = float(parts[4])
             if pre_sd > 0:
                 assert post_sd < pre_sd
+
+
+class TestGenerateReportWithPrecomputedPostMetrics:
+    """generate_report with pre-computed post_metrics dict."""
+
+    def test_precomputed_post_metrics_in_html(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        """Pre-computed post_metrics produces comparison plots in HTML."""
+        from array_lrr_gwas.interactive_report import (
+            generate_report, compute_sample_metrics,
+        )
+
+        # Compute post_metrics manually
+        corrected = synthetic_lrr * 0.7
+        post_metrics = compute_sample_metrics(corrected, sample_ids)
+
+        out = generate_report(
+            info=synthetic_info,
+            samples=sample_ids,
+            lrr=synthetic_lrr,
+            post_metrics=post_metrics,
+            output_path=tmp_path / "report_precomp.html",
+            metrics_tsv_path=tmp_path / "metrics_precomp.tsv",
+            skip_umap=True,
+        )
+        html = out.read_text()
+        assert "lrr-scatter" in html
+        assert '"lrr_comparison": null' not in html
+
+        # Verify TSV has post columns
+        tsv = (tmp_path / "metrics_precomp.tsv").read_text()
+        header = tsv.splitlines()[0]
+        assert "LRR_SD_post" in header
+        assert "callrate_post" in header
+
+    def test_post_metrics_takes_precedence_over_corrected_lrr(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        """When both post_metrics and corrected_lrr are given, post_metrics wins."""
+        from array_lrr_gwas.interactive_report import generate_report
+
+        # Provide a post_metrics dict with known sentinel values
+        post_metrics = {
+            "SAMPLE": sample_ids,
+            "LRR_SD": [0.123] * len(sample_ids),
+            "callrate": [0.999] * len(sample_ids),
+            "n_markers_used": [50] * len(sample_ids),
+        }
+        corrected = synthetic_lrr * 0.7  # would give different values
+
+        generate_report(
+            info=synthetic_info,
+            samples=sample_ids,
+            lrr=synthetic_lrr,
+            corrected_lrr=corrected,
+            post_metrics=post_metrics,
+            output_path=tmp_path / "report.html",
+            metrics_tsv_path=tmp_path / "metrics.tsv",
+            skip_umap=True,
+        )
+        lines = (tmp_path / "metrics.tsv").read_text().splitlines()
+        # Check that the sentinel value from post_metrics is used
+        parts = lines[1].split("\t")
+        post_sd = float(parts[4])
+        assert post_sd == pytest.approx(0.123, abs=1e-3)

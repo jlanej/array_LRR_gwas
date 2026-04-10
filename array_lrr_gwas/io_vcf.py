@@ -247,13 +247,19 @@ def stream_correct_write(
     path_template: str | Path | None = None,
     chunk_size: int = 5000,
     min_valid_frac: float = 0.5,
-) -> tuple[list[dict], int]:
+    diagnostic_marker_ids: set[str] | None = None,
+) -> tuple[list[dict], int, dict | None]:
     """Stream through a BCF/VCF, apply QR PC-regression, and write output.
 
     This function never holds the full LRR matrix in memory.  It reads
     the input file in chunks of *chunk_size* variants, applies the
     precomputed QR regression (from :func:`~array_lrr_gwas.correction.qr_precompute`),
     and writes corrected values directly to *path_out*.
+
+    When *diagnostic_marker_ids* is provided, post-correction sample QC
+    metrics (LRR_SD and callrate) are computed progressively during
+    streaming for the matching markers.  This avoids a separate in-memory
+    correction pass solely for diagnostic reporting.
 
     Parameters
     ----------
@@ -273,6 +279,10 @@ def stream_correct_write(
         Number of variant rows processed per QR-regression batch.
     min_valid_frac : float
         Minimum fraction of finite samples required for correction.
+    diagnostic_marker_ids : set of str or None
+        When provided, accumulate post-correction LRR_SD and callrate
+        for these markers during streaming.  The returned *post_metrics*
+        dict will contain per-sample statistics computed on this subset.
 
     Returns
     -------
@@ -280,6 +290,12 @@ def stream_correct_write(
         Per-variant metadata for every variant in the file.
     n_skipped : int
         Number of markers left uncorrected (insufficient valid data).
+    post_metrics : dict or None
+        When *diagnostic_marker_ids* is given, a dict with keys
+        ``SAMPLE``, ``LRR_SD``, ``callrate``, and ``n_markers_used``,
+        matching the format of
+        :func:`~array_lrr_gwas.interactive_report.compute_sample_metrics`.
+        ``None`` when *diagnostic_marker_ids* is not provided.
     """
     from array_lrr_gwas.correction import qr_precompute, _correct_chunk_qr
 
@@ -342,6 +358,20 @@ def stream_correct_write(
     all_variants: list[dict] = []
     total_skipped = 0
 
+    # Online accumulators for diagnostic marker metrics (Welford-style).
+    # We track per-sample: count of finite corrected values, running sum,
+    # and running sum-of-squares so that LRR_SD and callrate can be
+    # computed at the end without storing the corrected values.
+    _diag_ids: set[str] | None = diagnostic_marker_ids
+    _diag_n_total = 0  # total diagnostic markers seen (denominator for callrate)
+    _diag_count: NDArray | None = None  # (n_samples,) finite count
+    _diag_sum: NDArray | None = None    # (n_samples,) running sum
+    _diag_sum_sq: NDArray | None = None  # (n_samples,) running sum of squares
+    if _diag_ids is not None:
+        _diag_count = np.zeros(n_samples, dtype=np.int64)
+        _diag_sum = np.zeros(n_samples, dtype=np.float64)
+        _diag_sum_sq = np.zeros(n_samples, dtype=np.float64)
+
     # Buffer for chunk-wise processing
     chunk_rows: list[NDArray] = []
     chunk_recs: list[dict] = []
@@ -356,7 +386,7 @@ def stream_correct_write(
 
     def _flush_chunk(rows, recs):
         """Apply QR correction to buffered rows and write to output."""
-        nonlocal total_skipped
+        nonlocal total_skipped, _diag_n_total
         if not rows:
             return
         chunk = np.vstack(rows)
@@ -364,6 +394,22 @@ def stream_correct_write(
             chunk, Q, X, min_valid_frac=min_valid_frac,
         )
         total_skipped += chunk_skipped
+
+        # Identify which rows in this chunk are diagnostic markers
+        diag_row_indices: list[int] | None = None
+        if _diag_ids is not None:
+            diag_row_indices = []
+            for i, var_meta in enumerate(recs):
+                vid = var_meta.get("id")
+                if vid is None or vid == ".":
+                    alts = var_meta.get("alts") or ()
+                    vid = (
+                        f"{var_meta['chrom']}:{var_meta['pos']}"
+                        f":{var_meta.get('ref', '')}:{':'.join(alts)}"
+                    )
+                if vid in _diag_ids:
+                    diag_row_indices.append(i)
+
         for i, var_meta in enumerate(recs):
             # pysam requires at least 2 alleles (REF + ALT).  Intensity-only
             # markers from illumina_idat_processing have no ALT allele
@@ -387,6 +433,16 @@ def stream_correct_write(
                 else:
                     out_rec.samples[sname]["LRR"] = float(val)
             vcf_out.write(out_rec)
+
+        # Accumulate post-correction stats for diagnostic markers
+        if diag_row_indices:
+            diag_chunk = corrected_chunk[diag_row_indices]  # (n_diag, n_samples)
+            _diag_n_total += len(diag_row_indices)
+            finite = np.isfinite(diag_chunk)
+            safe = np.where(finite, diag_chunk, 0.0)
+            _diag_count[:] += finite.sum(axis=0)
+            _diag_sum[:] += safe.sum(axis=0)
+            _diag_sum_sq[:] += (safe ** 2).sum(axis=0)
 
     with tqdm(
         total=n_total_variants,
@@ -431,7 +487,38 @@ def stream_correct_write(
             n_total_variants,
         )
 
-    return all_variants, total_skipped
+    # Compute final post-correction diagnostic metrics if requested
+    post_metrics: dict | None = None
+    if _diag_ids is not None and _diag_n_total > 0:
+        # LRR_SD = sqrt(E[X²] - E[X]²) (population std, matching nanstd ddof=0)
+        with np.errstate(invalid="ignore"):
+            mean = _diag_sum / np.maximum(_diag_count, 1)
+            mean_sq = _diag_sum_sq / np.maximum(_diag_count, 1)
+            var = mean_sq - mean ** 2
+            # Guard against negative variance from floating-point rounding
+            var = np.maximum(var, 0.0)
+            sd = np.sqrt(var)
+        lrr_sd: list[float | None] = [
+            None if _diag_count[j] == 0 else float(sd[j])
+            for j in range(n_samples)
+        ]
+        callrate = [
+            float(_diag_count[j]) / _diag_n_total
+            for j in range(n_samples)
+        ]
+        post_metrics = {
+            "SAMPLE": list(samples),
+            "LRR_SD": lrr_sd,
+            "callrate": callrate,
+            "n_markers_used": _diag_count.tolist(),
+        }
+        logger.info(
+            "Computed post-correction diagnostic metrics on %d markers "
+            "during streaming",
+            _diag_n_total,
+        )
+
+    return all_variants, total_skipped, post_metrics
 
 
 # ---------------------------------------------------------------------------
