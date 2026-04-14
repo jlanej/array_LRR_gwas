@@ -560,8 +560,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Backend for LD pruning (default: plink2). "
             "'plink2' shells out to plink2 --indep-pairwise for "
-            "faster pruning on large datasets; if unavailable, the "
-            "CLI falls back to the NumPy backend with a warning."
+            "faster pruning on large datasets; if plink2 is not on PATH "
+            "the pipeline will exit with an error.  Use '--ld-backend numpy' "
+            "to explicitly select the pure-Python fallback."
         ),
     )
     assoc.add_argument(
@@ -1294,8 +1295,8 @@ def _run_associate(args: argparse.Namespace) -> int:
     import numpy as np
 
     from array_lrr_gwas.audit import AuditLogger
-    from array_lrr_gwas.association import run_association
-    from array_lrr_gwas.io_vcf import read_lrr
+    from array_lrr_gwas.association import run_association, run_association_streaming
+    from array_lrr_gwas.io_vcf import read_variant_metadata, stream_lrr_chunks
     from array_lrr_gwas.qc_config import defaults, load_config, apply_to_associate_args
 
     input_path = args.input
@@ -1318,11 +1319,15 @@ def _run_associate(args: argparse.Namespace) -> int:
     else:
         cfg = defaults()
 
-    # Read LRR
-    logger.info("Reading LRR from %s", input_path)
-    lrr, samples, variants = read_lrr(input_path)
+    # Read variant metadata and sample IDs without loading LRR values.
+    # This is a lightweight scan that keeps memory independent of matrix size.
+    logger.info("Scanning variant metadata from %s", input_path)
+    samples, variants = read_variant_metadata(input_path)
+    n_variants_total = len(variants)
+    n_samples_bcf = len(samples)
     logger.info(
-        "Loaded %d variants × %d samples", lrr.shape[0], lrr.shape[1]
+        "Found %d variants × %d samples (metadata only, LRR not loaded)",
+        n_variants_total, n_samples_bcf,
     )
 
     # Read phenotype TSV
@@ -1627,16 +1632,13 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     # Subset to samples with phenotype
     phenotype = pheno_vals[analyzed_mask]
-    lrr_sub = lrr[:, analyzed_mask]
 
     # ------------------------------------------------------------------
-    # Association-stage marker exclusion
+    # Association-stage marker exclusion (metadata-only pre-filter)
     # ------------------------------------------------------------------
-    # Only two hard-fail pre-filters for LRR association markers:
-    #   1. INTENSITY_ONLY (no cluster model → unreliable LRR)
-    #   2. Monomorphic LRR (zero variance → degenerate statistics)
-    # Upstream variant QC flags are NOT used to pre-filter — they are
-    # propagated to the output TSV for post-hoc filtering.
+    # INTENSITY_ONLY markers can be identified from metadata alone
+    # (no LRR needed).  Monomorphic LRR filtering is deferred to the
+    # streaming association scan because it requires loading LRR values.
     amqc = cfg.get("association_marker_qc", {})
     exclude_intensity_only = amqc.get("exclude_intensity_only", True)
     if args.no_exclude_intensity_only:
@@ -1645,86 +1647,37 @@ def _run_associate(args: argparse.Namespace) -> int:
     if args.no_exclude_monomorphic_lrr:
         exclude_monomorphic = False
 
-    n_total_markers = lrr_sub.shape[0]
-    marker_keep = np.ones(n_total_markers, dtype=bool)
+    # Build a variant-level boolean mask for metadata-based exclusions.
+    # This mask is passed to stream_lrr_chunks() so excluded variants
+    # are never loaded into memory.
+    n_total_markers = len(variants)
+    variant_mask = np.ones(n_total_markers, dtype=bool)
 
-    # 1. Exclude INTENSITY_ONLY markers
     if exclude_intensity_only:
         intensity_mask = np.array(
             [v.get("intensity_only", False) for v in variants], dtype=bool,
         )
         n_intensity = int(intensity_mask.sum())
-        marker_keep &= ~intensity_mask
+        variant_mask &= ~intensity_mask
         logger.info(
-            "Association marker exclusion: INTENSITY_ONLY: %d / %d excluded "
-            "(non-polymorphic probes without GT; retained for correction only)",
+            "Metadata-based marker exclusion: INTENSITY_ONLY: %d / %d excluded "
+            "(%s; non-polymorphic probes without GT)",
             n_intensity, n_total_markers,
+            _fmt_pct(n_intensity, n_total_markers),
         )
 
-    # 2. Exclude monomorphic LRR markers (zero variance across samples)
-    # Always compute variance for provenance; optionally exclude.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        _pre_filter_lrr_var = np.nanvar(lrr_sub, axis=1)
-    _pre_filter_all_nan = np.all(np.isnan(lrr_sub), axis=1)
-    _pre_filter_mono = (_pre_filter_lrr_var == 0.0) | _pre_filter_all_nan
-
-    if exclude_monomorphic:
-        zero_var_mask = (_pre_filter_lrr_var == 0.0) & ~_pre_filter_all_nan
-        mono_mask = zero_var_mask | _pre_filter_all_nan
-        n_mono = int(mono_mask.sum())
-        n_zero_var = int(zero_var_mask.sum())
-        n_all_nan = int(_pre_filter_all_nan.sum())
-        marker_keep &= ~mono_mask
-        logger.info(
-            "Association marker exclusion: monomorphic LRR "
-            "(zero variance): %d / %d excluded "
-            "(%d constant, %d all-NaN)",
-            n_mono, n_total_markers, n_zero_var, n_all_nan,
-        )
-
-    n_keep = int(marker_keep.sum())
-    n_excluded = n_total_markers - n_keep
+    n_metadata_keep = int(variant_mask.sum())
     logger.info(
-        "Association marker exclusion summary: %d / %d markers pass all "
-        "filters (%d excluded, %.1f%%)",
-        n_keep, n_total_markers, n_excluded,
-        100.0 * n_excluded / n_total_markers if n_total_markers > 0 else 0.0,
+        "Metadata pre-filter: %d / %d markers pass (%d excluded, %s). "
+        "Monomorphic LRR filtering deferred to streaming scan.",
+        n_metadata_keep, n_total_markers,
+        n_total_markers - n_metadata_keep,
+        _fmt_pct(n_total_markers - n_metadata_keep, n_total_markers),
     )
 
-    # Record association marker exclusion in audit trail
-    _marker_excluded: dict[str, str] = {}
-    _marker_included: list[str] = []
-    for i, (v, keep) in enumerate(zip(variants, marker_keep)):
-        vid = _variant_id(v)
-        if keep:
-            _marker_included.append(vid)
-        else:
-            reasons = []
-            if exclude_intensity_only and v.get("intensity_only", False):
-                reasons.append("intensity_only")
-            if exclude_monomorphic and _pre_filter_mono[i]:
-                reasons.append("monomorphic_lrr")
-            _marker_excluded[vid] = ";".join(reasons) if reasons else "excluded"
-    audit.record(
-        stage="association_marker_exclusion",
-        id_type="marker",
-        included=_marker_included,
-        excluded=_marker_excluded,
-    )
-
-    if n_keep == 0:
-        logger.error(
-            "No markers remain after association-stage filtering. "
-            "Consider relaxing marker exclusion criteria."
-        )
-        return 1
-
-    # Apply marker filter and carry forward the pre-computed monomorphic
-    # flags for surviving markers (avoids recomputing variance later).
-    _post_filter_mono = _pre_filter_mono[marker_keep]
-    lrr_sub = lrr_sub[marker_keep]
-    variants = [v for v, k in zip(variants, marker_keep) if k]
+    # Variants surviving the metadata filter — used for output provenance.
+    # The full list of kept/excluded variants is populated during streaming.
+    variants_meta_pass = [v for v, k in zip(variants, variant_mask) if k]
 
     # GRM for LMM
     grm = None
@@ -1822,23 +1775,13 @@ def _run_associate(args: argparse.Namespace) -> int:
                         for v in gt_variants
                     ], dtype=bool)
                 except FileNotFoundError:
-                    logger.warning(
-                        "plink2 backend requested but plink2 is not on PATH; "
-                        "falling back to NumPy LD pruning."
+                    logger.error(
+                        "plink2 backend requested but plink2 is not on PATH. "
+                        "Install plink2 (https://www.cog-genomics.org/plink/2.0/) "
+                        "or explicitly select the NumPy fallback with "
+                        "--ld-backend numpy."
                     )
-                    gt_positions = np.array(
-                        [v["pos"] for v in gt_variants], dtype=np.intp
-                    )
-                    gt_chroms = np.array(
-                        [v["chrom"] for v in gt_variants], dtype=str
-                    )
-                    ld_keep = ld_prune(
-                        dosage,
-                        positions=gt_positions,
-                        chromosomes=gt_chroms,
-                        window_bp=args.ld_window_bp,
-                        r2_thresh=args.ld_r2_thresh,
-                    )
+                    return 1
             else:
                 from array_lrr_gwas.ld_prune import ld_prune
 
@@ -1946,20 +1889,77 @@ def _run_associate(args: argparse.Namespace) -> int:
             "pre-filtering highly related individuals."
         )
 
-    # Run association
+    # ------------------------------------------------------------------
+    # Streaming association scan
+    # ------------------------------------------------------------------
+    # Stream LRR values from the BCF in chunks, applying per-chunk
+    # marker filtering (monomorphic LRR) inline.  The full LRR matrix
+    # is never held in memory.
     n_cov = covariates.shape[1] if covariates is not None else 0
     _grm_info = f", grm_size={grm.shape[0]}" if grm is not None else ""
     logger.info(
-        "Running %s association scan: n_markers=%d, n_samples=%d, "
-        "n_covariates=%d%s",
-        args.method, lrr_sub.shape[0], lrr_sub.shape[1], n_cov, _grm_info,
+        "Running streaming %s association scan: n_markers_eligible=%d, "
+        "n_samples=%d, n_covariates=%d%s",
+        args.method, n_metadata_keep, int(analyzed_mask.sum()),
+        n_cov, _grm_info,
     )
-    result = run_association(
-        lrr_sub, phenotype, variants,
+
+    lrr_stream = stream_lrr_chunks(
+        input_path,
+        chunk_size=5000,
+        sample_mask=analyzed_mask,
+        variant_mask=variant_mask,
+    )
+    result, exclusion_info = run_association_streaming(
+        lrr_stream,
+        phenotype,
         covariates=covariates,
         method=args.method,
         grm=grm,
+        exclude_monomorphic=exclude_monomorphic,
+        exclude_intensity_only=False,  # already excluded via variant_mask
     )
+    n_tested = exclusion_info["n_tested"]
+    n_mono_excluded = exclusion_info["n_monomorphic"]
+    logger.info(
+        "Streaming association complete: %d markers tested, "
+        "%d monomorphic LRR excluded during scan (%s)",
+        n_tested, n_mono_excluded,
+        _fmt_pct(n_mono_excluded, exclusion_info["n_total"]),
+    )
+
+    # Record association marker exclusion in audit trail.
+    # Combine metadata-based (INTENSITY_ONLY) and streaming (monomorphic)
+    # exclusions into a single audit record.
+    _all_marker_excluded: dict[str, str] = {}
+    if exclude_intensity_only:
+        for v, k in zip(variants, variant_mask):
+            if not k:
+                vid = _variant_id(v)
+                if v.get("intensity_only", False):
+                    _all_marker_excluded[vid] = "intensity_only"
+    _all_marker_excluded.update(exclusion_info["excluded_markers"])
+    _all_marker_included = [
+        v.get("id") or f"{v['chrom']}:{v['pos']}"
+        for v in result.to_records()
+    ] if n_tested > 0 else []
+    # Use variant_id from result directly
+    _all_marker_included = list(result.variant_id)
+
+    audit.record(
+        stage="association_marker_exclusion",
+        id_type="marker",
+        included=_all_marker_included,
+        excluded=_all_marker_excluded,
+    )
+
+    if n_tested == 0:
+        logger.error(
+            "No markers remain after association-stage filtering. "
+            "Consider relaxing marker exclusion criteria."
+        )
+        return 1
+
     logger.info("Association complete for %d variants", len(result.chrom))
 
     # Log result summary statistics for auditing.
@@ -2028,7 +2028,7 @@ def _run_associate(args: argparse.Namespace) -> int:
         "all_ancestries_qc_pass",
     )
     if qc_provenance is not None:
-        lrr_variant_ids = [_variant_id(v) for v in variants]
+        lrr_variant_ids = list(result.variant_id)
         for rec, vid in zip(records, lrr_variant_ids):
             qc_rec = qc_provenance.get(vid)
             if qc_rec is not None:
@@ -2053,12 +2053,13 @@ def _run_associate(args: argparse.Namespace) -> int:
     # markers these will be False when default exclusions are on; when
     # --no-exclude-intensity-only or --no-exclude-monomorphic-lrr is
     # used, some True values may appear.
-    for rec, v in zip(records, variants):
-        rec["intensity_only"] = v.get("intensity_only", False)
-    # Use the pre-computed monomorphic flags from the exclusion step
-    # (cached in _post_filter_mono) to avoid recomputing variance.
+    # intensity_only is always False for tested markers (filtered upstream).
+    for rec in records:
+        rec["intensity_only"] = False
+    # Use the monomorphic flags collected during streaming scan.
+    _tested_mono = exclusion_info["tested_mono_flags"]
     for i, rec in enumerate(records):
-        rec["lrr_monomorphic"] = bool(_post_filter_mono[i])
+        rec["lrr_monomorphic"] = bool(_tested_mono[i]) if i < len(_tested_mono) else False
 
     header = list(records[0].keys()) if records else []
     with open(args.output, "w", newline="") as fh:

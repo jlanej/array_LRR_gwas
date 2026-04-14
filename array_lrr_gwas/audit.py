@@ -253,7 +253,8 @@ class AuditLogger:
         """Write a stage-level summary TSV (one row per stage).
 
         Columns: stage, id_type, total_input, total_included,
-        total_excluded, excluded_reason_counts
+        total_excluded, included_fraction, excluded_fraction,
+        excluded_reason_counts
 
         Parameters
         ----------
@@ -268,7 +269,8 @@ class AuditLogger:
         path = Path(path)
         fieldnames = [
             "stage", "id_type", "total_input", "total_included",
-            "total_excluded", "excluded_reason_counts",
+            "total_excluded", "included_fraction", "excluded_fraction",
+            "excluded_reason_counts",
         ]
 
         with open(path, "w", newline="") as fh:
@@ -279,12 +281,23 @@ class AuditLogger:
                     reason: len(ids)
                     for reason, ids in rec.excluded_reasons.items()
                 }
+                total = rec.total_input
+                inc_frac = (
+                    f"{rec.total_included / total:.4f}"
+                    if total > 0 else "NA"
+                )
+                exc_frac = (
+                    f"{rec.total_excluded / total:.4f}"
+                    if total > 0 else "NA"
+                )
                 writer.writerow({
                     "stage": rec.stage,
                     "id_type": rec.id_type,
                     "total_input": rec.total_input,
                     "total_included": rec.total_included,
                     "total_excluded": rec.total_excluded,
+                    "included_fraction": inc_frac,
+                    "excluded_fraction": exc_frac,
                     "excluded_reason_counts": json.dumps(reason_counts),
                 })
 
