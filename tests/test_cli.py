@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from array_lrr_gwas.cli import _build_parser, _variant_id, main
-from conftest import mock_associate_io
+from tests import mock_associate_io
 
 
 class TestCli:
@@ -518,13 +518,12 @@ class TestCli:
         assert out.exists()
         assert "does not use the GRM random effect" in caplog.text
 
-    def test_associate_lmm_plink2_fallbacks_to_numpy(
+    def test_associate_lmm_plink2_missing_errors(
         self, tmp_path, monkeypatch, caplog
     ):
-        """If plink2 is unavailable, CLI should fall back to NumPy pruning."""
+        """If plink2 is unavailable and --ld-backend plink2 (default),
+        the CLI exits with an error instead of silently falling back."""
         import logging
-
-        from array_lrr_gwas import association
 
         # Minimal phenotype file
         pheno = tmp_path / "pheno.tsv"
@@ -567,6 +566,62 @@ class TestCli:
             "array_lrr_gwas.ld_prune.ld_prune_plink2",
             _raise_plink2_missing,
         )
+
+        with caplog.at_level(logging.ERROR, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--method", "lmm",
+                "-o", str(out),
+            ])
+
+        assert rc == 1
+        assert "plink2 backend requested but plink2 is not on PATH" in caplog.text
+        assert "--ld-backend numpy" in caplog.text
+
+    def test_associate_lmm_numpy_backend_explicit(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """With --ld-backend numpy, NumPy LD pruning is used without error."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        # Minimal phenotype file
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t0.1\nS2\t0.2\nS3\t0.3\n"
+        )
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        # LRR input for association
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
+
+        # GT input for GRM
+        dosage = np.array(
+            [[0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [2.0, 1.0, 0.0]],
+            dtype=float,
+        )
+        gt_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 110, "id": "v2", "ref": "A", "alts": ("G",)},
+            {"chrom": "chr1", "pos": 120, "id": "v3", "ref": "A", "alts": ("T",)},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.genotypes.read_genotypes",
+            lambda *_a, **_k: (dosage, samples, gt_variants),
+        )
+
         monkeypatch.setattr(
             "array_lrr_gwas.ld_prune.ld_prune",
             lambda *_a, **_k: np.array([True, False, True], dtype=bool),
@@ -619,18 +674,19 @@ class TestCli:
             lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}),
         )
 
-        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.cli"):
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
                 "associate",
                 str(fake_bcf),
                 "--phenotype", str(pheno),
                 "--method", "lmm",
+                "--ld-backend", "numpy",
                 "-o", str(out),
             ])
 
         assert rc == 0
         assert out.exists()
-        assert "falling back to NumPy LD pruning" in caplog.text
+        assert "LD pruning with NumPy" in caplog.text
 
     def test_associate_lmm_with_variant_qc(self, tmp_path, monkeypatch, caplog):
         """--variant-qc applies upstream QC mask to GRM markers before LD."""

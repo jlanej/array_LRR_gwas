@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from array_lrr_gwas.audit import AuditLogger, AuditRecord
-from conftest import mock_associate_io
+from tests import mock_associate_io
 
 
 # ---------------------------------------------------------------------------

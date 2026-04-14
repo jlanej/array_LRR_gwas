@@ -6,7 +6,7 @@ import logging
 import numpy as np
 import pytest
 
-from conftest import mock_associate_io
+from tests import mock_associate_io
 
 from array_lrr_gwas.cli import main
 from array_lrr_gwas.qc_config import defaults, load_config
