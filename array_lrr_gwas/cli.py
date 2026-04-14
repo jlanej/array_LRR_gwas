@@ -1413,6 +1413,17 @@ def _run_associate(args: argparse.Namespace) -> int:
         n_dropped_lq = int((valid_mask & ~hq_mask).sum())
         analyzed_mask = valid_mask & hq_mask
         hq_source = "file"
+
+        # Record sample QC in audit trail
+        _hq_excluded: dict[str, str] = {
+            s: "not_in_hq_list" for s in samples if s not in hq_samples
+        }
+        audit.record(
+            stage="association_sample_qc",
+            id_type="sample",
+            included=[s for s in samples if s in hq_samples],
+            excluded=_hq_excluded,
+        )
     elif args.sample_sheet is not None:
         from array_lrr_gwas.sample_sheet import classify_samples_for_association
 
@@ -1785,6 +1796,8 @@ def _run_associate(args: argparse.Namespace) -> int:
             )
 
         # LD prune GRM markers
+        # Capture variants before pruning so we can report excluded IDs.
+        _grm_pre_ld_variants = list(gt_variants)
         if not args.no_ld_prune:
             if args.ld_backend == "plink2":
                 from array_lrr_gwas.ld_prune import ld_prune, ld_prune_plink2
@@ -1855,6 +1868,19 @@ def _run_associate(args: argparse.Namespace) -> int:
                 n_before, dosage.shape[0], n_before - dosage.shape[0],
             )
 
+            # Record GRM marker set after LD pruning in audit trail.
+            _ld_included = [_variant_id(v) for v in gt_variants]
+            _ld_excluded = {
+                _variant_id(v): "ld_prune"
+                for v, k in zip(_grm_pre_ld_variants, ld_keep) if not k
+            }
+            audit.record(
+                stage="grm_ld_prune",
+                id_type="marker",
+                included=_ld_included,
+                excluded=_ld_excluded,
+            )
+
             if dosage.shape[0] == 0:
                 logger.error(
                     "No variants remain after LD pruning.  Consider "
@@ -1866,6 +1892,13 @@ def _run_associate(args: argparse.Namespace) -> int:
                 "LD pruning disabled (--no-ld-prune).  All %d GRM markers "
                 "retained without LD filtering.",
                 dosage.shape[0],
+            )
+            # Record the full marker set (no exclusions) in audit trail.
+            audit.record(
+                stage="grm_ld_prune",
+                id_type="marker",
+                included=[_variant_id(v) for v in gt_variants],
+                excluded={},
             )
 
         logger.info(
@@ -1884,6 +1917,19 @@ def _run_associate(args: argparse.Namespace) -> int:
                 logger.error("Sample %s not found in genotype file", s)
                 return 1
 
+        # Record which samples are included in the GRM in audit trail.
+        # Samples in the GT file that are not being analysed are excluded.
+        _grm_sample_excluded = {
+            s: "not_in_analyzed_set"
+            for s in gt_samples if s not in set(valid_samples)
+        }
+        audit.record(
+            stage="grm_samples",
+            id_type="sample",
+            included=valid_samples,
+            excluded=_grm_sample_excluded,
+        )
+
         dosage_aligned = dosage[:, gt_order]
         logger.info("Computing GRM...")
         grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
@@ -1901,7 +1947,13 @@ def _run_associate(args: argparse.Namespace) -> int:
         )
 
     # Run association
-    logger.info("Running %s association scan", args.method)
+    n_cov = covariates.shape[1] if covariates is not None else 0
+    _grm_info = f", grm_size={grm.shape[0]}" if grm is not None else ""
+    logger.info(
+        "Running %s association scan: n_markers=%d, n_samples=%d, "
+        "n_covariates=%d%s",
+        args.method, lrr_sub.shape[0], lrr_sub.shape[1], n_cov, _grm_info,
+    )
     result = run_association(
         lrr_sub, phenotype, variants,
         covariates=covariates,
@@ -1909,6 +1961,42 @@ def _run_associate(args: argparse.Namespace) -> int:
         grm=grm,
     )
     logger.info("Association complete for %d variants", len(result.chrom))
+
+    # Log result summary statistics for auditing.
+    if len(result.chrom) > 0:
+        _valid_p_mask = ~np.isnan(result.p_value) & (result.p_value > 0)
+        _valid_p = result.p_value[_valid_p_mask]
+        _valid_stat = result.stat[~np.isnan(result.stat)]
+        _valid_beta = result.beta[~np.isnan(result.beta)]
+        _valid_se = result.se[~np.isnan(result.se)]
+        if len(_valid_p) > 0:
+            _n_gws = int(np.sum(_valid_p < 5e-8))
+            _n_sug = int(np.sum(_valid_p < 1e-5))
+            # Lambda GC: median(chi2) / 0.4549 using t-stat² as chi2(1) proxy.
+            _lambda_gc = (
+                float(np.median(_valid_stat ** 2) / 0.4549)
+                if len(_valid_stat) > 0 else float("nan")
+            )
+            logger.info(
+                "Result summary: n_tested=%d, min_p=%.3g, "
+                "lambda_gc=%.4f, n_genome_wide_sig=%d (p<5e-8), "
+                "n_suggestive=%d (p<1e-5)",
+                len(result.chrom),
+                float(np.min(_valid_p)),
+                _lambda_gc,
+                _n_gws,
+                _n_sug,
+            )
+        if len(_valid_beta) > 0 and len(_valid_se) > 0:
+            logger.info(
+                "Effect size summary: beta [%.4g, %.4g] (mean_abs=%.4g), "
+                "se [%.4g, %.4g]",
+                float(np.min(_valid_beta)),
+                float(np.max(_valid_beta)),
+                float(np.mean(np.abs(_valid_beta))),
+                float(np.min(_valid_se)),
+                float(np.max(_valid_se)),
+            )
 
     # Optionally load upstream variant QC flags for output provenance
     variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")

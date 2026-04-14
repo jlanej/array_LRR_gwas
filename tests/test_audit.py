@@ -468,6 +468,10 @@ class TestInVariantQcColumn:
 
         class _FakeResult:
             chrom = np.array(["chr1", "chr1", "chr1"])
+            p_value = np.array([1.0, 1.0, 1.0])
+            stat = np.array([0.0, 0.0, 0.0])
+            beta = np.array([0.0, 0.0, 0.0])
+            se = np.array([1.0, 1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -544,6 +548,10 @@ class TestInVariantQcColumn:
 
         class _FakeResult:
             chrom = np.array(["chr1", "chr1"])
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -611,6 +619,10 @@ class TestAuditDirCli:
 
         class _FakeResult:
             chrom = np.array(["chr1", "chr1", "chr1"])
+            p_value = np.array([1.0, 1.0, 1.0])
+            stat = np.array([0.0, 0.0, 0.0])
+            beta = np.array([0.0, 0.0, 0.0])
+            se = np.array([1.0, 1.0, 1.0])
 
             @staticmethod
             def to_records():

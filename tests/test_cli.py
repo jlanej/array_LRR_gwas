@@ -582,6 +582,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -700,6 +704,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -771,6 +779,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1"]
+            p_value = np.array([1.0])
+            stat = np.array([0.0])
+            beta = np.array([0.0])
+            se = np.array([1.0])
 
             @staticmethod
             def to_records():
@@ -828,6 +840,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -911,6 +927,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -970,6 +990,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -1050,6 +1074,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -1116,6 +1144,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -1189,6 +1221,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -1271,6 +1307,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -1346,6 +1386,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -1424,6 +1468,10 @@ class TestCli:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -1453,6 +1501,294 @@ class TestCli:
 
         assert rc == 0
         assert "LD pruning disabled" in caplog.text
+
+    def test_associate_hq_samples_file_in_audit_trail(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """--hq-samples path records association_sample_qc in the audit trail."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t1.0\nS2\t2.0\nS3\t3.0\nS4\t4.0\n"
+        )
+        hq = tmp_path / "hq.tsv"
+        hq.write_text("S1\nS2\n")
+
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+        audit_dir = tmp_path / "audit"
+
+        lrr = np.array([[0.1, 0.2, 0.3, 0.4], [0.0, 0.1, 0.2, 0.3]], dtype=float)
+        samples = ["S1", "S2", "S3", "S4"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+            p_value = np.array([0.5, 0.3])
+            stat = np.array([0.6, 0.9])
+            beta = np.array([0.1, 0.2])
+            se = np.array([0.15, 0.2])
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.1, "se": 0.15, "stat": 0.6, "p_value": 0.5,
+                     "n_samples": 2, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.2, "se": 0.2, "stat": 0.9, "p_value": 0.3,
+                     "n_samples": 2, "method": "ols"},
+                ]
+
+        monkeypatch.setattr(association, "run_association",
+                            lambda *_a, **_k: _FakeResult())
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            with caplog.at_level(logging.INFO, logger="array_lrr_gwas.audit"):
+                rc = main([
+                    "associate", str(fake_bcf),
+                    "--phenotype", str(pheno),
+                    "--hq-samples", str(hq),
+                    "--method", "ols",
+                    "--no-exclude-monomorphic-lrr",
+                    "--audit-dir", str(audit_dir),
+                    "-o", str(out),
+                ])
+
+        assert rc == 0
+        # Audit log should record the sample QC stage
+        assert "Audit [association_sample_qc]" in caplog.text
+        # Audit files should be written
+        assert (audit_dir / "associate_audit.tsv").exists()
+        audit_text = (audit_dir / "associate_audit.tsv").read_text()
+        assert "association_sample_qc" in audit_text
+        # S3 and S4 should appear as excluded
+        assert "S3" in audit_text
+        assert "S4" in audit_text
+
+    def test_associate_grm_audit_trail(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """LMM run records grm_ld_prune and grm_samples in the audit trail."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+        audit_dir = tmp_path / "audit"
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples_list = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples_list, assoc_variants),
+        )
+
+        dosage = np.array(
+            [[0.0, 1.0, 2.0], [1.0, 0.0, 2.0], [2.0, 1.0, 0.0]], dtype=float
+        )
+        gt_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 110, "id": "v2", "ref": "A", "alts": ("G",)},
+            {"chrom": "chr1", "pos": 120, "id": "v3", "ref": "A", "alts": ("T",)},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.genotypes.read_genotypes",
+            lambda *_a, **_k: (dosage.copy(), list(samples_list), list(gt_variants)),
+        )
+        # LD pruning keeps v1 and v3, removes v2
+        monkeypatch.setattr(
+            "array_lrr_gwas.ld_prune.ld_prune",
+            lambda *_a, **_k: np.array([True, False, True], dtype=bool),
+        )
+        monkeypatch.setattr(
+            "array_lrr_gwas.grm.compute_grm",
+            lambda d, **_k: np.eye(d.shape[1], dtype=float),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+            p_value = np.array([0.5, 0.3])
+            stat = np.array([0.6, 0.9])
+            beta = np.array([0.1, 0.2])
+            se = np.array([0.15, 0.2])
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.1, "se": 0.15, "stat": 0.6, "p_value": 0.5,
+                     "n_samples": 3, "method": "lmm"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.2, "se": 0.2, "stat": 0.9, "p_value": 0.3,
+                     "n_samples": 3, "method": "lmm"},
+                ]
+
+        monkeypatch.setattr(association, "run_association",
+                            lambda *_a, **_k: _FakeResult())
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            with caplog.at_level(logging.INFO, logger="array_lrr_gwas.audit"):
+                rc = main([
+                    "associate", str(fake_bcf),
+                    "--phenotype", str(pheno),
+                    "--method", "lmm",
+                    "--ld-backend", "numpy",
+                    "--audit-dir", str(audit_dir),
+                    "-o", str(out),
+                ])
+
+        assert rc == 0
+        assert "Audit [grm_ld_prune]" in caplog.text
+        assert "Audit [grm_samples]" in caplog.text
+        # Audit file should contain both stages
+        audit_text = (audit_dir / "associate_audit.tsv").read_text()
+        assert "grm_ld_prune" in audit_text
+        assert "grm_samples" in audit_text
+        # v2 should be in the audit trail as excluded (ld_prune)
+        assert "v2" in audit_text
+
+    def test_associate_result_summary_logged(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Result summary stats (min_p, lambda_gc, n_gws) are logged."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples_list = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples_list, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+            p_value = np.array([1e-10, 0.3])
+            stat = np.array([5.0, 1.0])
+            beta = np.array([0.5, 0.1])
+            se = np.array([0.1, 0.1])
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.5, "se": 0.1, "stat": 5.0, "p_value": 1e-10,
+                     "n_samples": 3, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.1, "se": 0.1, "stat": 1.0, "p_value": 0.3,
+                     "n_samples": 3, "method": "ols"},
+                ]
+
+        monkeypatch.setattr(association, "run_association",
+                            lambda *_a, **_k: _FakeResult())
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate", str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--method", "ols",
+                "--no-exclude-monomorphic-lrr",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert "Result summary:" in caplog.text
+        assert "min_p=" in caplog.text
+        assert "lambda_gc=" in caplog.text
+        assert "n_genome_wide_sig=" in caplog.text
+        assert "Effect size summary:" in caplog.text
+
+    def test_associate_scan_config_logged(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Pre-scan log includes n_markers, n_samples, n_covariates."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples_list = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.io_vcf.read_lrr",
+            lambda _p: (lrr, samples_list, assoc_variants),
+        )
+
+        class _FakeResult:
+            chrom = ["chr1", "chr1"]
+            p_value = np.array([0.5, 0.3])
+            stat = np.array([0.6, 0.9])
+            beta = np.array([0.1, 0.2])
+            se = np.array([0.15, 0.2])
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.1, "se": 0.15, "stat": 0.6, "p_value": 0.5,
+                     "n_samples": 3, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.2, "se": 0.2, "stat": 0.9, "p_value": 0.3,
+                     "n_samples": 3, "method": "ols"},
+                ]
+
+        monkeypatch.setattr(association, "run_association",
+                            lambda *_a, **_k: _FakeResult())
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate", str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--method", "ols",
+                "--no-exclude-monomorphic-lrr",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert "n_markers=" in caplog.text
+        assert "n_samples=" in caplog.text
+        assert "n_covariates=" in caplog.text
 
     def test_segment_help_flag(self):
         with pytest.raises(SystemExit) as exc:

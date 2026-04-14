@@ -229,6 +229,10 @@ class TestAssociationMarkerExclusion:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -286,6 +290,10 @@ class TestAssociationMarkerExclusion:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -350,6 +358,10 @@ class TestAssociationMarkerExclusion:
 
         class _FakeResult:
             chrom = ["chr1", "chr1", "chr1"]
+            p_value = np.array([1.0, 1.0, 1.0])
+            stat = np.array([0.0, 0.0, 0.0])
+            beta = np.array([0.0, 0.0, 0.0])
+            se = np.array([1.0, 1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -441,6 +453,10 @@ class TestAssociationMarkerExclusion:
 
         class _FakeResult:
             chrom = ["chr1"]
+            p_value = np.array([1.0])
+            stat = np.array([0.0])
+            beta = np.array([0.0])
+            se = np.array([1.0])
 
             @staticmethod
             def to_records():
@@ -492,6 +508,10 @@ class TestAssociationMarkerExclusion:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -577,6 +597,10 @@ class TestAssociationMarkerExclusion:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
@@ -637,6 +661,10 @@ class TestAssociationMarkerExclusion:
 
         class _FakeResult:
             chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
 
             @staticmethod
             def to_records():
