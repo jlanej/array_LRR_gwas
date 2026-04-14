@@ -1789,6 +1789,8 @@ class TestCli:
         assert "n_markers=" in caplog.text
         assert "n_samples=" in caplog.text
         assert "n_covariates=" in caplog.text
+
+    def test_segment_help_flag(self):
         with pytest.raises(SystemExit) as exc:
             main(["segment", "--help"])
         assert exc.value.code == 0
