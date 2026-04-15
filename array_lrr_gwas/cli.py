@@ -1028,12 +1028,13 @@ def _run_correct_full(args, input_path, audit, cfg, correct_kwargs,
         upstream_qc_mask = variant_qc_mask(
             variant_ids, qc_data,
             require_call_rate=True, require_hwe=True, require_maf=False,
+            require_qc_pass=True,
             audit=audit, audit_stage="correction_variant_qc",
         )
         n_pass = int(upstream_qc_mask.sum())
         logger.info(
             "Upstream variant QC (RSVD): %d / %d markers pass "
-            "(call rate + HWE; MAF not required)",
+            "(all_ancestries_qc_pass; falls back to call_rate+HWE if absent)",
             n_pass, len(upstream_qc_mask),
         )
 
@@ -1209,6 +1210,7 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
     upstream_qc_mask_sub = variant_qc_mask(
         variant_ids_sub, qc_data,
         require_call_rate=True, require_hwe=True, require_maf=False,
+        require_qc_pass=True,
         audit=audit, audit_stage="correction_variant_qc",
     )
 
@@ -1797,6 +1799,7 @@ def _run_associate(args: argparse.Namespace) -> int:
                 qc_keep = variant_qc_mask(
                     gt_variant_ids, qc_data,
                     require_call_rate=True, require_hwe=True, require_maf=True,
+                    require_qc_pass=True,
                     audit=audit, audit_stage="grm_variant_qc",
                 )
                 qc_pass_ids: list[str] | None = [
@@ -1804,7 +1807,7 @@ def _run_associate(args: argparse.Namespace) -> int:
                 ]
                 logger.info(
                     "Upstream variant QC (GRM): %d → %d variants "
-                    "(call rate + HWE + MAF required)",
+                    "(all_ancestries_qc_pass; falls back to call_rate+HWE+MAF if absent)",
                     len(gt_variant_ids), len(qc_pass_ids),
                 )
                 if not qc_pass_ids:
@@ -1996,13 +1999,15 @@ def _run_associate(args: argparse.Namespace) -> int:
                 qc_keep = variant_qc_mask(
                     gt_variant_ids_np, qc_data,
                     require_call_rate=True, require_hwe=True, require_maf=True,
+                    require_qc_pass=True,
                     audit=audit, audit_stage="grm_variant_qc",
                 )
                 n_before_qc = dosage.shape[0]
                 dosage = dosage[qc_keep]
                 gt_variants = [v for v, k in zip(gt_variants, qc_keep) if k]
                 logger.info(
-                    "Upstream variant QC (GRM): %d → %d variants",
+                    "Upstream variant QC (GRM): %d → %d variants "
+                    "(all_ancestries_qc_pass; falls back to call_rate+HWE+MAF if absent)",
                     n_before_qc, dosage.shape[0],
                 )
                 if dosage.shape[0] == 0:

@@ -299,3 +299,74 @@ class TestMultiAncestryEdgeCases:
         ids = [f"v{i}" for i in range(100)]
         mask = variant_qc_mask(ids, qc)
         np.testing.assert_array_equal(mask, expected)
+
+
+# ---------------------------------------------------------------------------
+# variant_qc_mask — require_qc_pass (composite column)
+# ---------------------------------------------------------------------------
+
+
+_HEADER_WITH_COMPOSITE = (
+    "variant_id\tall_ancestries_call_rate_pass\t"
+    "all_ancestries_hwe_pass\tall_ancestries_maf_pass\t"
+    "all_ancestries_qc_pass\n"
+)
+
+
+class TestVariantQCMaskRequireQcPass:
+    """require_qc_pass uses all_ancestries_qc_pass as the sole criterion."""
+
+    def test_composite_true_passes(self, tmp_path: Path) -> None:
+        """When all_ancestries_qc_pass=True, variant is retained."""
+        p = _write_tsv(
+            tmp_path,
+            _HEADER_WITH_COMPOSITE + "v1\tTrue\tTrue\tTrue\tTrue\n",
+        )
+        qc = read_collated_variant_qc(p)
+        mask = variant_qc_mask(["v1"], qc, require_qc_pass=True)
+        np.testing.assert_array_equal(mask, [True])
+
+    def test_composite_false_excludes(self, tmp_path: Path) -> None:
+        """When all_ancestries_qc_pass=False, variant is excluded regardless of individual flags."""
+        p = _write_tsv(
+            tmp_path,
+            _HEADER_WITH_COMPOSITE + "v1\tTrue\tTrue\tTrue\tFalse\n",
+        )
+        qc = read_collated_variant_qc(p)
+        mask = variant_qc_mask(["v1"], qc, require_qc_pass=True)
+        np.testing.assert_array_equal(mask, [False])
+
+    def test_composite_sole_criterion(self, tmp_path: Path) -> None:
+        """require_qc_pass uses composite only — individual flags are not re-checked."""
+        # v1: composite True, but individual MAF=False (would fail individual check)
+        # v2: composite False, but individual all True (would pass individual check)
+        content = (
+            _HEADER_WITH_COMPOSITE
+            + "v1\tTrue\tTrue\tFalse\tTrue\n"
+            + "v2\tTrue\tTrue\tTrue\tFalse\n"
+        )
+        p = _write_tsv(tmp_path, content)
+        qc = read_collated_variant_qc(p)
+        mask = variant_qc_mask(
+            ["v1", "v2"], qc,
+            require_call_rate=True, require_hwe=True, require_maf=True,
+            require_qc_pass=True,
+        )
+        # v1 passes (composite True), v2 fails (composite False)
+        np.testing.assert_array_equal(mask, [True, False])
+
+    def test_fallback_when_composite_absent(self, tmp_path: Path) -> None:
+        """When all_ancestries_qc_pass column is absent, falls back to individual flags."""
+        tsv = _make_qc_tsv(tmp_path, [
+            "v1\tTrue\tTrue\tTrue",   # all individual pass
+            "v2\tFalse\tTrue\tTrue",  # call_rate fails
+        ])
+        qc = read_collated_variant_qc(tsv)
+        # qc_pass is None for all records (column absent)
+        assert qc["v1"].qc_pass is None
+        mask = variant_qc_mask(
+            ["v1", "v2"], qc,
+            require_call_rate=True, require_hwe=True, require_maf=True,
+            require_qc_pass=True,
+        )
+        np.testing.assert_array_equal(mask, [True, False])
