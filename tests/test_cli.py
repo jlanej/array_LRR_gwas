@@ -1213,8 +1213,8 @@ class TestCli:
 
         assert rc == 0
         assert out.exists()
-        assert "Association HQ intersection" in caplog.text
-        assert "dropped_lq_with_valid_pheno=2" in caplog.text
+        assert "Association GRM samples" in caplog.text
+        assert "dropped_hard_qc_with_valid_pheno=2" in caplog.text
         assert "Phenotype summary (binary analyzed)" in caplog.text
 
     def test_associate_hq_intersection_and_quantitative_reporting(
@@ -1374,8 +1374,8 @@ class TestCli:
         assert rc == 0
         assert out.exists()
         assert "Deriving HQ samples from sample sheet" in caplog.text
-        assert "Association HQ intersection (source=sample_sheet)" in caplog.text
-        assert "dropped_lq_with_valid_pheno=2" in caplog.text
+        assert "Association GRM samples (source=sample_sheet)" in caplog.text
+        assert "dropped_hard_qc_with_valid_pheno=2" in caplog.text
 
     def test_associate_hq_derived_custom_thresholds(
         self, tmp_path, monkeypatch, caplog
@@ -1452,7 +1452,7 @@ class TestCli:
 
         assert rc == 0
         assert "max_lrr_sd=0.0500" in caplog.text
-        assert "dropped_lq_with_valid_pheno=1" in caplog.text
+        assert "dropped_hard_qc_with_valid_pheno=1" in caplog.text
 
     def test_associate_logs_ld_prune_disabled(
         self, tmp_path, monkeypatch, caplog

@@ -1421,6 +1421,7 @@ def _run_associate(args: argparse.Namespace) -> int:
     n_hq_in_lrr = None
     n_dropped_lq = 0
     hq_source: str | None = None
+    _ld_prune_hq_ids: set[str] | None = None
     if args.hq_samples is not None:
         if not args.hq_samples.exists():
             logger.error("HQ sample list not found: %s", args.hq_samples)
@@ -1496,11 +1497,19 @@ def _run_associate(args: argparse.Namespace) -> int:
         excl_result = classify_samples_for_association(
             args.sample_sheet, **assoc_kwargs,
         )
-        hq_samples = excl_result.hq_ids
-        hq_mask = np.array([s in hq_samples for s in samples], dtype=bool)
-        n_hq_in_lrr = int(hq_mask.sum())
-        n_dropped_lq = int((valid_mask & ~hq_mask).sum())
-        analyzed_mask = valid_mask & hq_mask
+        # hq_ids: unrelated, all-QC-passing → for LD pruning only.
+        # grm_ids: technical-QC-passing including related → for GRM + association.
+        # Soft exclusions (pre_pca_excluded, excluded_relatedness) appear in
+        # hq_ids exclusions but NOT in grm_ids exclusions; the LMM random effect
+        # (GRM) accounts for both population structure and relatedness.
+        hq_mask = np.array([s in excl_result.hq_ids for s in samples], dtype=bool)
+        grm_mask = np.array([s in excl_result.grm_ids for s in samples], dtype=bool)
+        n_hq_in_lrr = int((valid_mask & grm_mask).sum())
+        n_dropped_lq = int((valid_mask & ~grm_mask).sum())
+        n_related_in_grm = int((valid_mask & grm_mask & ~hq_mask).sum())
+        analyzed_mask = valid_mask & grm_mask
+        # Remember unrelated IDs for LD pruning step below.
+        _ld_prune_hq_ids = excl_result.hq_ids
         hq_source = "sample_sheet"
 
         # Log per-category exclusion counts
@@ -1523,15 +1532,24 @@ def _run_associate(args: argparse.Namespace) -> int:
             excl_result.counts["total_excluded"],
             excl_result.total - excl_result.counts["total_excluded"],
         )
+        logger.info(
+            "Related samples re-included in GRM (excluded from LD pruning only): %d "
+            "(pre_pca_excluded and/or excluded_relatedness without hard technical failures)",
+            n_related_in_grm,
+        )
 
-        # Record sample exclusions in audit trail
+        # Record sample QC in audit trail.
+        # grm_ids is the set used for analysis; samples excluded only for
+        # relatedness/pre_pca appear in included (they are in the GRM).
+        # Hard-excluded samples appear in excluded with their reason string.
         _sample_excluded: dict[str, str] = {}
         for sid, reasons in excl_result.excluded_reasons.items():
-            _sample_excluded[sid] = ";".join(reasons)
+            if sid not in excl_result.grm_ids:
+                _sample_excluded[sid] = ";".join(reasons)
         audit.record(
             stage="association_sample_qc",
             id_type="sample",
-            included=list(excl_result.hq_ids),
+            included=list(excl_result.grm_ids),
             excluded=_sample_excluded,
         )
 
@@ -1547,8 +1565,8 @@ def _run_associate(args: argparse.Namespace) -> int:
     )
     if n_hq_in_lrr is not None:
         logger.info(
-            "Association HQ intersection (source=%s): hq_in_lrr=%d, "
-            "valid_pheno_and_hq=%d, dropped_lq_with_valid_pheno=%d",
+            "Association GRM samples (source=%s): grm_in_lrr=%d, "
+            "valid_pheno_and_grm=%d, dropped_hard_qc_with_valid_pheno=%d",
             hq_source, n_hq_in_lrr, n_analyzed, n_dropped_lq,
         )
     else:
@@ -1713,6 +1731,30 @@ def _run_associate(args: argparse.Namespace) -> int:
 
         gt_path = args.genotype_bcf or input_path
         valid_samples = [samples[i] for i in range(len(samples)) if analyzed_mask[i]]
+
+        # ld_prune_samples: unrelated subset of valid_samples for LD pruning.
+        # When using the sample sheet, use hq_ids (unrelated, all-QC-passing).
+        # This ensures marker LD is estimated from genetically independent
+        # samples while the GRM is computed from all valid_samples (including
+        # related ones — handled by the LMM random effect).
+        if _ld_prune_hq_ids is not None:
+            ld_prune_samples = [s for s in valid_samples if s in _ld_prune_hq_ids]
+            if not ld_prune_samples:
+                logger.warning(
+                    "No unrelated samples available for LD pruning after "
+                    "intersecting with hq_ids; falling back to all %d analyzed "
+                    "samples.  Consider checking the excluded_relatedness column.",
+                    len(valid_samples),
+                )
+                ld_prune_samples = valid_samples
+            else:
+                logger.info(
+                    "LD pruning will use %d unrelated samples (of %d total GRM "
+                    "samples); related samples are included only in the GRM.",
+                    len(ld_prune_samples), len(valid_samples),
+                )
+        else:
+            ld_prune_samples = valid_samples
         variant_qc_path = (
             args.variant_qc
             or cfg.get("upstream_qc", {}).get("variant_qc_path")
@@ -1872,14 +1914,24 @@ def _run_associate(args: argparse.Namespace) -> int:
                 if not args.no_ld_prune:
                     ld_window_kb = max(1, args.ld_window_bp // 1000)
                     logger.info(
-                        "LD pruning with plink2 (window=%dkb, r²=%.2f, input=BED)",
-                        ld_window_kb, args.ld_r2_thresh,
+                        "LD pruning with plink2 (window=%dkb, r²=%.2f, input=BED, "
+                        "unrelated_samples=%d)",
+                        ld_window_kb, args.ld_r2_thresh, len(ld_prune_samples),
+                    )
+                    # Pass unrelated samples only so that LD is estimated from
+                    # genetically independent individuals.  The BED retains all
+                    # valid_samples (including related) for GRM computation.
+                    _ld_keep_samples = (
+                        ld_prune_samples
+                        if ld_prune_samples is not valid_samples
+                        else None
                     )
                     try:
                         pruned_ids: set[str] | None = ld_prune_plink2(
                             bed_prefix.with_suffix(".bed"),
                             window_kb=ld_window_kb,
                             r2_thresh=args.ld_r2_thresh,
+                            keep_samples=_ld_keep_samples,
                         )
                     except FileNotFoundError:
                         logger.error(
@@ -2036,12 +2088,32 @@ def _run_associate(args: argparse.Namespace) -> int:
                 gt_chroms = np.array(
                     [v["chrom"] for v in gt_variants], dtype=str
                 )
-                logger.info(
-                    "LD pruning with NumPy (window=%dbp, r²=%.2f)",
-                    args.ld_window_bp, args.ld_r2_thresh,
-                )
+
+                # LD is computed on unrelated samples only so that family
+                # structure does not inflate r² estimates.  The full dosage
+                # matrix (all valid_samples including related) is kept for GRM.
+                gt_idx_pre_ld = {s: i for i, s in enumerate(gt_samples_np)}
+                ld_sample_cols = [
+                    gt_idx_pre_ld[s]
+                    for s in ld_prune_samples
+                    if s in gt_idx_pre_ld
+                ]
+                if ld_sample_cols and len(ld_sample_cols) < dosage.shape[1]:
+                    dosage_for_ld = dosage[:, ld_sample_cols]
+                    logger.info(
+                        "LD pruning with NumPy (window=%dbp, r²=%.2f, "
+                        "unrelated_samples=%d of %d total)",
+                        args.ld_window_bp, args.ld_r2_thresh,
+                        len(ld_sample_cols), dosage.shape[1],
+                    )
+                else:
+                    dosage_for_ld = dosage
+                    logger.info(
+                        "LD pruning with NumPy (window=%dbp, r²=%.2f)",
+                        args.ld_window_bp, args.ld_r2_thresh,
+                    )
                 ld_keep = ld_prune(
-                    dosage,
+                    dosage_for_ld,
                     positions=gt_positions,
                     chromosomes=gt_chroms,
                     window_bp=args.ld_window_bp,
@@ -2087,7 +2159,7 @@ def _run_associate(args: argparse.Namespace) -> int:
                 dosage.shape[0], dosage.shape[1],
             )
 
-            # Align GT samples to LRR analyzed samples.
+            # Align GT samples to LRR analyzed samples (including related).
             gt_idx = {s: i for i, s in enumerate(gt_samples_np)}
             missing_samples = [s for s in valid_samples if s not in gt_idx]
             if missing_samples:

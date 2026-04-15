@@ -167,6 +167,7 @@ def ld_prune_plink2(
     step: int = 50,
     r2_thresh: float = 0.2,
     min_maf: float = 0.01,
+    keep_samples: list[str] | None = None,
 ) -> set[str]:
     """LD-prune using ``plink2 --indep-pairwise``.
 
@@ -189,6 +190,11 @@ def ld_prune_plink2(
     min_maf : float
         Minimum MAF filter applied when reading BCF/VCF input (default: 0.01).
         Ignored when *input_path* points to a BED fileset.
+    keep_samples : list of str, optional
+        If provided, LD pruning is restricted to these sample IDs.  A
+        temporary plink2 ``--keep`` file is written.  Use this to compute
+        LD from unrelated samples only while the BED (or BCF) retains all
+        QC-passing samples for downstream GRM computation.
 
     Returns
     -------
@@ -225,6 +231,17 @@ def ld_prune_plink2(
         else:
             cmd += ["--vcf", str(input_path)]
             cmd += ["--maf", str(min_maf)]
+
+        if keep_samples:
+            keep_file = Path(tmp) / "ld_prune_keep.txt"
+            keep_file.write_text(
+                "\n".join(f"{s}\t{s}" for s in keep_samples) + "\n"
+            )
+            cmd += ["--keep", str(keep_file)]
+            logger.info(
+                "LD pruning restricted to %d unrelated samples (--keep)",
+                len(keep_samples),
+            )
 
         cmd += [
             "--allow-extra-chr",
