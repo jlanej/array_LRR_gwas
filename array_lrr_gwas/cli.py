@@ -1921,11 +1921,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                     # Pass unrelated samples only so that LD is estimated from
                     # genetically independent individuals.  The BED retains all
                     # valid_samples (including related) for GRM computation.
-                    _ld_keep_samples = (
-                        ld_prune_samples
-                        if ld_prune_samples is not valid_samples
-                        else None
-                    )
+                    # Use _ld_prune_hq_ids as the sentinel: when it is set we
+                    # have a distinct unrelated set; otherwise use all samples.
+                    _ld_keep_samples = ld_prune_samples if _ld_prune_hq_ids is not None else None
                     try:
                         pruned_ids: set[str] | None = ld_prune_plink2(
                             bed_prefix.with_suffix(".bed"),

@@ -593,16 +593,16 @@ class TestGrmIds:
                             "inbreeding_F": "0.50",
                             "excluded_relatedness": "true"}),
         ]:
-            defaults_ = {
+            default_row = {
                 "pre_pca_excluded": "false", "excluded_relatedness": "false",
                 "excluded_het_outlier": "false", "baf_sd": "0.05",
                 "sex_status": "OK", "inbreeding_F": "0.01",
             }
-            defaults_.update(row)
-            defaults_["Sample_ID"] = sid
+            default_row.update(row)
+            default_row["Sample_ID"] = sid
             sub = tmp_path / sid
             sub.mkdir()
-            tsv = _write_sheet(sub, [defaults_], cols=cols)
+            tsv = _write_sheet(sub, [default_row], cols=cols)
             result = classify_samples_for_association(tsv)
             assert sid not in result.grm_ids, (
                 f"{sid} should be hard-excluded from grm_ids"
