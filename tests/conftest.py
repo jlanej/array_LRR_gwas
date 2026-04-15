@@ -9,6 +9,7 @@ import pytest
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 TEST_BCF = TEST_DATA_DIR / "test.bcf"
+STAGE2_BCF = TEST_DATA_DIR / "stage2_reclustered.100.subsample.subset.bcf"
 
 # ---- Constants describing the bundled test BCF (output of illumina_idat_processing) ----
 BCF_N_VARIANTS = 96_869
@@ -19,12 +20,23 @@ BCF_SAMPLES = [
 ]
 BCF_DETECTED_BUILD = "T2T-CHM13"
 
+# ---- Constants describing the stage2 subsample BCF (100 samples, ~12k variants) ----
+STAGE2_N_SAMPLES = 100
+STAGE2_N_VARIANTS = 12_109
+
 
 @pytest.fixture
 def test_bcf_path() -> Path:
     """Path to the bundled test BCF file."""
     assert TEST_BCF.exists(), f"Test BCF not found: {TEST_BCF}"
     return TEST_BCF
+
+
+@pytest.fixture
+def stage2_bcf_path() -> Path:
+    """Path to the stage2 reclustered 100-sample subsample BCF."""
+    assert STAGE2_BCF.exists(), f"Stage2 BCF not found: {STAGE2_BCF}"
+    return STAGE2_BCF
 
 
 @pytest.fixture

@@ -160,6 +160,7 @@ def make_plink2_bed(
     min_maf: float = 0.01,
     min_call_rate: float = 0.90,
     allow_extra_chr: bool = True,
+    autosome_only: bool = True,
 ) -> Path:
     """Convert a BCF/VCF to plink2 BED/BIM/FAM using plink2.
 
@@ -186,6 +187,11 @@ def make_plink2_bed(
         Minimum per-variant call rate (``1 - missing rate``).
     allow_extra_chr : bool
         Pass ``--allow-extra-chr`` to plink2 (required for non-human contigs).
+    autosome_only : bool
+        Pass ``--autosome`` and ``--max-alleles 2`` to plink2.  This restricts
+        the BED to biallelic autosomal variants, which avoids sex-chromosome
+        handling requirements (sex info needed for chrX/Y) and multiallelic
+        variant errors.  Appropriate for GRM computation.  Defaults to ``True``.
 
     Returns
     -------
@@ -216,6 +222,9 @@ def make_plink2_bed(
         if allow_extra_chr:
             cmd.append("--allow-extra-chr")
 
+        if autosome_only:
+            cmd += ["--autosome", "--max-alleles", "2"]
+
         if min_maf > 0.0:
             cmd += ["--maf", str(min_maf)]
         cmd += ["--geno", str(1.0 - min_call_rate)]
@@ -228,7 +237,7 @@ def make_plink2_bed(
         if keep_samples:
             keep_file = tmp / "keep.txt"
             keep_file.write_text(
-                "\n".join(f"{s}\t{s}" for s in keep_samples) + "\n"
+                "#IID\n" + "\n".join(keep_samples) + "\n"
             )
             cmd += ["--keep", str(keep_file)]
 
@@ -318,7 +327,7 @@ def compute_grm_plink2(
         if keep_samples:
             keep_file = tmp / "keep.txt"
             keep_file.write_text(
-                "\n".join(f"{s}\t{s}" for s in keep_samples) + "\n"
+                "#IID\n" + "\n".join(keep_samples) + "\n"
             )
             cmd += ["--keep", str(keep_file)]
 
