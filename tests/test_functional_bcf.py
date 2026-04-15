@@ -28,6 +28,12 @@ from tests.conftest import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _plink2_available() -> bool:
+    """Return True if plink2 is found on PATH."""
+    import shutil
+    return shutil.which("plink2") is not None
+
+
 def _mock_phenotype(n: int, *, seed: int = 42) -> np.ndarray:
     """Deterministic continuous phenotype."""
     return np.random.default_rng(seed).normal(size=n)
@@ -1199,6 +1205,36 @@ class TestStage2AssociatePipeline:
         assert "chrom" in lines[0]
         assert len(lines) > 1
 
+    @pytest.mark.skipif(
+        not _plink2_available(),
+        reason="plink2 not on PATH",
+    )
+    def test_associate_lmm_plink2_backend(self, stage2_bcf_path, tmp_path):
+        """LMM with plink2 LD backend on stage2 BCF (plink2 GRM path)."""
+        from array_lrr_gwas.cli import main
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(stage2_bcf_path)
+
+        pheno = tmp_path / "pheno.tsv"
+        _write_phenotype_tsv(pheno, samples, _mock_phenotype(STAGE2_N_SAMPLES))
+
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(stage2_bcf_path),
+            "--phenotype", str(pheno),
+            "--method", "lmm",
+            "--ld-backend", "plink2",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        lines = out.read_text().strip().split("\n")
+        assert "chrom" in lines[0]
+        assert len(lines) > 1
+
+
     def test_associate_ols_with_sample_sheet_as_corrected(
         self, stage2_bcf_path, tmp_path
     ):
@@ -1336,3 +1372,52 @@ class TestStage2FullPipeline:
         ])
         assert rc == 0
         assert seg_out.exists()
+
+    @pytest.mark.skipif(
+        not _plink2_available(),
+        reason="plink2 not on PATH",
+    )
+    def test_correct_then_associate_lmm_plink2(self, stage2_bcf_path, tmp_path):
+        """correct → associate (LMM, plink2 GRM) pipeline on stage2 BCF."""
+        from array_lrr_gwas.cli import main
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(stage2_bcf_path)
+
+        # Step 1: Correct LRR (RSVD/PC correction)
+        corrected_bcf = tmp_path / "corrected.bcf"
+        rc = main([
+            "correct",
+            str(stage2_bcf_path),
+            "-o", str(corrected_bcf),
+            "--no-complexity-filter",
+            "--max-lrr-sd", "10.0",
+            "--min-sample-call-rate", "0.0",
+            "--min-marker-call-rate", "0.5",
+            "--min-var", "0.0",
+            "--k", "3",
+        ])
+        assert rc == 0
+        assert corrected_bcf.exists()
+
+        # Step 2: Associate using the plink2 GRM path.
+        # The corrected BCF only has LRR — supply the original BCF via
+        # --genotype-bcf so that plink2 can build the GRM from GT data.
+        pheno = tmp_path / "pheno.tsv"
+        _write_phenotype_tsv(pheno, samples, _mock_phenotype(STAGE2_N_SAMPLES))
+
+        assoc_out = tmp_path / "association.tsv"
+        rc = main([
+            "associate",
+            str(corrected_bcf),
+            "--phenotype", str(pheno),
+            "--method", "lmm",
+            "--ld-backend", "plink2",
+            "--genotype-bcf", str(stage2_bcf_path),
+            "-o", str(assoc_out),
+        ])
+        assert rc == 0
+        assert assoc_out.exists()
+        lines = assoc_out.read_text().strip().split("\n")
+        assert "chrom" in lines[0]
+        assert len(lines) > 1

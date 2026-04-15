@@ -164,7 +164,7 @@ def ld_prune_plink2(
     input_path: str | Path,
     *,
     window_kb: int = 1000,
-    step: int = 50,
+    step: int = 1,
     r2_thresh: float = 0.2,
     min_maf: float = 0.01,
     keep_samples: list[str] | None = None,
@@ -184,7 +184,8 @@ def ld_prune_plink2(
     window_kb : int
         Window size in kilobases (default: 1000).
     step : int
-        Step size in variants (default: 50).
+        Step size in variants (default: 1).  plink2 requires this to be ``1``
+        when the window size is given in kilobase units.
     r2_thresh : float
         r² threshold for pruning (default: 0.2).
     min_maf : float
@@ -235,7 +236,7 @@ def ld_prune_plink2(
         if keep_samples:
             keep_file = Path(tmp) / "ld_prune_keep.txt"
             keep_file.write_text(
-                "\n".join(f"{s}\t{s}" for s in keep_samples) + "\n"
+                "#IID\n" + "\n".join(keep_samples) + "\n"
             )
             cmd += ["--keep", str(keep_file)]
             logger.info(
