@@ -1329,6 +1329,7 @@ def _run_associate(args: argparse.Namespace) -> int:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     import numpy as np
+    from tqdm.auto import tqdm
 
     from array_lrr_gwas.audit import AuditLogger
     from array_lrr_gwas.association import run_association_streaming
@@ -1358,8 +1359,20 @@ def _run_associate(args: argparse.Namespace) -> int:
     else:
         cfg = defaults()
 
+    # Pipeline-level progress bar.  Core stages always present; LMM stages
+    # are added dynamically below when method == "lmm".
+    _core_stages = 5  # metadata scan, phenotype+sample QC, marker QC, scan, output
+    pbar = tqdm(
+        total=_core_stages,
+        desc="associate",
+        unit="step",
+        leave=True,
+        dynamic_ncols=True,
+    )
+
     # Read variant metadata and sample IDs without loading LRR values.
     # This is a lightweight scan that keeps memory independent of matrix size.
+    pbar.set_description("metadata scan")
     logger.info("Scanning variant metadata from %s", input_path)
     samples, variants = read_variant_metadata(input_path)
     n_variants_total = len(variants)
@@ -1368,8 +1381,11 @@ def _run_associate(args: argparse.Namespace) -> int:
         "Found %d variants × %d samples (metadata only, LRR not loaded)",
         n_variants_total, n_samples_bcf,
     )
+    pbar.set_postfix(variants=n_variants_total, samples=n_samples_bcf, refresh=False)
+    pbar.update(1)
 
     # Read phenotype TSV
+    pbar.set_description("phenotype+sample QC")
     logger.info("Reading phenotype from %s", pheno_path)
 
     def _parse_float(raw: str | None) -> float:
@@ -1695,6 +1711,12 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     # Subset to samples with phenotype
     phenotype = pheno_vals[analyzed_mask]
+    pbar.set_postfix(
+        analyzed=n_analyzed,
+        pheno_valid=n_valid_pre,
+        refresh=False,
+    )
+    pbar.update(1)
 
     # ------------------------------------------------------------------
     # Association-stage marker exclusion (metadata-only pre-filter)
@@ -1737,6 +1759,13 @@ def _run_associate(args: argparse.Namespace) -> int:
         n_total_markers - n_metadata_keep,
         _fmt_pct(n_total_markers - n_metadata_keep, n_total_markers),
     )
+    pbar.set_description("marker QC")
+    pbar.set_postfix(
+        keep=n_metadata_keep,
+        excl=n_total_markers - n_metadata_keep,
+        refresh=False,
+    )
+    pbar.update(1)
 
     # Variants surviving the metadata filter — used for output provenance.
     # The full list of kept/excluded variants is populated during streaming.
@@ -1752,6 +1781,12 @@ def _run_associate(args: argparse.Namespace) -> int:
 
         gt_path = args.genotype_bcf or input_path
         valid_samples = [samples[i] for i in range(len(samples)) if analyzed_mask[i]]
+
+        # LMM GRM pipeline has up to 5 additional stages; register them now
+        # so the total is known upfront.  Variant QC step is conditional but
+        # we optimistically add it; pbar.update() will simply be skipped if the
+        # path is not taken (variant_qc_path is checked per backend).
+        pbar.total += 5  # GT scan, variant QC, BED/dosage, LD prune, GRM compute
 
         # ld_prune_samples: unrelated subset of valid_samples for LD pruning.
         # When using the sample sheet, use hq_ids (unrelated, all-QC-passing).
@@ -1800,6 +1835,7 @@ def _run_associate(args: argparse.Namespace) -> int:
             from array_lrr_gwas.ld_prune import ld_prune_plink2
 
             # Step 1 — lightweight metadata scan: get variant IDs + sample list.
+            pbar.set_description("GT metadata scan")
             logger.info(
                 "Scanning genotype file metadata from %s (plink2 path)",
                 gt_path,
@@ -1820,6 +1856,8 @@ def _run_associate(args: argparse.Namespace) -> int:
                 "%d genotype variants, %d samples in %s",
                 len(gt_variant_ids), len(gt_samples), Path(gt_path).name,
             )
+            pbar.set_postfix(gt_variants=len(gt_variant_ids), refresh=False)
+            pbar.update(1)
 
             if not gt_variant_ids:
                 logger.error(
@@ -1880,6 +1918,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                         gt_path,
                     )
                     return 1
+                pbar.set_description("variant QC (GRM)")
+                pbar.set_postfix(qc_pass=len(qc_pass_ids), refresh=False)
+                pbar.update(1)
             else:
                 qc_pass_ids = None
                 logger.warning(
@@ -1889,6 +1930,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                     "collated_variant_qc.tsv for best-practice QC.",
                     args.min_maf,
                 )
+                pbar.set_description("variant QC (GRM)")
+                pbar.set_postfix(qc_pass="skipped", refresh=False)
+                pbar.update(1)
 
             # Step 3 — convert QC-passing variants to plink2 BED.
             # BED persists in --audit-dir when provided; otherwise temp.
@@ -1917,6 +1961,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                         "plink2 BED generated (%d samples, QC-filtered): %s",
                         len(valid_samples), bed_prefix,
                     )
+                    pbar.set_description("BED generation")
+                    pbar.set_postfix(samples=len(valid_samples), refresh=False)
+                    pbar.update(1)
                 except FileNotFoundError:
                     logger.error(
                         "plink2 backend requested but plink2 is not on PATH. "
@@ -1982,6 +2029,12 @@ def _run_associate(args: argparse.Namespace) -> int:
                             for vid in _pre_ld_ids if vid not in pruned_ids
                         },
                     )
+                    pbar.set_description("LD pruning")
+                    pbar.set_postfix(
+                        after_ld=n_after_ld, removed=n_before_ld - n_after_ld,
+                        refresh=False,
+                    )
+                    pbar.update(1)
                 else:
                     pruned_ids = None  # use all variants already in BED
                     logger.info(
@@ -1995,6 +2048,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                         included=_pre_ld_ids,
                         excluded={},
                     )
+                    pbar.set_description("LD pruning")
+                    pbar.set_postfix(after_ld=len(_pre_ld_ids), removed=0, refresh=False)
+                    pbar.update(1)
 
                 # Step 5 — compute GRM from LD-pruned BED via plink2.
                 logger.info(
@@ -2025,6 +2081,11 @@ def _run_associate(args: argparse.Namespace) -> int:
                     "GRM computed via plink2: %d × %d",
                     grm.shape[0], grm.shape[1],
                 )
+                pbar.set_description("GRM compute")
+                pbar.set_postfix(
+                    grm=f"{grm.shape[0]}×{grm.shape[1]}", refresh=False,
+                )
+                pbar.update(1)
 
             finally:
                 if _tmp_bed_dir is not None:
@@ -2038,6 +2099,7 @@ def _run_associate(args: argparse.Namespace) -> int:
             from array_lrr_gwas.genotypes import read_genotypes
             from array_lrr_gwas.grm import compute_grm
 
+            pbar.set_description("GT dosage load")
             logger.info("Reading genotypes from %s for GRM (numpy path)", gt_path)
             dosage, gt_samples_np, gt_variants = read_genotypes(
                 gt_path,
@@ -2058,6 +2120,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                 "%d genotype variants from %d samples passed initial QC",
                 dosage.shape[0], dosage.shape[1],
             )
+            # GT metadata scan + dosage load counts as two pbar steps (scan + load).
+            pbar.set_postfix(gt_variants=dosage.shape[0], refresh=False)
+            pbar.update(1)  # GT scan step
 
             # Apply upstream variant QC mask.
             if variant_qc_path is not None:
@@ -2088,6 +2153,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                         n_before_qc,
                     )
                     return 1
+                pbar.set_description("variant QC (GRM)")
+                pbar.set_postfix(qc_pass=dosage.shape[0], refresh=False)
+                pbar.update(1)
             else:
                 logger.warning(
                     "No upstream variant QC file provided (--variant-qc or "
@@ -2095,6 +2163,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                     "marker filtering for GRM.  Provide collated_variant_qc.tsv "
                     "for best-practice QC."
                 )
+                pbar.set_description("variant QC (GRM)")
+                pbar.set_postfix(qc_pass="skipped", refresh=False)
+                pbar.update(1)
 
             # LD pruning (NumPy).
             _grm_pre_ld_variants = list(gt_variants)
@@ -2160,6 +2231,13 @@ def _run_associate(args: argparse.Namespace) -> int:
                         "relaxing --ld-r2-thresh or using --no-ld-prune."
                     )
                     return 1
+                pbar.set_description("LD pruning")
+                pbar.set_postfix(
+                    after_ld=dosage.shape[0],
+                    removed=n_before - dosage.shape[0],
+                    refresh=False,
+                )
+                pbar.update(1)
             else:
                 logger.info(
                     "LD pruning disabled (--no-ld-prune). "
@@ -2172,6 +2250,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                     included=[_variant_id(v) for v in gt_variants],
                     excluded={},
                 )
+                pbar.set_description("LD pruning")
+                pbar.set_postfix(after_ld=dosage.shape[0], removed=0, refresh=False)
+                pbar.update(1)
 
             logger.info(
                 "Using %d genotype variants from %d samples for GRM",
@@ -2199,11 +2280,16 @@ def _run_associate(args: argparse.Namespace) -> int:
             )
 
             dosage_aligned = dosage[:, gt_order]
+            pbar.set_description("GRM compute (NumPy)")
             logger.info("Computing GRM (NumPy)...")
             grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
             logger.info(
                 "GRM computed (NumPy): %d × %d", grm.shape[0], grm.shape[1],
             )
+            pbar.set_postfix(
+                grm=f"{grm.shape[0]}×{grm.shape[1]}", refresh=False,
+            )
+            pbar.update(1)
 
 
     if args.method == "logistic":
@@ -2229,6 +2315,10 @@ def _run_associate(args: argparse.Namespace) -> int:
         args.method, n_metadata_keep, int(analyzed_mask.sum()),
         n_cov, _grm_info,
     )
+    pbar.set_description("association scan")
+    pbar.set_postfix(
+        method=args.method, eligible=n_metadata_keep, refresh=False,
+    )
 
     lrr_stream = stream_lrr_chunks(
         input_path,
@@ -2244,6 +2334,7 @@ def _run_associate(args: argparse.Namespace) -> int:
         grm=grm,
         exclude_monomorphic=exclude_monomorphic,
         exclude_intensity_only=False,  # already excluded via variant_mask
+        n_markers_total=n_metadata_keep,
     )
     n_tested = exclusion_info["n_tested"]
     n_mono_excluded = exclusion_info["n_monomorphic"]
@@ -2253,6 +2344,10 @@ def _run_associate(args: argparse.Namespace) -> int:
         n_tested, n_mono_excluded,
         _fmt_pct(n_mono_excluded, exclusion_info["n_total"]),
     )
+    pbar.set_postfix(
+        tested=n_tested, mono_excl=n_mono_excluded, refresh=False,
+    )
+    pbar.update(1)
 
     # Record association marker exclusion in audit trail.
     # Combine metadata-based (INTENSITY_ONLY) and streaming (monomorphic)
@@ -2383,10 +2478,13 @@ def _run_associate(args: argparse.Namespace) -> int:
         rec["lrr_monomorphic"] = bool(_tested_mono[i]) if i < len(_tested_mono) else False
 
     header = list(records[0].keys()) if records else []
+    pbar.set_description("writing output")
     with open(args.output, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
         writer.writeheader()
         writer.writerows(records)
+    pbar.set_postfix(output=args.output.name, n_records=len(records), refresh=False)
+    pbar.update(1)
 
     # ------------------------------------------------------------------
     # Sex-chromosome analysis modes
@@ -2628,6 +2726,8 @@ def _run_associate(args: argparse.Namespace) -> int:
         audit.write_summary_tsv(audit_dir / "associate_audit_summary.tsv")
 
     logger.info("Done.")
+    pbar.set_description("done")
+    pbar.close()
     return 0
 
 
