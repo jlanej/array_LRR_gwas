@@ -109,8 +109,36 @@ def _plink2_available() -> bool:
     return shutil.which("plink2") is not None
 
 
+def _read_bim_variant_ids(bim_path: str | Path) -> list[str]:
+    """Read variant IDs (column 2) from a plink1 BIM file.
+
+    BIM columns: chrom, variant_id, cm, pos, alt, ref
+    """
+    ids: list[str] = []
+    with open(bim_path) as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2:
+                ids.append(parts[1])
+    return ids
+
+
+def _plink2_input_args(input_path: Path) -> list[str]:
+    """Return the plink2 input flag(s) for *input_path*.
+
+    Supports BCF, VCF, and plink1 BED filesets.  When a ``.bed`` suffix is
+    detected the prefix (without extension) is used with ``--bfile``.
+    """
+    suffix = input_path.suffix.lower()
+    if suffix == ".bed":
+        return ["--bfile", str(input_path.with_suffix(""))]
+    if suffix == ".bcf":
+        return ["--bcf", str(input_path)]
+    return ["--vcf", str(input_path)]
+
+
 def make_plink2_bed(
-    bcf_path: str | Path,
+    input_path: str | Path,
     out_prefix: str | Path,
     *,
     keep_variants: list[str] | None = None,
@@ -121,22 +149,25 @@ def make_plink2_bed(
 ) -> Path:
     """Convert a BCF/VCF to plink2 BED/BIM/FAM using plink2.
 
-    Optionally filters to a pre-selected set of variant IDs (e.g. the
-    LD-pruned marker set) and/or a sample ID list.  Writes
+    Optionally filters to a pre-selected set of variant IDs (e.g. those
+    passing upstream QC) and/or a sample ID list.  Writes
     ``{out_prefix}.bed``, ``{out_prefix}.bim``, ``{out_prefix}.fam``.
 
     Parameters
     ----------
-    bcf_path : str or Path
-        Input BCF/VCF with ``FORMAT/GT``.
+    input_path : str or Path
+        Input BCF/VCF with ``FORMAT/GT``.  Also accepts a plink1 BED
+        fileset prefix or ``.bed`` path when further filtering a BED.
     out_prefix : str or Path
         Output prefix for plink2 binary files.
     keep_variants : list of str, optional
         Variant IDs to retain.  Written to a temporary extract file.
+        When *None* and ``min_maf`` > 0, plink2 applies its own MAF filter.
     keep_samples : list of str, optional
         Sample IDs to retain.  Written to a temporary keep file.
     min_maf : float
-        Minimum minor allele frequency.
+        Minimum minor allele frequency.  Set to ``0.0`` when *keep_variants*
+        already represents a QC-filtered set to avoid secondary filtering.
     min_call_rate : float
         Minimum per-variant call rate (``1 - missing rate``).
     allow_extra_chr : bool
@@ -160,23 +191,19 @@ def make_plink2_bed(
             "(https://www.cog-genomics.org/plink/2.0/)."
         )
 
-    bcf_path = Path(bcf_path)
+    input_path = Path(input_path)
     out_prefix = Path(out_prefix)
-    suffix = bcf_path.suffix.lower()
 
     with tempfile.TemporaryDirectory() as _tmp:
         tmp = Path(_tmp)
         cmd: list[str] = ["plink2"]
-
-        if suffix == ".bcf":
-            cmd += ["--bcf", str(bcf_path)]
-        else:
-            cmd += ["--vcf", str(bcf_path)]
+        cmd += _plink2_input_args(input_path)
 
         if allow_extra_chr:
             cmd.append("--allow-extra-chr")
 
-        cmd += ["--maf", str(min_maf)]
+        if min_maf > 0.0:
+            cmd += ["--maf", str(min_maf)]
         cmd += ["--geno", str(1.0 - min_call_rate)]
 
         if keep_variants:
@@ -205,9 +232,9 @@ def make_plink2_bed(
 
 
 def compute_grm_plink2(
-    bcf_path: str | Path,
+    input_path: str | Path,
     *,
-    keep_variants: list[str] | None = None,
+    keep_variants: set[str] | list[str] | None = None,
     keep_samples: list[str] | None = None,
     min_maf: float = 0.01,
 ) -> tuple[NDArray[np.floating], list[str]]:
@@ -219,14 +246,21 @@ def compute_grm_plink2(
 
     Parameters
     ----------
-    bcf_path : str or Path
-        Input BCF/VCF with ``FORMAT/GT``.
-    keep_variants : list of str, optional
-        Variant IDs (LD-pruned set) to restrict GRM computation.
+    input_path : str or Path
+        Path to BCF/VCF with ``FORMAT/GT``, **or** the prefix of a plink1
+        BED fileset (with or without the ``.bed`` extension).  Passing a
+        BED fileset is preferred: variants are read directly without
+        re-parsing the BCF.
+    keep_variants : set or list of str, optional
+        Variant IDs to restrict GRM computation (e.g. LD-pruned set).
+        Written to a temporary ``--extract`` file.  When *None* all
+        variants in *input_path* are used.
     keep_samples : list of str, optional
-        Sample IDs to restrict GRM computation.
+        Sample IDs to restrict GRM computation.  When *input_path* is a
+        BED already filtered to the desired samples this can be omitted.
     min_maf : float
-        Minimum MAF filter applied by plink2.
+        Minimum MAF filter applied by plink2 when reading BCF/VCF input.
+        Ignored when *input_path* is a BED fileset.
 
     Returns
     -------
@@ -248,20 +282,19 @@ def compute_grm_plink2(
             "(https://www.cog-genomics.org/plink/2.0/)."
         )
 
-    bcf_path = Path(bcf_path)
-    suffix = bcf_path.suffix.lower()
+    input_path = Path(input_path)
+    is_bed = input_path.suffix.lower() == ".bed"
 
     with tempfile.TemporaryDirectory() as _tmp:
         tmp = Path(_tmp)
         out_prefix = tmp / "grm"
         cmd: list[str] = ["plink2"]
+        cmd += _plink2_input_args(input_path)
+        cmd += ["--allow-extra-chr"]
 
-        if suffix == ".bcf":
-            cmd += ["--bcf", str(bcf_path)]
-        else:
-            cmd += ["--vcf", str(bcf_path)]
-
-        cmd += ["--allow-extra-chr", "--maf", str(min_maf)]
+        # Apply MAF filter only for BCF/VCF input; BED already QC-filtered.
+        if not is_bed and min_maf > 0.0:
+            cmd += ["--maf", str(min_maf)]
 
         if keep_variants:
             ext_file = tmp / "extract.txt"

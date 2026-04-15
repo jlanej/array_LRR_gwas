@@ -535,7 +535,7 @@ class TestCli:
         fake_bcf = tmp_path / "in.bcf"
         fake_bcf.write_text("stub")
 
-        # LRR input for association
+        # LRR + variant metadata for association
         lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
         samples = ["S1", "S2", "S3"]
         assoc_variants = [
@@ -544,26 +544,13 @@ class TestCli:
         ]
         mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
-        # GT input for GRM
-        dosage = np.array(
-            [[0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [2.0, 1.0, 0.0]],
-            dtype=float,
-        )
-        gt_variants = [
-            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
-            {"chrom": "chr1", "pos": 110, "id": "v2", "ref": "A", "alts": ("G",)},
-            {"chrom": "chr1", "pos": 120, "id": "v3", "ref": "A", "alts": ("T",)},
-        ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.genotypes.read_genotypes",
-            lambda *_a, **_k: (dosage, samples, gt_variants),
-        )
-
+        # In the plink2 path, the first plink2 call is make_plink2_bed.
+        # Simulate plink2 not being on PATH.
         def _raise_plink2_missing(*_a, **_k):
             raise FileNotFoundError("plink2")
 
         monkeypatch.setattr(
-            "array_lrr_gwas.ld_prune.ld_prune_plink2",
+            "array_lrr_gwas.grm.make_plink2_bed",
             _raise_plink2_missing,
         )
 
@@ -1535,6 +1522,7 @@ class TestCli:
                 str(fake_bcf),
                 "--phenotype", str(pheno),
                 "--method", "lmm",
+                "--ld-backend", "numpy",
                 "--no-ld-prune",
                 "-o", str(out),
             ])

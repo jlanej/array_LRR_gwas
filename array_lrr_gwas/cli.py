@@ -1701,110 +1701,318 @@ def _run_associate(args: argparse.Namespace) -> int:
     # The full list of kept/excluded variants is populated during streaming.
     variants_meta_pass = [v for v, k in zip(variants, variant_mask) if k]
 
-    # GRM for LMM
+    # ------------------------------------------------------------------
+    # GRM for LMM: full plink2-native pipeline (plink2 backend) or
+    # Python dosage-matrix fallback (--ld-backend numpy).
+    # ------------------------------------------------------------------
     grm = None
     if args.method == "lmm":
-        from array_lrr_gwas.genotypes import read_genotypes
-        from array_lrr_gwas.grm import compute_grm
         from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
         gt_path = args.genotype_bcf or input_path
-        logger.info("Reading genotypes from %s for GRM", gt_path)
-        dosage, gt_samples, gt_variants = read_genotypes(
-            gt_path,
-            min_maf=args.min_maf,
-            min_call_rate=args.min_gt_call_rate,
+        valid_samples = [samples[i] for i in range(len(samples)) if analyzed_mask[i]]
+        variant_qc_path = (
+            args.variant_qc
+            or cfg.get("upstream_qc", {}).get("variant_qc_path")
         )
 
-        if dosage.shape[0] == 0:
-            logger.error(
-                "No genotype variants passed QC filters from %s. "
-                "Ensure FORMAT/GT field is present. "
-                "Use --method ols to skip GRM requirement.",
+        if args.ld_backend == "plink2":
+            # -----------------------------------------------------------
+            # plink2-native path — no dosage matrix ever enters Python.
+            #
+            # Steps:
+            #   1. Lightweight metadata scan  → QC-passing variant IDs
+            #   2. BCF  →  plink2 BED         (QC-filtered + sample-filtered)
+            #   3. BED  →  LD-pruned IDs      (plink2 --indep-pairwise)
+            #   4. BED  →  GRM                (plink2 --make-grm-bin)
+            # -----------------------------------------------------------
+            from array_lrr_gwas.grm import (
+                _read_bim_variant_ids,
+                compute_grm_plink2,
+                make_plink2_bed,
+            )
+            from array_lrr_gwas.io_vcf import read_variant_metadata as _read_gt_meta
+            from array_lrr_gwas.ld_prune import ld_prune_plink2
+
+            # Step 1 — lightweight metadata scan: get variant IDs + sample list.
+            logger.info(
+                "Scanning genotype file metadata from %s (plink2 path)",
                 gt_path,
             )
-            return 1
-
-        n_initial = dosage.shape[0]
-        logger.info(
-            "%d genotype variants from %d samples passed initial QC",
-            n_initial, dosage.shape[1],
-        )
-
-        # Apply upstream variant QC mask (call rate + HWE + MAF)
-        variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
-        if variant_qc_path is not None:
+            gt_samples, gt_variant_metas = _read_gt_meta(gt_path)
+            gt_variant_ids = [_variant_id(v) for v in gt_variant_metas]
             logger.info(
-                "Loading upstream variant QC from %s for GRM", variant_qc_path,
-            )
-            qc_data = read_collated_variant_qc(variant_qc_path)
-            gt_variant_ids = [_variant_id(v) for v in gt_variants]
-            qc_keep = variant_qc_mask(
-                gt_variant_ids, qc_data,
-                require_call_rate=True, require_hwe=True, require_maf=True,
-                audit=audit, audit_stage="grm_variant_qc",
-            )
-            n_before_qc = dosage.shape[0]
-            dosage = dosage[qc_keep]
-            gt_variants = [v for v, k in zip(gt_variants, qc_keep) if k]
-            logger.info(
-                "Upstream variant QC (GRM): %d → %d variants "
-                "(call rate + HWE + MAF required)",
-                n_before_qc, dosage.shape[0],
+                "%d genotype variants, %d samples in %s",
+                len(gt_variant_ids), len(gt_samples), Path(gt_path).name,
             )
 
-            if dosage.shape[0] == 0:
+            if not gt_variant_ids:
                 logger.error(
-                    "No genotype variants remain after upstream QC mask "
-                    "(%d before filtering, file: %s). Check that variant "
-                    "IDs match between the genotype file and "
-                    "collated_variant_qc.tsv.",
-                    n_before_qc, variant_qc_path,
+                    "No variants found in genotype file %s. "
+                    "Ensure FORMAT/GT field is present. "
+                    "Use --method ols to skip GRM requirement.",
+                    gt_path,
                 )
                 return 1
-        else:
-            logger.warning(
-                "No upstream variant QC file provided (--variant-qc or "
-                "upstream_qc.variant_qc_path).  Skipping ancestry-informed "
-                "marker filtering for GRM.  Provide collated_variant_qc.tsv "
-                "for best-practice QC."
+
+            # Verify all analyzed samples exist in the genotype file.
+            gt_sample_set = set(gt_samples)
+            missing_samples = [s for s in valid_samples if s not in gt_sample_set]
+            if missing_samples:
+                logger.error(
+                    "%d analyzed samples not found in genotype file %s "
+                    "(first 5: %s). Check that both files cover the same cohort.",
+                    len(missing_samples), Path(gt_path).name, missing_samples[:5],
+                )
+                return 1
+
+            # Record audit for GRM samples.
+            audit.record(
+                stage="grm_samples",
+                id_type="sample",
+                included=valid_samples,
+                excluded={
+                    s: "not_in_analyzed_set"
+                    for s in gt_samples if s not in set(valid_samples)
+                },
             )
 
-        # LD prune GRM markers
-        # Capture variants before pruning so we can report excluded IDs.
-        _grm_pre_ld_variants = list(gt_variants)
-        if not args.no_ld_prune:
-            if args.ld_backend == "plink2":
-                from array_lrr_gwas.ld_prune import ld_prune, ld_prune_plink2
-
-                ld_window_kb = max(1, args.ld_window_bp // 1000)
+            # Step 2 — apply upstream variant QC mask to get passing IDs.
+            if variant_qc_path is not None:
                 logger.info(
-                    "LD pruning with plink2 (window=%dkb, r²=%.2f)",
-                    ld_window_kb, args.ld_r2_thresh,
+                    "Loading upstream variant QC from %s for GRM",
+                    variant_qc_path,
                 )
-                try:
-                    keep_ids = ld_prune_plink2(
+                qc_data = read_collated_variant_qc(variant_qc_path)
+                qc_keep = variant_qc_mask(
+                    gt_variant_ids, qc_data,
+                    require_call_rate=True, require_hwe=True, require_maf=True,
+                    audit=audit, audit_stage="grm_variant_qc",
+                )
+                qc_pass_ids: list[str] | None = [
+                    v for v, k in zip(gt_variant_ids, qc_keep) if k
+                ]
+                logger.info(
+                    "Upstream variant QC (GRM): %d → %d variants "
+                    "(call rate + HWE + MAF required)",
+                    len(gt_variant_ids), len(qc_pass_ids),
+                )
+                if not qc_pass_ids:
+                    logger.error(
+                        "No genotype variants pass upstream QC from %s. "
+                        "Check that variant IDs match collated_variant_qc.tsv.",
                         gt_path,
-                        window_kb=ld_window_kb,
-                        r2_thresh=args.ld_r2_thresh,
-                        min_maf=args.min_maf,
                     )
-                    # plink2 uses the VCF ID column; when ID is '.' it
-                    # constructs chrom:pos:ref:alt.  Match on both forms.
-                    ld_keep = np.array([
-                        v.get("id") in keep_ids
-                        or f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}" in keep_ids
-                        for v in gt_variants
-                    ], dtype=bool)
+                    return 1
+            else:
+                qc_pass_ids = None
+                logger.warning(
+                    "No upstream variant QC file provided (--variant-qc or "
+                    "upstream_qc.variant_qc_path).  plink2 will apply basic "
+                    "MAF (%.2f) and call-rate filters.  Provide "
+                    "collated_variant_qc.tsv for best-practice QC.",
+                    args.min_maf,
+                )
+
+            # Step 3 — convert QC-passing variants to plink2 BED.
+            # BED persists in --audit-dir when provided; otherwise temp.
+            _audit_dir_val = getattr(args, "audit_dir", None)
+            _tmp_bed_dir: object | None = None
+            if _audit_dir_val is not None:
+                bed_dir = Path(_audit_dir_val)
+                bed_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                import tempfile as _tf
+                _tmp_bed_dir = _tf.TemporaryDirectory()
+                bed_dir = Path(_tmp_bed_dir.name)
+
+            try:
+                bed_prefix = bed_dir / "grm_markers"
+                try:
+                    make_plink2_bed(
+                        gt_path,
+                        bed_prefix,
+                        keep_variants=qc_pass_ids,
+                        keep_samples=valid_samples,
+                        # QC-filtered IDs already pass MAF — skip re-filter.
+                        min_maf=0.0 if qc_pass_ids is not None else args.min_maf,
+                    )
+                    logger.info(
+                        "plink2 BED generated (%d samples, QC-filtered): %s",
+                        len(valid_samples), bed_prefix,
+                    )
                 except FileNotFoundError:
                     logger.error(
                         "plink2 backend requested but plink2 is not on PATH. "
                         "Install plink2 (https://www.cog-genomics.org/plink/2.0/) "
-                        "or explicitly select the NumPy fallback with "
-                        "--ld-backend numpy."
+                        "or use --ld-backend numpy for the Python fallback."
+                    )
+                    return 1
+                except subprocess.CalledProcessError as exc:
+                    logger.error("plink2 BED generation failed: %s", exc)
+                    return 1
+
+                # Step 4 — LD prune the BED (variants already QC-filtered).
+                bim_path = bed_prefix.with_suffix(".bim")
+                _pre_ld_ids = _read_bim_variant_ids(bim_path)
+
+                if not args.no_ld_prune:
+                    ld_window_kb = max(1, args.ld_window_bp // 1000)
+                    logger.info(
+                        "LD pruning with plink2 (window=%dkb, r²=%.2f, input=BED)",
+                        ld_window_kb, args.ld_r2_thresh,
+                    )
+                    try:
+                        pruned_ids: set[str] | None = ld_prune_plink2(
+                            bed_prefix.with_suffix(".bed"),
+                            window_kb=ld_window_kb,
+                            r2_thresh=args.ld_r2_thresh,
+                        )
+                    except FileNotFoundError:
+                        logger.error(
+                            "plink2 backend requested but plink2 is not on PATH. "
+                            "Install plink2 (https://www.cog-genomics.org/plink/2.0/) "
+                            "or use --ld-backend numpy for the Python fallback."
+                        )
+                        return 1
+
+                    n_before_ld = len(_pre_ld_ids)
+                    n_after_ld = len(pruned_ids)
+                    logger.info(
+                        "LD pruning: %d → %d variants (removed %d)",
+                        n_before_ld, n_after_ld, n_before_ld - n_after_ld,
+                    )
+                    if n_after_ld == 0:
+                        logger.error(
+                            "No variants remain after LD pruning.  Consider "
+                            "relaxing --ld-r2-thresh or using --no-ld-prune."
+                        )
+                        return 1
+
+                    audit.record(
+                        stage="grm_ld_prune",
+                        id_type="marker",
+                        included=sorted(pruned_ids),
+                        excluded={
+                            vid: "ld_prune"
+                            for vid in _pre_ld_ids if vid not in pruned_ids
+                        },
+                    )
+                else:
+                    pruned_ids = None  # use all variants already in BED
+                    logger.info(
+                        "LD pruning disabled (--no-ld-prune). "
+                        "All %d BED markers retained for GRM.",
+                        len(_pre_ld_ids),
+                    )
+                    audit.record(
+                        stage="grm_ld_prune",
+                        id_type="marker",
+                        included=_pre_ld_ids,
+                        excluded={},
+                    )
+
+                # Step 5 — compute GRM from LD-pruned BED via plink2.
+                logger.info(
+                    "Computing GRM via plink2 --make-grm-bin (input=BED) ..."
+                )
+                try:
+                    grm_raw, plink2_ids = compute_grm_plink2(
+                        bed_prefix.with_suffix(".bed"),
+                        keep_variants=pruned_ids,
+                    )
+                except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+                    logger.error("plink2 GRM computation failed: %s", exc)
+                    return 1
+
+                # Reorder GRM rows/cols to match valid_samples ordering.
+                _p2_idx = {s: i for i, s in enumerate(plink2_ids)}
+                _missing_grm = [s for s in valid_samples if s not in _p2_idx]
+                if _missing_grm:
+                    logger.error(
+                        "plink2 GRM is missing %d analyzed samples (e.g. %s). "
+                        "Check that the genotype file covers all analyzed samples.",
+                        len(_missing_grm), _missing_grm[:3],
+                    )
+                    return 1
+                _reorder = [_p2_idx[s] for s in valid_samples]
+                grm = grm_raw[np.ix_(_reorder, _reorder)]
+                logger.info(
+                    "GRM computed via plink2: %d × %d",
+                    grm.shape[0], grm.shape[1],
+                )
+
+            finally:
+                if _tmp_bed_dir is not None:
+                    _tmp_bed_dir.cleanup()
+
+        else:
+            # -----------------------------------------------------------
+            # NumPy fallback path (--ld-backend numpy).
+            # Loads the full dosage matrix into Python memory.
+            # -----------------------------------------------------------
+            from array_lrr_gwas.genotypes import read_genotypes
+            from array_lrr_gwas.grm import compute_grm
+
+            logger.info("Reading genotypes from %s for GRM (numpy path)", gt_path)
+            dosage, gt_samples_np, gt_variants = read_genotypes(
+                gt_path,
+                min_maf=args.min_maf,
+                min_call_rate=args.min_gt_call_rate,
+            )
+
+            if dosage.shape[0] == 0:
+                logger.error(
+                    "No genotype variants passed QC filters from %s. "
+                    "Ensure FORMAT/GT field is present. "
+                    "Use --method ols to skip GRM requirement.",
+                    gt_path,
+                )
+                return 1
+
+            logger.info(
+                "%d genotype variants from %d samples passed initial QC",
+                dosage.shape[0], dosage.shape[1],
+            )
+
+            # Apply upstream variant QC mask.
+            if variant_qc_path is not None:
+                logger.info(
+                    "Loading upstream variant QC from %s for GRM",
+                    variant_qc_path,
+                )
+                qc_data = read_collated_variant_qc(variant_qc_path)
+                gt_variant_ids_np = [_variant_id(v) for v in gt_variants]
+                qc_keep = variant_qc_mask(
+                    gt_variant_ids_np, qc_data,
+                    require_call_rate=True, require_hwe=True, require_maf=True,
+                    audit=audit, audit_stage="grm_variant_qc",
+                )
+                n_before_qc = dosage.shape[0]
+                dosage = dosage[qc_keep]
+                gt_variants = [v for v, k in zip(gt_variants, qc_keep) if k]
+                logger.info(
+                    "Upstream variant QC (GRM): %d → %d variants",
+                    n_before_qc, dosage.shape[0],
+                )
+                if dosage.shape[0] == 0:
+                    logger.error(
+                        "No variants remain after upstream QC mask "
+                        "(%d before filtering). Check variant IDs match.",
+                        n_before_qc,
                     )
                     return 1
             else:
+                logger.warning(
+                    "No upstream variant QC file provided (--variant-qc or "
+                    "upstream_qc.variant_qc_path).  Skipping ancestry-informed "
+                    "marker filtering for GRM.  Provide collated_variant_qc.tsv "
+                    "for best-practice QC."
+                )
+
+            # LD pruning (NumPy).
+            _grm_pre_ld_variants = list(gt_variants)
+            if not args.no_ld_prune:
                 from array_lrr_gwas.ld_prune import ld_prune
 
                 gt_positions = np.array(
@@ -1824,161 +2032,71 @@ def _run_associate(args: argparse.Namespace) -> int:
                     window_bp=args.ld_window_bp,
                     r2_thresh=args.ld_r2_thresh,
                 )
-
-            n_before = dosage.shape[0]
-            dosage = dosage[ld_keep]
-            gt_variants = [v for v, k in zip(gt_variants, ld_keep) if k]
-            logger.info(
-                "LD pruning: %d → %d variants (removed %d)",
-                n_before, dosage.shape[0], n_before - dosage.shape[0],
-            )
-
-            # Record GRM marker set after LD pruning in audit trail.
-            _ld_included = [_variant_id(v) for v in gt_variants]
-            _ld_excluded = {
-                _variant_id(v): "ld_prune"
-                for v, k in zip(_grm_pre_ld_variants, ld_keep) if not k
-            }
-            audit.record(
-                stage="grm_ld_prune",
-                id_type="marker",
-                included=_ld_included,
-                excluded=_ld_excluded,
-            )
-
-            if dosage.shape[0] == 0:
-                logger.error(
-                    "No variants remain after LD pruning.  Consider "
-                    "relaxing --ld-r2-thresh or using --no-ld-prune."
+                n_before = dosage.shape[0]
+                dosage = dosage[ld_keep]
+                gt_variants = [v for v, k in zip(gt_variants, ld_keep) if k]
+                logger.info(
+                    "LD pruning: %d → %d variants (removed %d)",
+                    n_before, dosage.shape[0], n_before - dosage.shape[0],
                 )
-                return 1
-        else:
-            logger.info(
-                "LD pruning disabled (--no-ld-prune).  All %d GRM markers "
-                "retained without LD filtering.",
-                dosage.shape[0],
-            )
-            # Record the full marker set (no exclusions) in audit trail.
-            audit.record(
-                stage="grm_ld_prune",
-                id_type="marker",
-                included=[_variant_id(v) for v in gt_variants],
-                excluded={},
-            )
-
-        logger.info(
-            "Using %d genotype variants from %d samples for GRM",
-            dosage.shape[0], dosage.shape[1],
-        )
-
-        # Align GT samples to LRR samples
-        gt_idx = {s: i for i, s in enumerate(gt_samples)}
-        valid_samples = [samples[i] for i in range(len(samples)) if analyzed_mask[i]]
-        gt_order = []
-        for s in valid_samples:
-            if s in gt_idx:
-                gt_order.append(gt_idx[s])
-            else:
-                logger.error("Sample %s not found in genotype file", s)
-                return 1
-
-        # Record which samples are included in the GRM in audit trail.
-        # Samples in the GT file that are not being analysed are excluded.
-        _grm_sample_excluded = {
-            s: "not_in_analyzed_set"
-            for s in gt_samples if s not in set(valid_samples)
-        }
-        audit.record(
-            stage="grm_samples",
-            id_type="sample",
-            included=valid_samples,
-            excluded=_grm_sample_excluded,
-        )
-
-        # ------------------------------------------------------------------
-        # Generate upfront plink2 BED/BIM/FAM for the LD-pruned marker set.
-        # This binary file captures which markers were used in the GRM,
-        # enabling downstream provenance checks and QC plots.
-        # Written to the audit directory when --audit-dir is provided.
-        # ------------------------------------------------------------------
-        _pruned_ids = [_variant_id(v) for v in gt_variants]
-        _bed_prefix: Path | None = None
-        if args.ld_backend == "plink2":
-            _audit_dir_val = getattr(args, "audit_dir", None)
-            _bed_out_dir = (
-                Path(_audit_dir_val) if _audit_dir_val is not None else None
-            )
-            if _bed_out_dir is not None:
-                from array_lrr_gwas.grm import make_plink2_bed
-
-                _bed_out_dir.mkdir(parents=True, exist_ok=True)
-                _bed_prefix = _bed_out_dir / "grm_markers"
-                try:
-                    make_plink2_bed(
-                        gt_path,
-                        _bed_prefix,
-                        keep_variants=_pruned_ids,
-                        keep_samples=valid_samples,
-                        min_maf=args.min_maf,
-                    )
-                    logger.info(
-                        "Saved LD-pruned GRM marker set as plink2 BED: %s",
-                        _bed_prefix,
-                    )
-                except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-                    logger.warning(
-                        "plink2 BED generation failed (non-fatal): %s", exc,
-                    )
-
-        # ------------------------------------------------------------------
-        # GRM computation: use plink2 --make-grm-bin when the plink2 backend
-        # is selected (avoids loading the full dosage matrix into Python).
-        # Fall back to the Python implementation otherwise.
-        # ------------------------------------------------------------------
-        if args.ld_backend == "plink2":
-            from array_lrr_gwas.grm import compute_grm_plink2
-
-            logger.info("Computing GRM via plink2 --make-grm-bin ...")
-            try:
-                grm_raw, plink2_ids = compute_grm_plink2(
-                    gt_path,
-                    keep_variants=_pruned_ids,
-                    keep_samples=valid_samples,
-                    min_maf=args.min_maf,
+                audit.record(
+                    stage="grm_ld_prune",
+                    id_type="marker",
+                    included=[_variant_id(v) for v in gt_variants],
+                    excluded={
+                        _variant_id(v): "ld_prune"
+                        for v, k in zip(_grm_pre_ld_variants, ld_keep) if not k
+                    },
                 )
-                # plink2 may return samples in different order; reorder.
-                _p2_idx = {s: i for i, s in enumerate(plink2_ids)}
-                _missing = [s for s in valid_samples if s not in _p2_idx]
-                if _missing:
+                if dosage.shape[0] == 0:
                     logger.error(
-                        "plink2 GRM is missing %d analyzed samples (e.g. %s). "
-                        "Check that the genotype file covers all analyzed samples.",
-                        len(_missing), _missing[:3],
+                        "No variants remain after LD pruning.  Consider "
+                        "relaxing --ld-r2-thresh or using --no-ld-prune."
                     )
                     return 1
-                _reorder = [_p2_idx[s] for s in valid_samples]
-                grm = grm_raw[np.ix_(_reorder, _reorder)]
+            else:
                 logger.info(
-                    "GRM computed via plink2: %d × %d",
-                    grm.shape[0], grm.shape[1],
+                    "LD pruning disabled (--no-ld-prune). "
+                    "All %d GRM markers retained.",
+                    dosage.shape[0],
                 )
-            except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-                logger.warning(
-                    "plink2 GRM failed (%s); falling back to Python GRM.",
-                    exc,
+                audit.record(
+                    stage="grm_ld_prune",
+                    id_type="marker",
+                    included=[_variant_id(v) for v in gt_variants],
+                    excluded={},
                 )
-                dosage_aligned = dosage[:, gt_order]
-                grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
-                logger.info(
-                    "GRM computed (Python fallback): %d × %d",
-                    grm.shape[0], grm.shape[1],
+
+            logger.info(
+                "Using %d genotype variants from %d samples for GRM",
+                dosage.shape[0], dosage.shape[1],
+            )
+
+            # Align GT samples to LRR analyzed samples.
+            gt_idx = {s: i for i, s in enumerate(gt_samples_np)}
+            missing_samples = [s for s in valid_samples if s not in gt_idx]
+            if missing_samples:
+                logger.error(
+                    "%d analyzed samples not found in genotype file (first 5: %s)",
+                    len(missing_samples), missing_samples[:5],
                 )
-        else:
+                return 1
+            gt_order = [gt_idx[s] for s in valid_samples]
+            audit.record(
+                stage="grm_samples",
+                id_type="sample",
+                included=valid_samples,
+                excluded={
+                    s: "not_in_analyzed_set"
+                    for s in gt_samples_np if s not in set(valid_samples)
+                },
+            )
+
             dosage_aligned = dosage[:, gt_order]
-            logger.info("Computing GRM (Python)...")
+            logger.info("Computing GRM (NumPy)...")
             grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
             logger.info(
-                "GRM computed: %d × %d", grm.shape[0], grm.shape[1],
+                "GRM computed (NumPy): %d × %d", grm.shape[0], grm.shape[1],
             )
 
 

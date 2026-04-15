@@ -494,21 +494,9 @@ class TestPlink2Enforcement:
         ]
         mock_associate_io(monkeypatch, lrr, samples, variants)
 
-        dosage = np.array(
-            [[0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [2.0, 1.0, 0.0]],
-            dtype=float,
-        )
-        gt_variants = [
-            {"chrom": "chr1", "pos": 100, "id": "v1", "ref": "A", "alts": ("C",)},
-            {"chrom": "chr1", "pos": 110, "id": "v2", "ref": "A", "alts": ("G",)},
-            {"chrom": "chr1", "pos": 120, "id": "v3", "ref": "A", "alts": ("T",)},
-        ]
+        # In the plink2 path, make_plink2_bed is the first plink2 call.
         monkeypatch.setattr(
-            "array_lrr_gwas.genotypes.read_genotypes",
-            lambda *_a, **_k: (dosage, samples, gt_variants),
-        )
-        monkeypatch.setattr(
-            "array_lrr_gwas.ld_prune.ld_prune_plink2",
+            "array_lrr_gwas.grm.make_plink2_bed",
             lambda *_a, **_k: (_ for _ in ()).throw(FileNotFoundError("plink2")),
         )
 

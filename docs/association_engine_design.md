@@ -97,31 +97,45 @@ alternatives when no GRM is provided.
 ## GRM Marker Selection and LD Pruning
 
 The GRM aims to model neutral background relatedness between samples.
-Markers used for GRM construction are filtered by MAF (default ≥ 0.01)
-and genotype call rate (default ≥ 0.90), then **LD-pruned** so that
-highly linked genomic regions do not disproportionately dominate the
-GRM eigenstructure.
+For the `plink2` backend (default), the full pipeline proceeds without
+ever loading a dosage matrix into Python:
 
-LD pruning uses a greedy forward algorithm: for each retained variant
-in genomic order, any subsequent variant within a sliding window
-(default 1 Mb) whose r² exceeds the threshold (default 0.2) is removed.
-This mirrors the logic of PLINK's `--indep-pairwise` and follows the
-standard practice recommended by Yang *et al.* (2011, GCTA) and Privé
-*et al.* (2020, *Bioinformatics*).
+1. **Lightweight metadata scan** — `read_variant_metadata()` reads variant
+   IDs and sample names from the BCF header + records without decoding
+   `FORMAT/GT` dosage values.
+2. **Upstream variant QC** — Variant IDs from `collated_variant_qc.tsv`
+   (provided via `--variant-qc`) are used to build the QC-passing ID list.
+   Variants that fail call rate, HWE, or MAF thresholds across all
+   ancestries are excluded.  When no QC file is provided, plink2's own
+   `--maf` and `--geno` filters are applied.
+3. **BCF → plink2 BED** — `make_plink2_bed()` converts the BCF to a
+   plink1-format BED/BIM/FAM fileset, filtering to only QC-passing
+   variants and analyzed samples in a single plink2 invocation.  The BED
+   is stored in `--audit-dir` for provenance (or a temp dir if omitted).
+4. **LD pruning on BED** — `ld_prune_plink2()` runs
+   `plink2 --indep-pairwise` on the BED (not the BCF), which is faster
+   because the binary format is already decoded.
+5. **GRM from LD-pruned BED** — `compute_grm_plink2()` runs
+   `plink2 --make-grm-bin` on the BED with an extract list of
+   LD-pruned IDs, producing the GCTA-format GRM without materialising
+   any dosage array in Python.
+
+This pipeline ensures that:
+- The full genotype dosage matrix never enters Python memory.
+- Each variant passes both upstream ancestry-stratified QC *and* plink2
+  MAF/call-rate checks (no double-filtering when QC IDs are provided).
+- Provenance is captured: BED/BIM/FAM files in `--audit-dir` record
+  exactly which markers and samples entered the GRM.
 
 Two backends are available:
 
-| Backend  | When to use                              |
-|----------|------------------------------------------|
-| `plink2` | **Default and required.** Fastest on     |
-|          | large datasets; uses                     |
-|          | `plink2 --indep-pairwise`. Requires      |
-|          | `plink2` on `$PATH` (included in Docker  |
-|          | image). If plink2 is not found, the      |
-|          | pipeline exits with an error.            |
-| `numpy`  | Explicit fallback via `--ld-backend       |
-|          | numpy`. No external tools needed. Must   |
-|          | be requested explicitly.                 |
+| Backend  | When to use                                              |
+|----------|----------------------------------------------------------|
+| `plink2` | **Default.** Fully plink2-native; no Python dosage       |
+|          | matrix.  Requires `plink2` on `$PATH`.  Exits with an   |
+|          | error if plink2 is not found.                            |
+| `numpy`  | Explicit fallback via `--ld-backend numpy`.  Loads the   |
+|          | full dosage matrix into Python.  No external tools.      |
 
 CLI flags:
 
