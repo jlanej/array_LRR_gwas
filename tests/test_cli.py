@@ -129,6 +129,18 @@ class TestCli:
         assert args.max_lrr_sd is None
         assert args.min_sample_call_rate is None
 
+    def test_associate_phenotype_column_args_parsed(self):
+        args = _build_parser().parse_args([
+            "associate",
+            "in.bcf",
+            "--phenotype", "pheno.tsv",
+            "--phenotype-col", "mtcn",
+            "--covariate-cols", "sex_numeric", "age", "PC1",
+            "-o", "out.tsv",
+        ])
+        assert args.phenotype_col == "mtcn"
+        assert args.covariate_cols == ["sex_numeric", "age", "PC1"]
+
     def test_no_args_returns_1(self):
         assert main([]) == 1
 
@@ -1196,7 +1208,17 @@ class TestCli:
                 pass
             assert phenotype.shape == (1,)
             assert float(phenotype[0]) == 1.0
-            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
 
         monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
@@ -1272,7 +1294,17 @@ class TestCli:
                 pass
             assert phenotype.shape == (2,)
             assert np.array_equal(phenotype, np.array([1.0, 2.0]))
-            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
 
         monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
@@ -1357,7 +1389,17 @@ class TestCli:
             for _chunk, _vars in lrr_chunks:
                 pass
             assert phenotype.shape == (2,)
-            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
 
         monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
@@ -1434,7 +1476,17 @@ class TestCli:
             for _chunk, _vars in lrr_chunks:
                 pass
             assert phenotype.shape == (1,)
-            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
 
         monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
@@ -1453,6 +1505,272 @@ class TestCli:
         assert rc == 0
         assert "max_lrr_sd=0.0500" in caplog.text
         assert "dropped_hard_qc_with_valid_pheno=1" in caplog.text
+
+    def test_associate_uses_only_phenotype_file_covariates(
+        self, tmp_path, monkeypatch
+    ):
+        """Sample-sheet PCs must not be appended as association covariates."""
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\tsex_numeric\tPC1\n"
+            "S1\t1.0\t0\t10\n"
+            "S2\t2.0\t1\t20\n"
+            "S3\t3.0\t1\t30\n"
+        )
+        # Includes overlapping PC names, but these must not be used as covariates.
+        sheet = tmp_path / "sheet.tsv"
+        sheet.write_text(
+            "Sample_ID\tcall_rate\tlrr_sd\tPC1\tPC2\n"
+            "S1\t0.99\t0.10\t100\t200\n"
+            "S2\t0.99\t0.10\t300\t400\n"
+            "S3\t0.99\t0.10\t500\t600\n"
+        )
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
+
+        class _FakeResult:
+            variant_id = ['a1', 'a2']
+            chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 3, "method": "ols"},
+                ]
+
+        def _fake_run_association_streaming(_lrr_chunks, phenotype, **kwargs):
+            np.testing.assert_allclose(phenotype, np.array([1.0, 2.0, 3.0]))
+            covariates = kwargs.get("covariates")
+            assert covariates is not None
+            # Must be exactly 2 columns from phenotype file only:
+            # sex_numeric, PC1
+            assert covariates.shape == (3, 2)
+            np.testing.assert_allclose(
+                covariates,
+                np.array([[0.0, 10.0], [1.0, 20.0], [1.0, 30.0]]),
+            )
+            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+
+        monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
+
+        rc = main([
+            "associate",
+            str(fake_bcf),
+            "--phenotype", str(pheno),
+            "--sample-sheet", str(sheet),
+            "--method", "ols",
+            "-o", str(out),
+        ])
+        assert rc == 0
+
+    def test_associate_uses_explicit_phenotype_and_covariate_columns(
+        self, tmp_path, monkeypatch
+    ):
+        """--phenotype-col and --covariate-cols control trait/covariate selection."""
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\ttrait_default\ttrait_used\tsex\tage\n"
+            "S1\t10\t100\t0\t40\n"
+            "S2\t20\t200\t1\t50\n"
+        )
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2], [0.0, 0.1]], dtype=float)
+        samples = ["S1", "S2"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
+
+        class _FakeResult:
+            variant_id = ['a1', 'a2']
+            chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                ]
+
+        def _fake_run_association_streaming(_lrr_chunks, phenotype, **kwargs):
+            np.testing.assert_allclose(phenotype, np.array([100.0, 200.0]))
+            covariates = kwargs.get("covariates")
+            assert covariates is not None
+            # Order must follow --covariate-cols arguments: age then sex.
+            np.testing.assert_allclose(
+                covariates,
+                np.array([[40.0, 0.0], [50.0, 1.0]]),
+            )
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
+
+        monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
+
+        rc = main([
+            "associate",
+            str(fake_bcf),
+            "--phenotype", str(pheno),
+            "--phenotype-col", "trait_used",
+            "--covariate-cols", "age", "sex",
+            "--method", "ols",
+            "-o", str(out),
+        ])
+        assert rc == 0
+
+    def test_associate_uses_default_covariate_column_order(
+        self, tmp_path, monkeypatch
+    ):
+        """Without --covariate-cols, covariates follow phenotype-file column order."""
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\ttrait\tage\tsex\tPC1\n"
+            "S1\t1\t40\t0\t10\n"
+            "S2\t2\t50\t1\t20\n"
+        )
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2], [0.0, 0.1]], dtype=float)
+        samples = ["S1", "S2"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
+
+        class _FakeResult:
+            variant_id = ['a1', 'a2']
+            chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                ]
+
+        def _fake_run_association_streaming(_lrr_chunks, phenotype, **kwargs):
+            np.testing.assert_allclose(phenotype, np.array([1.0, 2.0]))
+            covariates = kwargs.get("covariates")
+            assert covariates is not None
+            # Default order should follow file order: age, sex, PC1
+            np.testing.assert_allclose(
+                covariates,
+                np.array([[40.0, 0.0, 10.0], [50.0, 1.0, 20.0]]),
+            )
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
+
+        monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
+
+        rc = main([
+            "associate",
+            str(fake_bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "-o", str(out),
+        ])
+        assert rc == 0
+
+    def test_associate_errors_when_covariate_cols_include_phenotype_col(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """CLI should reject duplicated phenotype/covariate column selection."""
+        import logging
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\ttrait\tage\n"
+            "S1\t1.0\t40\n"
+            "S2\t2.0\t50\n"
+        )
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2], [0.0, 0.1]], dtype=float)
+        samples = ["S1", "S2"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
+
+        with caplog.at_level(logging.ERROR, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--phenotype-col", "trait",
+                "--covariate-cols", "trait", "age",
+                "--method", "ols",
+                "-o", str(out),
+            ])
+        assert rc == 1
+        assert "Covariate columns cannot include the phenotype column 'trait'" in caplog.text
 
     def test_associate_logs_ld_prune_disabled(
         self, tmp_path, monkeypatch, caplog

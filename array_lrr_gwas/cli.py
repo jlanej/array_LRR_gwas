@@ -350,8 +350,27 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "Tab-separated phenotype file. Must contain a header row with "
-            "at least 'sample_id' and 'phenotype' columns.  Additional "
-            "columns are treated as covariates."
+            "at least a 'sample_id' column and one phenotype/covariate "
+            "column."
+        ),
+    )
+    assoc.add_argument(
+        "--phenotype-col",
+        type=str,
+        default=None,
+        help=(
+            "Column name in --phenotype to use as the phenotype value. "
+            "Default: first non-'sample_id' column."
+        ),
+    )
+    assoc.add_argument(
+        "--covariate-cols",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional phenotype-file column names to use as covariates. "
+            "Default: all non-'sample_id' columns except the phenotype column."
         ),
     )
     assoc.add_argument(
@@ -374,7 +393,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path to compiled_sample_sheet.tsv from illumina_idat_processing. "
-            "Global ancestry PCs and covariates are extracted automatically."
+            "Used for sample-QC filtering and optional sex-chromosome modes."
         ),
     )
     assoc.add_argument(
@@ -414,13 +433,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "Also configurable via sample_qc.min_call_rate in the YAML config."
         ),
     )
-    assoc.add_argument(
-        "--n-pcs",
-        type=int,
-        default=20,
-        help="Number of global ancestry PCs to use from sample sheet (default: 20).",
-    )
-
     # ---- Association sample-exclusion flags ----
     # These flags control additional exclusion criteria applied when
     # --sample-sheet is provided.  Each is ON by default following GWAS
@@ -1332,6 +1344,9 @@ def _run_associate(args: argparse.Namespace) -> int:
     if not pheno_path.exists():
         logger.error("Phenotype file not found: %s", pheno_path)
         return 1
+    if args.sample_sheet is not None and not args.sample_sheet.exists():
+        logger.error("Sample sheet not found: %s", args.sample_sheet)
+        return 1
 
     # Initialize audit logger
     audit = AuditLogger()
@@ -1395,16 +1410,59 @@ def _run_associate(args: argparse.Namespace) -> int:
         if reader.fieldnames is None:
             logger.error("Phenotype file is empty or has no header")
             return 1
-        pheno_cov_names = [
-            c for c in reader.fieldnames if c not in ("sample_id", "phenotype")
-        ]
+        if "sample_id" not in reader.fieldnames:
+            logger.error("Phenotype file must include a 'sample_id' column")
+            return 1
+        data_cols = [c for c in reader.fieldnames if c != "sample_id"]
+        if not data_cols:
+            logger.error(
+                "Phenotype file has no data columns; include a phenotype column",
+            )
+            return 1
+
+        if args.phenotype_col is not None:
+            if args.phenotype_col == "sample_id":
+                logger.error("--phenotype-col cannot be 'sample_id'")
+                return 1
+            if args.phenotype_col not in reader.fieldnames:
+                logger.error(
+                    "Phenotype column '%s' not found in phenotype file",
+                    args.phenotype_col,
+                )
+                return 1
+            pheno_col = args.phenotype_col
+        else:
+            pheno_col = data_cols[0]
+
+        if args.covariate_cols is not None:
+            bad = [c for c in args.covariate_cols if c not in reader.fieldnames]
+            if bad:
+                logger.error(
+                    "Covariate column(s) not found in phenotype file: %s",
+                    ", ".join(bad),
+                )
+                return 1
+            if "sample_id" in args.covariate_cols:
+                logger.error("--covariate-cols cannot include 'sample_id'")
+                return 1
+            if pheno_col in args.covariate_cols:
+                logger.error(
+                    "Covariate columns cannot include the phenotype column '%s'",
+                    pheno_col,
+                )
+                return 1
+            pheno_cov_names = list(args.covariate_cols)
+        else:
+            pheno_cov_names = [c for c in data_cols if c != pheno_col]
+
+        logger.info("Using phenotype column from phenotype file: %s", pheno_col)
         for row in reader:
             sid = row["sample_id"]
             if sid not in sample_to_idx:
                 continue
             idx = sample_to_idx[sid]
             pheno_seen[idx] = True
-            pheno_vals[idx] = _parse_float(row["phenotype"])
+            pheno_vals[idx] = _parse_float(row[pheno_col])
             for cn in pheno_cov_names:
                 pheno_cov_vals[idx].append(_parse_float(row[cn]))
 
@@ -1629,43 +1687,6 @@ def _run_associate(args: argparse.Namespace) -> int:
             "Using %d covariates from phenotype file: %s",
             len(pheno_cov_names), pheno_cov_names,
         )
-
-    # Covariates from sample sheet
-    if args.sample_sheet is not None:
-        if not args.sample_sheet.exists():
-            logger.error("Sample sheet not found: %s", args.sample_sheet)
-            return 1
-
-        from array_lrr_gwas.sample_sheet import read_sample_sheet, align_samples
-
-        logger.info("Reading sample sheet from %s", args.sample_sheet)
-        sheet_ids, sheet_covs, cov_names = read_sample_sheet(
-            args.sample_sheet, n_pcs=args.n_pcs,
-        )
-        logger.info(
-            "Extracted %d covariates from sample sheet: %s",
-            len(cov_names), cov_names,
-        )
-
-        # Align to BCF samples and subset to valid
-        aligned = align_samples(samples, sheet_ids, sheet_covs)
-        aligned_valid = aligned[analyzed_mask]
-
-        # Drop columns that are all NaN
-        col_valid = ~np.all(np.isnan(aligned_valid), axis=0)
-        if col_valid.any():
-            aligned_valid = aligned_valid[:, col_valid]
-            used_names = [n for n, v in zip(cov_names, col_valid) if v]
-            # Mean-impute any remaining NaN (vectorised)
-            nan_mask = np.isnan(aligned_valid)
-            if nan_mask.any():
-                col_means = np.nanmean(aligned_valid, axis=0, keepdims=True)
-                aligned_valid = np.where(nan_mask, col_means, aligned_valid)
-            cov_parts.append(aligned_valid)
-            logger.info(
-                "Using %d sample-sheet covariates: %s",
-                len(used_names), used_names,
-            )
 
     # Combine covariates
     covariates = None

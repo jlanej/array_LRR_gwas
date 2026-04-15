@@ -309,7 +309,7 @@ apptainer run --bind /data "${SIF}" correct \
     --variant-qc "${VARIANT_QC}" \
     -v
 
-# Step 2: Association (LMM with GRM and 20 ancestry PCs)
+# Step 2: Association (LMM with GRM; phenotype and covariates from phenotype file)
 # LD pruning is enabled by default for GRM computation.
 # --genotype-bcf is omitted: the reclustered BCF already contains FORMAT/GT.
 apptainer run --bind /data "${SIF}" associate \
@@ -318,7 +318,6 @@ apptainer run --bind /data "${SIF}" associate \
     --sample-sheet "${SAMPLE_SHEET}" \
     --variant-qc "${VARIANT_QC}" \
     --method lmm \
-    --n-pcs 20 \
     -o "${OUTDIR}/association_results.tsv" \
     -v
 
@@ -388,7 +387,9 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--phenotype` | path | *required* | Tab-separated file (see [Input Formats](#input-formats)) |
 | `-o, --output` | path | *required* | Output TSV of per-marker association results |
 | `--method` | str | `lmm` | `lmm` (default), `ols`, or `logistic` |
-| `--sample-sheet` | path | `None` | `compiled_sample_sheet.tsv` for ancestry PCs; also used to derive HQ samples when `--hq-samples` is omitted |
+| `--sample-sheet` | path | `None` | `compiled_sample_sheet.tsv` used to derive HQ samples (when `--hq-samples` is omitted) and for sex-chromosome modes |
+| `--phenotype-col` | str | first non-`sample_id` column | Column in `--phenotype` to use as the phenotype |
+| `--covariate-cols` | str(s) | all remaining non-`sample_id` columns | Columns in `--phenotype` to use as fixed-effect covariates |
 | `--hq-samples` | path | `None` | Optional HQ sample list; analyzes only `valid phenotype ∩ HQ` samples (drops LQ). When omitted but `--sample-sheet` is provided, HQ samples are derived from the sheet using `--max-lrr-sd` and `--min-sample-call-rate` |
 | `--max-lrr-sd` | float | `0.35` | Max per-sample LRR SD for HQ classification (used when deriving HQ from sample sheet) |
 | `--min-sample-call-rate` | float | `0.97` | Min per-sample call rate for HQ classification (used when deriving HQ from sample sheet) |
@@ -398,7 +399,6 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--no-exclude-sex-discordant` | flag | `False` | Disable sex-discordance exclusion (`sex_status == "DISCORDANT"` excluded by default; Anderson et al. 2010) |
 | `--no-exclude-extreme-inbreeding` | flag | `False` | Disable extreme inbreeding coefficient exclusion (\|F\| > threshold excluded by default) |
 | `--max-abs-inbreeding-f` | float | `0.15` | Inbreeding coefficient threshold. Samples with \|F\| above this are excluded (Anderson et al. 2010) |
-| `--n-pcs` | int | `20` | Number of PCs to include as covariates |
 | `--genotype-bcf` | path | `INPUT` | **Optional.** BCF/VCF for GRM computation. Defaults to the input file when omitted (requires `FORMAT/GT`). Only needed when genotypes live in a separate file from the LRR input. |
 | `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; markers failing call rate/HWE/MAF are excluded from GRM. Per-marker QC flags are propagated to the output TSV for post-hoc filtering. LRR markers are NOT pre-filtered by these flags. |
 | `--min-maf` | float | `0.01` | Min MAF for genotypes used in GRM |
@@ -735,10 +735,12 @@ pipeline.  Required FORMAT fields:
 
 ### Phenotype TSV
 
-Tab-separated file with a header row.  The first column must be the sample
-identifier; the second column is the phenotype (continuous or binary 0/1).
-Additional columns are treated as covariates.  Columns **must** be separated
-by literal tab characters (`\t`).
+Tab-separated file with a header row. It must contain `sample_id` and at least
+one additional numeric column. By default, the first non-`sample_id` column is
+used as the phenotype (continuous or binary 0/1), and all other non-`sample_id`
+columns are treated as covariates. You can override this with
+`--phenotype-col` and `--covariate-cols`. Columns **must** be separated by
+literal tab characters (`\t`).
 
 | sample\_id | phenotype | age | sex |
 |------------|-----------|-----|-----|
@@ -749,9 +751,11 @@ by literal tab characters (`\t`).
 ### Compiled Sample Sheet
 
 A tab-separated file from the upstream pipeline containing sample QC metrics
-and ancestry PCs (`PC1`–`PC20`).  Passed via `--sample-sheet` to the
-`associate` command.  See [docs/upstream_qc_formats.md](docs/upstream_qc_formats.md)
-for the full specification.
+and ancestry PCs (`PC1`–`PC20`). Passed via `--sample-sheet` to the
+`associate` command for sample-QC filtering (and sex-chromosome modes).
+Association phenotype/covariate values are read from `--phenotype`.
+See [docs/upstream_qc_formats.md](docs/upstream_qc_formats.md) for the full
+specification.
 
 **Column casing:** The default sample-ID column is `Sample_ID` (matching
 the upstream `illumina_idat_processing` convention), but column names are
