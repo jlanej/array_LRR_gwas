@@ -19,6 +19,8 @@ from tests.conftest import (
     BCF_N_SAMPLES,
     BCF_N_VARIANTS,
     BCF_SAMPLES,
+    STAGE2_N_SAMPLES,
+    STAGE2_N_VARIANTS,
 )
 
 
@@ -1092,6 +1094,236 @@ class TestFullPipeline:
         assert assoc_out.exists()
         lines = assoc_out.read_text().strip().split("\n")
         assert len(lines) > 1
+
+        # Step 3: Segment
+        seg_out = tmp_path / "segments.bed"
+        rc = main([
+            "segment",
+            str(assoc_out),
+            "-o", str(seg_out),
+            "--strategy", "threshold",
+            "--p-threshold", "0.05",
+        ])
+        assert rc == 0
+        assert seg_out.exists()
+
+
+# ===================================================================
+# 16. Stage2 subsample BCF: associate as if pre-corrected
+# ===================================================================
+
+
+class TestStage2AssociatePipeline:
+    """End-to-end associate tests using the stage2 100-sample subsample BCF.
+
+    The stage2 BCF (``tests/data/stage2_reclustered.100.subsample.subset.bcf``)
+    has 100 samples and ~12 k variants across all autosomes plus chrX/chrY.
+    These tests exercise the ``associate`` sub-command directly on the raw BCF,
+    treating it as if it were already RSVD/PC-corrected, which is the intended
+    usage pattern when LRR has been corrected upstream.
+    """
+
+    def test_associate_ols_as_corrected(self, stage2_bcf_path, tmp_path):
+        """OLS association on stage2 BCF, treating it as a pre-corrected input."""
+        from array_lrr_gwas.cli import main
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(stage2_bcf_path)
+        assert len(samples) == STAGE2_N_SAMPLES
+
+        pheno = tmp_path / "pheno.tsv"
+        _write_phenotype_tsv(pheno, samples, _mock_phenotype(STAGE2_N_SAMPLES))
+
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(stage2_bcf_path),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        lines = out.read_text().strip().split("\n")
+        assert "chrom" in lines[0]
+        assert len(lines) > 1
+
+    def test_associate_logistic_as_corrected(self, stage2_bcf_path, tmp_path):
+        """Logistic regression on stage2 BCF, treating it as a pre-corrected input."""
+        from array_lrr_gwas.cli import main
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(stage2_bcf_path)
+
+        pheno = tmp_path / "pheno.tsv"
+        _write_phenotype_tsv(
+            pheno, samples, _mock_binary_phenotype(STAGE2_N_SAMPLES)
+        )
+
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(stage2_bcf_path),
+            "--phenotype", str(pheno),
+            "--method", "logistic",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        lines = out.read_text().strip().split("\n")
+        assert "chrom" in lines[0]
+        assert len(lines) > 1
+
+    def test_associate_lmm_as_corrected(self, stage2_bcf_path, tmp_path):
+        """LMM (numpy LD backend) on stage2 BCF, treating it as a pre-corrected input."""
+        from array_lrr_gwas.cli import main
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(stage2_bcf_path)
+
+        pheno = tmp_path / "pheno.tsv"
+        _write_phenotype_tsv(pheno, samples, _mock_phenotype(STAGE2_N_SAMPLES))
+
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(stage2_bcf_path),
+            "--phenotype", str(pheno),
+            "--method", "lmm",
+            "--ld-backend", "numpy",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        lines = out.read_text().strip().split("\n")
+        assert "chrom" in lines[0]
+        assert len(lines) > 1
+
+    def test_associate_ols_with_sample_sheet_as_corrected(
+        self, stage2_bcf_path, tmp_path
+    ):
+        """OLS with PC covariates on stage2 BCF, treating it as a pre-corrected input."""
+        from array_lrr_gwas.cli import main
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(stage2_bcf_path)
+
+        pheno = tmp_path / "pheno.tsv"
+        _write_phenotype_tsv(pheno, samples, _mock_phenotype(STAGE2_N_SAMPLES))
+
+        sheet = tmp_path / "sheet.tsv"
+        _write_sample_sheet(sheet, samples, n_pcs=3, include_qc=True)
+
+        out = tmp_path / "results.tsv"
+        rc = main([
+            "associate",
+            str(stage2_bcf_path),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "--sample-sheet", str(sheet),
+            "--n-pcs", "3",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        lines = out.read_text().strip().split("\n")
+        assert "chrom" in lines[0]
+        assert len(lines) > 1
+
+
+# ===================================================================
+# 17. Stage2 subsample BCF: full correct → associate → segment pipeline
+# ===================================================================
+
+
+class TestStage2FullPipeline:
+    """Full correct → associate (→ segment) pipeline on the stage2 subsample BCF.
+
+    Exercises end-to-end plumbing: RSVD/PC correction on the raw stage2 BCF
+    followed by OLS association, verifying that the corrected BCF produced by
+    ``correct`` is a valid input to ``associate``.
+    """
+
+    def test_correct_then_associate(self, stage2_bcf_path, tmp_path):
+        """correct → associate (OLS) pipeline on stage2 BCF."""
+        from array_lrr_gwas.cli import main
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(stage2_bcf_path)
+
+        # Step 1: Correct LRR (RSVD/PC correction)
+        corrected_bcf = tmp_path / "corrected.bcf"
+        rc = main([
+            "correct",
+            str(stage2_bcf_path),
+            "-o", str(corrected_bcf),
+            "--no-complexity-filter",
+            "--max-lrr-sd", "10.0",
+            "--min-sample-call-rate", "0.0",
+            "--min-marker-call-rate", "0.5",
+            "--min-var", "0.0",
+            "--k", "3",
+        ])
+        assert rc == 0
+        assert corrected_bcf.exists()
+
+        # Step 2: Associate on the corrected BCF
+        pheno = tmp_path / "pheno.tsv"
+        _write_phenotype_tsv(pheno, samples, _mock_phenotype(STAGE2_N_SAMPLES))
+
+        assoc_out = tmp_path / "association.tsv"
+        rc = main([
+            "associate",
+            str(corrected_bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "-o", str(assoc_out),
+        ])
+        assert rc == 0
+        assert assoc_out.exists()
+        lines = assoc_out.read_text().strip().split("\n")
+        assert "chrom" in lines[0]
+        assert len(lines) > 1
+
+    def test_full_pipeline_correct_associate_segment(
+        self, stage2_bcf_path, tmp_path
+    ):
+        """Full correct → associate → segment pipeline on stage2 BCF."""
+        from array_lrr_gwas.cli import main
+        from array_lrr_gwas.io_vcf import read_lrr
+
+        _, samples, _ = read_lrr(stage2_bcf_path)
+
+        # Step 1: Correct
+        corrected_bcf = tmp_path / "corrected.bcf"
+        rc = main([
+            "correct",
+            str(stage2_bcf_path),
+            "-o", str(corrected_bcf),
+            "--no-complexity-filter",
+            "--max-lrr-sd", "10.0",
+            "--min-sample-call-rate", "0.0",
+            "--min-marker-call-rate", "0.5",
+            "--min-var", "0.0",
+            "--k", "3",
+        ])
+        assert rc == 0
+        assert corrected_bcf.exists()
+
+        # Step 2: Associate
+        pheno = tmp_path / "pheno.tsv"
+        _write_phenotype_tsv(pheno, samples, _mock_phenotype(STAGE2_N_SAMPLES))
+
+        assoc_out = tmp_path / "association.tsv"
+        rc = main([
+            "associate",
+            str(corrected_bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "-o", str(assoc_out),
+        ])
+        assert rc == 0
+        assert assoc_out.exists()
 
         # Step 3: Segment
         seg_out = tmp_path / "segments.bed"
