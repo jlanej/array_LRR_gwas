@@ -783,7 +783,7 @@ def run_association_streaming(
         total=n_markers_total,
         desc=f"{method} scan",
         unit="marker",
-        leave=False,
+        leave=True,
         dynamic_ncols=True,
     )
     try:

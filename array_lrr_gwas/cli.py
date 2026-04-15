@@ -1786,7 +1786,8 @@ def _run_associate(args: argparse.Namespace) -> int:
         # so the total is known upfront.  Variant QC step is conditional but
         # we optimistically add it; pbar.update() will simply be skipped if the
         # path is not taken (variant_qc_path is checked per backend).
-        pbar.total += 5  # GT scan, variant QC, BED/dosage, LD prune, GRM compute
+        _LMM_GRM_STAGES = 5  # GT scan, variant QC, BED/dosage, LD prune, GRM compute
+        pbar.total += _LMM_GRM_STAGES
 
         # ld_prune_samples: unrelated subset of valid_samples for LD pruning.
         # When using the sample sheet, use hq_ids (unrelated, all-QC-passing).
