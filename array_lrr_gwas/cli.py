@@ -2281,8 +2281,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                         _y_rows.append(_row)
                         _y_vars.append(_v)
 
-        _x_lrr = np.vstack(_x_rows) if _x_rows else np.empty((0, int(analyzed_mask.sum())))
-        _y_lrr = np.vstack(_y_rows) if _y_rows else np.empty((0, int(analyzed_mask.sum())))
+        _n_analyzed = int(analyzed_mask.sum())
+        _x_lrr = np.vstack(_x_rows) if _x_rows else np.empty((0, _n_analyzed))
+        _y_lrr = np.vstack(_y_rows) if _y_rows else np.empty((0, _n_analyzed))
 
         logger.info(
             "Sex-chromosome data loaded: %d chrX variants, %d chrY variants",

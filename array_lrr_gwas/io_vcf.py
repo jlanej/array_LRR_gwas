@@ -465,13 +465,6 @@ def stream_lrr_contig_chunks(
             "intensity_only": intensity_only,
         }
 
-    def _flush():
-        nonlocal lrr_rows, var_chunk
-        if lrr_rows:
-            yield np.vstack(lrr_rows), var_chunk
-            lrr_rows = []
-            var_chunk = []
-
     contig_set = set(contigs)
 
     if _is_indexed:

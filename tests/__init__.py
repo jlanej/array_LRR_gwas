@@ -7,7 +7,7 @@ def mock_associate_io(monkeypatch, lrr, samples, variants):
     Replaces ``read_variant_metadata``, ``stream_lrr_chunks``, and
     ``stream_lrr_contig_chunks`` so that tests can run without a real BCF file.
     """
-    import numpy as np  # noqa: F401 (keep unused import for potential use in helpers)
+    import numpy as np
 
     monkeypatch.setattr(
         "array_lrr_gwas.io_vcf.read_variant_metadata",
