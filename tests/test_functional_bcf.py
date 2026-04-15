@@ -999,7 +999,7 @@ class TestCliIntegrationWithBcf:
         assert len(lines) > 1
 
     def test_associate_ols_with_sample_sheet(self, test_bcf_path, tmp_path):
-        """OLS with covariates from a sample sheet."""
+        """OLS with sample-sheet HQ filtering (covariates come from phenotype file)."""
         from array_lrr_gwas.cli import main
         from array_lrr_gwas.io_vcf import read_lrr
 
@@ -1017,7 +1017,6 @@ class TestCliIntegrationWithBcf:
             "--phenotype", str(pheno),
             "--method", "ols",
             "--sample-sheet", str(sheet),
-            "--n-pcs", "3",
             "-o", str(out),
         ])
         assert rc == 0
@@ -1238,7 +1237,7 @@ class TestStage2AssociatePipeline:
     def test_associate_ols_with_sample_sheet_as_corrected(
         self, stage2_bcf_path, tmp_path
     ):
-        """OLS with PC covariates on stage2 BCF, treating it as a pre-corrected input."""
+        """OLS with sample-sheet HQ filtering on stage2 BCF (pre-corrected input)."""
         from array_lrr_gwas.cli import main
         from array_lrr_gwas.io_vcf import read_lrr
 
@@ -1257,7 +1256,6 @@ class TestStage2AssociatePipeline:
             "--phenotype", str(pheno),
             "--method", "ols",
             "--sample-sheet", str(sheet),
-            "--n-pcs", "3",
             "-o", str(out),
         ])
         assert rc == 0
