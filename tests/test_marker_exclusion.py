@@ -6,6 +6,8 @@ import logging
 import numpy as np
 import pytest
 
+from tests import mock_associate_io
+
 from array_lrr_gwas.cli import main
 from array_lrr_gwas.qc_config import defaults, load_config
 
@@ -207,8 +209,6 @@ class TestAssociationMarkerExclusion:
 
     def test_intensity_only_excluded(self, tmp_path, monkeypatch, caplog):
         """Markers with intensity_only=True are excluded by default."""
-        from array_lrr_gwas import association
-
         pheno = tmp_path / "pheno.tsv"
         pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
         out = tmp_path / "results.tsv"
@@ -222,38 +222,7 @@ class TestAssociationMarkerExclusion:
             {"chrom": "chr1", "pos": 200, "id": "a2", "intensity_only": True},
             {"chrom": "chr1", "pos": 300, "id": "a3", "intensity_only": False},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, variants),
-        )
-
-        class _FakeResult:
-            chrom = ["chr1", "chr1"]
-            p_value = np.array([1.0, 1.0])
-            stat = np.array([0.0, 0.0])
-            beta = np.array([0.0, 0.0])
-            se = np.array([1.0, 1.0])
-
-            @staticmethod
-            def to_records():
-                return [
-                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                    {"chrom": "chr1", "pos": 300, "variant_id": "a3",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                ]
-
-        def _check_association(lrr_sub, phenotype, variants, **_k):
-            # Only 2 markers should be passed (a1 and a3, not a2)
-            assert lrr_sub.shape[0] == 2
-            assert len(variants) == 2
-            assert variants[0]["id"] == "a1"
-            assert variants[1]["id"] == "a3"
-            return _FakeResult()
-
-        monkeypatch.setattr(association, "run_association", _check_association)
+        mock_associate_io(monkeypatch, lrr, samples, variants)
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -265,12 +234,18 @@ class TestAssociationMarkerExclusion:
             ])
 
         assert rc == 0
-        assert "INTENSITY_ONLY: 1 / 3 excluded" in caplog.text
+        assert "Metadata-based marker exclusion: INTENSITY_ONLY: 1 / 3 excluded" in caplog.text
+
+        with open(out) as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+        result_ids = [r["variant_id"] for r in rows]
+        assert "a1" in result_ids
+        assert "a2" not in result_ids
+        assert "a3" in result_ids
 
     def test_intensity_only_retained_when_disabled(self, tmp_path, monkeypatch):
         """With --no-exclude-intensity-only, INTENSITY_ONLY markers are kept."""
-        from array_lrr_gwas import association
-
         pheno = tmp_path / "pheno.tsv"
         pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
         out = tmp_path / "results.tsv"
@@ -283,34 +258,7 @@ class TestAssociationMarkerExclusion:
             {"chrom": "chr1", "pos": 100, "id": "a1", "intensity_only": False},
             {"chrom": "chr1", "pos": 200, "id": "a2", "intensity_only": True},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, variants),
-        )
-
-        class _FakeResult:
-            chrom = ["chr1", "chr1"]
-            p_value = np.array([1.0, 1.0])
-            stat = np.array([0.0, 0.0])
-            beta = np.array([0.0, 0.0])
-            se = np.array([1.0, 1.0])
-
-            @staticmethod
-            def to_records():
-                return [
-                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                ]
-
-        def _check_all_kept(lrr_sub, phenotype, variants, **_k):
-            assert lrr_sub.shape[0] == 2  # both kept
-            return _FakeResult()
-
-        monkeypatch.setattr(association, "run_association", _check_all_kept)
+        mock_associate_io(monkeypatch, lrr, samples, variants)
 
         rc = main([
             "associate",
@@ -322,11 +270,16 @@ class TestAssociationMarkerExclusion:
         ])
         assert rc == 0
 
+        with open(out) as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+        result_ids = [r["variant_id"] for r in rows]
+        assert "a1" in result_ids
+        assert "a2" in result_ids
+
     def test_variant_qc_flags_propagated_not_filtered(self, tmp_path, monkeypatch, caplog):
         """Markers failing QC are still tested; QC flags propagated to output."""
         import csv
-
-        from array_lrr_gwas import association
 
         # a1 passes all; a2 fails MAF; a3 fails call rate + HWE
         qc_tsv = tmp_path / "collated_variant_qc.tsv"
@@ -351,39 +304,7 @@ class TestAssociationMarkerExclusion:
             {"chrom": "chr1", "pos": 200, "id": "a2"},
             {"chrom": "chr1", "pos": 300, "id": "a3"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, variants),
-        )
-
-        class _FakeResult:
-            chrom = ["chr1", "chr1", "chr1"]
-            p_value = np.array([1.0, 1.0, 1.0])
-            stat = np.array([0.0, 0.0, 0.0])
-            beta = np.array([0.0, 0.0, 0.0])
-            se = np.array([1.0, 1.0, 1.0])
-
-            @staticmethod
-            def to_records():
-                return [
-                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                    {"chrom": "chr1", "pos": 300, "variant_id": "a3",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                ]
-
-        def _check(lrr_sub, phenotype, variants, **_k):
-            # ALL 3 markers should be tested (no pre-filtering by QC)
-            assert lrr_sub.shape[0] == 3
-            assert len(variants) == 3
-            return _FakeResult()
-
-        monkeypatch.setattr(association, "run_association", _check)
+        mock_associate_io(monkeypatch, lrr, samples, variants)
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -431,8 +352,6 @@ class TestAssociationMarkerExclusion:
 
     def test_monomorphic_lrr_excluded(self, tmp_path, monkeypatch, caplog):
         """Markers with zero LRR variance are excluded by default."""
-        from array_lrr_gwas import association
-
         pheno = tmp_path / "pheno.tsv"
         pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
         out = tmp_path / "results.tsv"
@@ -446,32 +365,7 @@ class TestAssociationMarkerExclusion:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, variants),
-        )
-
-        class _FakeResult:
-            chrom = ["chr1"]
-            p_value = np.array([1.0])
-            stat = np.array([0.0])
-            beta = np.array([0.0])
-            se = np.array([1.0])
-
-            @staticmethod
-            def to_records():
-                return [{
-                    "chrom": "chr1", "pos": 100, "variant_id": "a1",
-                    "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                    "n_samples": 3, "method": "ols",
-                }]
-
-        def _check(lrr_sub, phenotype, variants, **_k):
-            assert lrr_sub.shape[0] == 1  # only a1
-            assert variants[0]["id"] == "a1"
-            return _FakeResult()
-
-        monkeypatch.setattr(association, "run_association", _check)
+        mock_associate_io(monkeypatch, lrr, samples, variants)
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -485,10 +379,15 @@ class TestAssociationMarkerExclusion:
         assert rc == 0
         assert "monomorphic LRR" in caplog.text
 
+        with open(out) as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+        result_ids = [r["variant_id"] for r in rows]
+        assert "a1" in result_ids
+        assert "a2" not in result_ids
+
     def test_monomorphic_retained_when_disabled(self, tmp_path, monkeypatch):
         """--no-exclude-monomorphic-lrr retains constant-LRR markers."""
-        from array_lrr_gwas import association
-
         pheno = tmp_path / "pheno.tsv"
         pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
         out = tmp_path / "results.tsv"
@@ -501,34 +400,7 @@ class TestAssociationMarkerExclusion:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, variants),
-        )
-
-        class _FakeResult:
-            chrom = ["chr1", "chr1"]
-            p_value = np.array([1.0, 1.0])
-            stat = np.array([0.0, 0.0])
-            beta = np.array([0.0, 0.0])
-            se = np.array([1.0, 1.0])
-
-            @staticmethod
-            def to_records():
-                return [
-                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                ]
-
-        def _check(lrr_sub, phenotype, variants, **_k):
-            assert lrr_sub.shape[0] == 2  # both kept
-            return _FakeResult()
-
-        monkeypatch.setattr(association, "run_association", _check)
+        mock_associate_io(monkeypatch, lrr, samples, variants)
 
         rc = main([
             "associate",
@@ -539,6 +411,13 @@ class TestAssociationMarkerExclusion:
             "-o", str(out),
         ])
         assert rc == 0
+
+        with open(out) as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+        result_ids = [r["variant_id"] for r in rows]
+        assert "a1" in result_ids
+        assert "a2" in result_ids
 
     def test_all_markers_excluded_returns_error(self, tmp_path, monkeypatch):
         """When all markers fail filters, return code 1."""
@@ -555,10 +434,7 @@ class TestAssociationMarkerExclusion:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, variants)
 
         rc = main([
             "associate",
@@ -571,8 +447,6 @@ class TestAssociationMarkerExclusion:
 
     def test_exclusion_summary_logged(self, tmp_path, monkeypatch, caplog):
         """Marker exclusion summary is logged with counts."""
-        from array_lrr_gwas import association
-
         pheno = tmp_path / "pheno.tsv"
         pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
         out = tmp_path / "results.tsv"
@@ -590,33 +464,7 @@ class TestAssociationMarkerExclusion:
             {"chrom": "chr1", "pos": 200, "id": "a2"},
             {"chrom": "chr1", "pos": 300, "id": "a3"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, variants),
-        )
-
-        class _FakeResult:
-            chrom = ["chr1", "chr1"]
-            p_value = np.array([1.0, 1.0])
-            stat = np.array([0.0, 0.0])
-            beta = np.array([0.0, 0.0])
-            se = np.array([1.0, 1.0])
-
-            @staticmethod
-            def to_records():
-                return [
-                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                    {"chrom": "chr1", "pos": 300, "variant_id": "a3",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                ]
-
-        monkeypatch.setattr(
-            association, "run_association",
-            lambda *_a, **_k: _FakeResult(),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, variants)
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -628,13 +476,11 @@ class TestAssociationMarkerExclusion:
             ])
 
         assert rc == 0
-        assert "Association marker exclusion summary" in caplog.text
-        assert "2 / 3 markers pass all filters" in caplog.text
+        assert "2 markers tested" in caplog.text
+        assert "1 monomorphic LRR excluded" in caplog.text
 
     def test_config_overrides_defaults(self, tmp_path, monkeypatch, caplog):
         """YAML config can disable association marker exclusion."""
-        from array_lrr_gwas import association
-
         cfg_file = tmp_path / "qc.yaml"
         cfg_file.write_text(
             "association_marker_qc:\n"
@@ -654,34 +500,7 @@ class TestAssociationMarkerExclusion:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, variants),
-        )
-
-        class _FakeResult:
-            chrom = ["chr1", "chr1"]
-            p_value = np.array([1.0, 1.0])
-            stat = np.array([0.0, 0.0])
-            beta = np.array([0.0, 0.0])
-            se = np.array([1.0, 1.0])
-
-            @staticmethod
-            def to_records():
-                return [
-                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
-                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
-                     "n_samples": 3, "method": "ols"},
-                ]
-
-        def _check(lrr_sub, phenotype, variants, **_k):
-            assert lrr_sub.shape[0] == 2  # monomorphic kept
-            return _FakeResult()
-
-        monkeypatch.setattr(association, "run_association", _check)
+        mock_associate_io(monkeypatch, lrr, samples, variants)
 
         rc = main([
             "associate",
@@ -692,3 +511,10 @@ class TestAssociationMarkerExclusion:
             "-o", str(out),
         ])
         assert rc == 0
+
+        with open(out) as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            rows = list(reader)
+        result_ids = [r["variant_id"] for r in rows]
+        assert "a1" in result_ids
+        assert "a2" in result_ids

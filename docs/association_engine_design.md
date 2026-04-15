@@ -97,28 +97,45 @@ alternatives when no GRM is provided.
 ## GRM Marker Selection and LD Pruning
 
 The GRM aims to model neutral background relatedness between samples.
-Markers used for GRM construction are filtered by MAF (default ≥ 0.01)
-and genotype call rate (default ≥ 0.90), then **LD-pruned** so that
-highly linked genomic regions do not disproportionately dominate the
-GRM eigenstructure.
+For the `plink2` backend (default), the full pipeline proceeds without
+ever loading a dosage matrix into Python:
 
-LD pruning uses a greedy forward algorithm: for each retained variant
-in genomic order, any subsequent variant within a sliding window
-(default 1 Mb) whose r² exceeds the threshold (default 0.2) is removed.
-This mirrors the logic of PLINK's `--indep-pairwise` and follows the
-standard practice recommended by Yang *et al.* (2011, GCTA) and Privé
-*et al.* (2020, *Bioinformatics*).
+1. **Lightweight metadata scan** — `read_variant_metadata()` reads variant
+   IDs and sample names from the BCF header + records without decoding
+   `FORMAT/GT` dosage values.
+2. **Upstream variant QC** — Variant IDs from `collated_variant_qc.tsv`
+   (provided via `--variant-qc`) are used to build the QC-passing ID list.
+   Variants that fail call rate, HWE, or MAF thresholds across all
+   ancestries are excluded.  When no QC file is provided, plink2's own
+   `--maf` and `--geno` filters are applied.
+3. **BCF → plink2 BED** — `make_plink2_bed()` converts the BCF to a
+   plink1-format BED/BIM/FAM fileset, filtering to only QC-passing
+   variants and analyzed samples in a single plink2 invocation.  The BED
+   is stored in `--audit-dir` for provenance (or a temp dir if omitted).
+4. **LD pruning on BED** — `ld_prune_plink2()` runs
+   `plink2 --indep-pairwise` on the BED (not the BCF), which is faster
+   because the binary format is already decoded.
+5. **GRM from LD-pruned BED** — `compute_grm_plink2()` runs
+   `plink2 --make-grm-bin` on the BED with an extract list of
+   LD-pruned IDs, producing the GCTA-format GRM without materialising
+   any dosage array in Python.
+
+This pipeline ensures that:
+- The full genotype dosage matrix never enters Python memory.
+- Each variant passes both upstream ancestry-stratified QC *and* plink2
+  MAF/call-rate checks (no double-filtering when QC IDs are provided).
+- Provenance is captured: BED/BIM/FAM files in `--audit-dir` record
+  exactly which markers and samples entered the GRM.
 
 Two backends are available:
 
-| Backend  | When to use                              |
-|----------|------------------------------------------|
-| `plink2` | Default. Fastest on large datasets; uses |
-|          | `plink2 --indep-pairwise`. Requires      |
-|          | `plink2` on `$PATH` (included in Docker  |
-|          | image).                                  |
-| `numpy`  | No external tools; fallback backend when |
-|          | plink2 is unavailable or not desired.    |
+| Backend  | When to use                                              |
+|----------|----------------------------------------------------------|
+| `plink2` | **Default.** Fully plink2-native; no Python dosage       |
+|          | matrix.  Requires `plink2` on `$PATH`.  Exits with an   |
+|          | error if plink2 is not found.                            |
+| `numpy`  | Explicit fallback via `--ld-backend numpy`.  Loads the   |
+|          | full dosage matrix into Python.  No external tools.      |
 
 CLI flags:
 
@@ -131,10 +148,47 @@ CLI flags:
 
 ## Scalability
 
-Both the OLS and LMM association scans process markers in chunks
-(default: 10 000) so that only `chunk_size × n_samples` floats are
-ever resident at once.  For LMM, the eigendecomposition and null-model
-REML fit are performed once; only the per-marker WLS scan is chunked.
+The association pipeline uses a **streaming architecture** that never holds
+the full sample × marker LRR matrix in RAM:
+
+1. **Metadata scan** — `read_variant_metadata()` reads only variant-level
+   metadata (chrom, pos, id, intensity_only flag) and sample IDs from the
+   BCF header.  No `FORMAT/LRR` values are loaded.
+2. **Metadata-based pre-filter** — INTENSITY_ONLY markers are excluded via
+   a boolean mask *before* any LRR values are read.
+3. **Chunked LRR streaming** — `stream_lrr_chunks()` yields
+   `(lrr_chunk, variants_chunk)` tuples with at most `chunk_size` markers
+   each.  `sample_mask` and `variant_mask` ensure that only the relevant
+   subset of the BCF is decoded.
+4. **Streaming association** — `run_association_streaming()` consumes the
+   chunk generator, applies per-chunk monomorphic-LRR filtering inline,
+   and accumulates per-marker results without materialising the full
+   matrix.
+
+Peak RAM is bounded by `chunk_size × n_samples` floats (plus the GRM
+when using LMM).  For the default chunk size of 5 000 and 10 000 samples,
+this is about 400 MB — well within typical workstation limits.
+
+## Sex-Chromosome Analysis
+
+The `--sex-chr-mode` CLI option runs additional association scans on sex
+chromosomes.  Four modes are supported:
+
+| Mode | Chromosome | Sample subset | Extra covariates |
+|------|-----------|--------------|-----------------|
+| `x_with_sex_covariate` | chrX | All | Sex (binary) |
+| `x_male_only` | chrX | Males only | — |
+| `x_female_only` | chrX | Females only | — |
+| `y_male_only` | chrY | Males only | — |
+
+Each mode writes a separate TSV file alongside the main output
+(e.g. `results.x_male_only.tsv`).  Sex-chromosome scans always use OLS
+(no GRM) because the autosomal GRM is not appropriate for sex-linked
+markers.
+
+Requires `--sample-sheet` with a `predicted_sex` column (1 = male,
+2 = female).  Modes with fewer than 3 qualifying samples are skipped
+with a warning.
 
 ## Logistic Regression and Relatedness
 

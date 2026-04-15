@@ -406,10 +406,12 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--no-ld-prune` | flag | `False` | Disable LD pruning of GRM markers |
 | `--ld-window-bp` | int | `1000000` | LD-pruning window size in base pairs |
 | `--ld-r2-thresh` | float | `0.2` | r² threshold for LD pruning |
-| `--ld-backend` | str | `plink2` | LD-pruning backend: `plink2` (default, fast) or `numpy` (fallback) |
+| `--ld-backend` | str | `plink2` | LD-pruning backend: `plink2` (default, **required** — install from [cog-genomics.org](https://www.cog-genomics.org/plink/2.0/)) or `numpy` (explicit fallback). If plink2 is not on PATH and `plink2` is selected, the pipeline exits with an error. |
 | `--no-exclude-intensity-only` | flag | `False` | Retain INTENSITY_ONLY markers in association (excluded by default because they lack GT) |
 | `--no-exclude-monomorphic-lrr` | flag | `False` | Retain markers with zero LRR variance in association |
+| `--sex-chr-mode` | str(s) | `None` | Additional sex-chromosome scans. Requires `--sample-sheet` with `predicted_sex` column (1=male, 2=female). Values: `x_with_sex_covariate`, `x_male_only`, `x_female_only`, `y_male_only`. Each mode writes a separate TSV (e.g. `results.x_male_only.tsv`). |
 | `--config` | path | `None` | YAML config file; reads `upstream_qc.variant_qc_path`, `sample_qc`, `association_qc`, and `association_marker_qc` settings |
+| `--audit-dir` | path | `None` | Directory for structured audit trail (per-stage TSV, JSON summary with included/excluded fractions). Enables full provenance tracking. |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
 
 ### `segment`

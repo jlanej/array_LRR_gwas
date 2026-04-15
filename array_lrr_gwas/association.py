@@ -684,3 +684,210 @@ def run_association(
         n_samples=ns,
         method=method,
     )
+
+
+def run_association_streaming(
+    lrr_chunks,
+    phenotype: np.ndarray,
+    covariates: np.ndarray | None = None,
+    method: str = "lmm",
+    grm: np.ndarray | None = None,
+    *,
+    exclude_monomorphic: bool = True,
+    exclude_intensity_only: bool = True,
+) -> tuple["AssociationResult", dict]:
+    """Stream-based association scan that never holds the full LRR matrix.
+
+    Instead of accepting a pre-loaded ``lrr`` matrix, this function
+    consumes an iterable of ``(lrr_chunk, variants_chunk)`` tuples —
+    typically produced by :func:`array_lrr_gwas.io_vcf.stream_lrr_chunks`.
+
+    Per-chunk marker filtering (INTENSITY_ONLY and monomorphic LRR) is
+    applied inline, so the caller does not need to pre-filter.
+
+    Parameters
+    ----------
+    lrr_chunks : iterable of (ndarray, list[dict])
+        Each element is ``(lrr_chunk, variants_chunk)`` where
+        ``lrr_chunk`` has shape ``(k, n_samples)`` and
+        ``variants_chunk`` is a list of *k* variant metadata dicts.
+    phenotype : ndarray, shape (n_samples,)
+        Phenotype vector.
+    covariates : ndarray, shape (n_samples, n_covariates), optional
+        Covariate matrix (without intercept).
+    method : ``'lmm'`` | ``'ols'`` | ``'logistic'``
+        Association method.
+    grm : ndarray, shape (n_samples, n_samples), optional
+        GRM required for method ``'lmm'``.
+    exclude_monomorphic : bool
+        Whether to skip markers with zero LRR variance (default True).
+    exclude_intensity_only : bool
+        Whether to skip INTENSITY_ONLY markers (default True).
+
+    Returns
+    -------
+    result : AssociationResult
+    exclusion_info : dict
+        Keys: ``n_total``, ``n_tested``, ``n_intensity_only``,
+        ``n_monomorphic``, ``excluded_markers`` (dict mapping ID→reason),
+        ``tested_mono_flags`` (list[bool] for surviving markers).
+    """
+    n_samples = phenotype.shape[0]
+
+    # --- Pre-compute LMM invariants (eigenbasis, delta) ---
+    lmm_invariants = None
+    if method == "lmm":
+        if grm is None:
+            raise ValueError("LMM method requires a GRM (grm=...)")
+        if grm.shape != (n_samples, n_samples):
+            raise ValueError(
+                f"GRM must have shape ({n_samples}, {n_samples}), "
+                f"got {grm.shape}"
+            )
+        if covariates is not None:
+            C = np.column_stack([np.ones(n_samples), covariates])
+        else:
+            C = np.ones((n_samples, 1))
+
+        eigenvalues, U = np.linalg.eigh(grm)
+        eigenvalues = np.maximum(eigenvalues, 0.0)
+        y_rot = U.T @ phenotype
+        X_rot = U.T @ C
+        delta = _estimate_delta(y_rot, X_rot, eigenvalues)
+        D_inv = 1.0 / (eigenvalues + delta)
+        lmm_invariants = (U, eigenvalues, y_rot, X_rot, delta, D_inv, C.shape[1])
+
+    # Accumulators
+    chroms: list[str] = []
+    positions: list[int] = []
+    ids: list[str] = []
+    betas: list[np.ndarray] = []
+    ses: list[np.ndarray] = []
+    stats_: list[np.ndarray] = []
+    pvals: list[np.ndarray] = []
+    ns: list[np.ndarray] = []
+    tested_mono: list[bool] = []
+
+    n_total = 0
+    n_intensity = 0
+    n_mono = 0
+    excluded_markers: dict[str, str] = {}
+
+    for lrr_chunk, variants_chunk in lrr_chunks:
+        n_chunk = lrr_chunk.shape[0]
+        n_total += n_chunk
+
+        # Per-chunk marker exclusion
+        keep = np.ones(n_chunk, dtype=bool)
+
+        if exclude_intensity_only:
+            io_mask = np.array(
+                [v.get("intensity_only", False) for v in variants_chunk],
+                dtype=bool,
+            )
+            n_io = int(io_mask.sum())
+            n_intensity += n_io
+            keep &= ~io_mask
+
+        # Monomorphic check: a marker is monomorphic when nanmin == nanmax
+        # (all finite values identical) or the entire row is NaN.
+        # Using nanmin/nanmax is more robust to floating-point imprecision
+        # than exact equality on nanvar (which can yield 1e-16 for identical
+        # floats after arithmetic operations).
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            _lrr_min = np.nanmin(lrr_chunk, axis=1)
+            _lrr_max = np.nanmax(lrr_chunk, axis=1)
+        all_nan = np.all(np.isnan(lrr_chunk), axis=1)
+        mono_mask = (_lrr_min == _lrr_max) | all_nan
+
+        if exclude_monomorphic:
+            n_m = int((mono_mask & keep).sum())
+            n_mono += n_m
+            keep &= ~mono_mask
+
+        # Record exclusions
+        for i, (v, k) in enumerate(zip(variants_chunk, keep)):
+            vid = v.get("id") or f"{v['chrom']}:{v['pos']}"
+            if not k:
+                reasons = []
+                if exclude_intensity_only and v.get("intensity_only", False):
+                    reasons.append("intensity_only")
+                if exclude_monomorphic and mono_mask[i]:
+                    reasons.append("monomorphic_lrr")
+                excluded_markers[vid] = ";".join(reasons) if reasons else "excluded"
+
+        n_keep = int(keep.sum())
+        if n_keep == 0:
+            continue
+
+        lrr_keep = lrr_chunk[keep]
+        vars_keep = [v for v, k in zip(variants_chunk, keep) if k]
+        mono_keep = mono_mask[keep]
+
+        # Track monomorphic flags for surviving markers
+        tested_mono.extend(bool(m) for m in mono_keep)
+
+        # Run scan on this chunk
+        if method == "lmm":
+            U, eigenvalues, y_rot, X_rot, delta, D_inv, p = lmm_invariants
+            lrr_imp = _mean_impute_lrr(lrr_keep) if np.isnan(lrr_keep).any() else lrr_keep
+            lrr_rot = lrr_imp @ U
+            b, s, t, pv, n = _lmm_scan_complete(
+                lrr_rot, y_rot, X_rot, eigenvalues, delta, D_inv,
+                n_samples, p,
+            )
+        elif method == "ols":
+            b, s, t, pv, n = _ols_scan(lrr_keep, phenotype, covariates)
+        elif method == "logistic":
+            b, s, t, pv, n = _logistic_scan(lrr_keep, phenotype, covariates)
+        else:
+            raise ValueError(f"Unknown method {method!r}")
+
+        for v in vars_keep:
+            chroms.append(v["chrom"])
+            positions.append(v["pos"])
+            ids.append(v.get("id") or f"{v['chrom']}:{v['pos']}")
+
+        betas.append(b)
+        ses.append(s)
+        stats_.append(t)
+        pvals.append(pv)
+        ns.append(n)
+
+    # Concatenate results
+    if betas:
+        beta_arr = np.concatenate(betas)
+        se_arr = np.concatenate(ses)
+        stat_arr = np.concatenate(stats_)
+        pval_arr = np.concatenate(pvals)
+        n_arr = np.concatenate(ns)
+    else:
+        beta_arr = np.empty(0)
+        se_arr = np.empty(0)
+        stat_arr = np.empty(0)
+        pval_arr = np.empty(0)
+        n_arr = np.empty(0, dtype=int)
+
+    result = AssociationResult(
+        chrom=chroms,
+        pos=positions,
+        variant_id=ids,
+        beta=beta_arr,
+        se=se_arr,
+        stat=stat_arr,
+        p_value=pval_arr,
+        n_samples=n_arr,
+        method=method,
+    )
+
+    exclusion_info = {
+        "n_total": n_total,
+        "n_tested": len(chroms),
+        "n_intensity_only": n_intensity,
+        "n_monomorphic": n_mono,
+        "excluded_markers": excluded_markers,
+        "tested_mono_flags": tested_mono,
+    }
+
+    return result, exclusion_info

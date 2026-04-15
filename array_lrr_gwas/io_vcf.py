@@ -236,6 +236,275 @@ def read_lrr_selected(
     return lrr, samples, variants
 
 
+def read_variant_metadata(
+    path: str | Path,
+) -> tuple[list[str], list[dict]]:
+    """Read sample IDs and variant metadata from a BCF/VCF without loading LRR.
+
+    This is a lightweight scan that extracts only variant-level metadata
+    (chrom, pos, id, ref, alts, intensity_only flag, etc.) and the sample
+    identifiers.  No ``FORMAT/LRR`` values are read, so memory usage is
+    independent of matrix size.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a BCF or VCF file (optionally compressed).
+
+    Returns
+    -------
+    samples : list of str
+        Sample identifiers in column order.
+    variants : list of dict
+        Per-variant metadata: ``chrom``, ``pos``, ``id``, ``ref``, ``alts``,
+        ``qual``, ``filter``, ``intensity_only``.
+    """
+    path = str(path)
+    vcf_in = pysam.VariantFile(path)
+    samples = list(vcf_in.header.samples)
+
+    variants: list[dict] = []
+    for rec in vcf_in:
+        try:
+            intensity_only = bool(rec.info.get("INTENSITY_ONLY", False))
+        except (ValueError, KeyError):
+            intensity_only = False
+        variants.append(
+            {
+                "chrom": rec.chrom,
+                "pos": rec.pos,
+                "id": rec.id,
+                "ref": rec.ref,
+                "alts": tuple(rec.alts) if rec.alts else (),
+                "qual": rec.qual,
+                "filter": list(rec.filter),
+                "intensity_only": intensity_only,
+            }
+        )
+    vcf_in.close()
+    return samples, variants
+
+
+def stream_lrr_chunks(
+    path: str | Path,
+    *,
+    chunk_size: int = 5000,
+    sample_mask: NDArray[np.bool_] | None = None,
+    variant_mask: NDArray[np.bool_] | None = None,
+):
+    """Yield LRR data in fixed-size chunks without holding the full matrix.
+
+    Each yielded element is a tuple ``(lrr_chunk, variants_chunk)`` where
+    ``lrr_chunk`` has shape ``(<=chunk_size, n_selected_samples)`` and
+    ``variants_chunk`` is the corresponding list of variant metadata dicts.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a BCF or VCF file (optionally compressed).
+    chunk_size : int
+        Maximum number of variants per yielded chunk (default: 5000).
+    sample_mask : ndarray of bool, optional
+        Boolean mask selecting which samples to retain.  When ``None``
+        all samples are included.
+    variant_mask : ndarray of bool, optional
+        Boolean mask selecting which variants to include.  Variants where
+        the mask is ``False`` are skipped.  When ``None`` all variants
+        are included.
+
+    Yields
+    ------
+    lrr_chunk : ndarray, shape (<=chunk_size, n_selected_samples)
+        LRR values for the chunk; missing entries are ``np.nan``.
+    variants_chunk : list of dict
+        Per-variant metadata for the chunk.
+    """
+    path = str(path)
+    vcf_in = pysam.VariantFile(path)
+    samples = list(vcf_in.header.samples)
+    n_samples = len(samples)
+
+    # Determine which sample columns to keep.
+    if sample_mask is not None:
+        keep_cols = np.flatnonzero(sample_mask)
+        n_out = len(keep_cols)
+    else:
+        keep_cols = None
+        n_out = n_samples
+
+    lrr_rows: list[NDArray] = []
+    var_chunk: list[dict] = []
+
+    variant_idx = 0
+    for rec in vcf_in:
+        # Skip variants not in mask
+        if variant_mask is not None and not variant_mask[variant_idx]:
+            variant_idx += 1
+            continue
+        variant_idx += 1
+
+        row = np.full(n_samples, np.nan, dtype=np.float64)
+        for i, sample_data in enumerate(rec.samples.values()):
+            val = sample_data.get("LRR")
+            if val is not None:
+                try:
+                    v = float(val)
+                    if np.isfinite(v):
+                        row[i] = v
+                except (TypeError, ValueError):
+                    pass
+
+        if keep_cols is not None:
+            row = row[keep_cols]
+
+        try:
+            intensity_only = bool(rec.info.get("INTENSITY_ONLY", False))
+        except (ValueError, KeyError):
+            intensity_only = False
+
+        var_meta = {
+            "chrom": rec.chrom,
+            "pos": rec.pos,
+            "id": rec.id,
+            "ref": rec.ref,
+            "alts": tuple(rec.alts) if rec.alts else (),
+            "qual": rec.qual,
+            "filter": list(rec.filter),
+            "intensity_only": intensity_only,
+        }
+
+        lrr_rows.append(row)
+        var_chunk.append(var_meta)
+
+        if len(lrr_rows) >= chunk_size:
+            yield np.vstack(lrr_rows), var_chunk
+            lrr_rows = []
+            var_chunk = []
+
+    vcf_in.close()
+
+    # Yield any remaining rows
+    if lrr_rows:
+        yield np.vstack(lrr_rows), var_chunk
+
+
+def stream_lrr_contig_chunks(
+    path: str | Path,
+    contigs: list[str],
+    *,
+    chunk_size: int = 5000,
+    sample_mask: NDArray[np.bool_] | None = None,
+):
+    """Yield LRR data for specific contigs using pysam region fetch.
+
+    When the BCF/VCF is indexed (CSI or TBI), this uses
+    ``pysam.VariantFile.fetch(contig)`` to jump directly to the relevant
+    chromosomes instead of streaming the entire file.  If the file is not
+    indexed, falls back to a sequential scan skipping non-matching records.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a BCF or VCF file.  For fast random access, an index file
+        (``.csi`` or ``.tbi``) must be present alongside.
+    contigs : list of str
+        Chromosome/contig names to fetch (e.g. ``["chrX", "X"]``).
+    chunk_size : int
+        Maximum number of variants per yielded chunk (default: 5000).
+    sample_mask : ndarray of bool, optional
+        Boolean mask selecting which samples to retain.
+
+    Yields
+    ------
+    lrr_chunk : ndarray, shape (<=chunk_size, n_selected_samples)
+    variants_chunk : list of dict
+    """
+    path = str(path)
+    vcf_in = pysam.VariantFile(path)
+    samples_list = list(vcf_in.header.samples)
+    n_samples = len(samples_list)
+
+    if sample_mask is not None:
+        keep_cols = np.flatnonzero(sample_mask)
+        n_out = len(keep_cols)
+    else:
+        keep_cols = None
+        n_out = n_samples
+
+    # Check whether the file is indexed (has a CSI / TBI index).
+    _is_indexed = vcf_in.index is not None
+
+    lrr_rows: list[NDArray] = []
+    var_chunk: list[dict] = []
+
+    def _process_record(rec):
+        row = np.full(n_samples, np.nan, dtype=np.float64)
+        for i, sample_data in enumerate(rec.samples.values()):
+            val = sample_data.get("LRR")
+            if val is not None:
+                try:
+                    v = float(val)
+                    if np.isfinite(v):
+                        row[i] = v
+                except (TypeError, ValueError):
+                    pass
+        if keep_cols is not None:
+            row = row[keep_cols]
+        try:
+            intensity_only = bool(rec.info.get("INTENSITY_ONLY", False))
+        except (ValueError, KeyError):
+            intensity_only = False
+        return row, {
+            "chrom": rec.chrom,
+            "pos": rec.pos,
+            "id": rec.id,
+            "ref": rec.ref,
+            "alts": tuple(rec.alts) if rec.alts else (),
+            "qual": rec.qual,
+            "filter": list(rec.filter),
+            "intensity_only": intensity_only,
+        }
+
+    contig_set = set(contigs)
+
+    if _is_indexed:
+        # Fast path: fetch each contig in turn without scanning the whole file.
+        seen: set[str] = set()
+        for contig in contigs:
+            if contig in seen:
+                continue
+            seen.add(contig)
+            try:
+                for rec in vcf_in.fetch(contig=contig):
+                    row, meta = _process_record(rec)
+                    lrr_rows.append(row)
+                    var_chunk.append(meta)
+                    if len(lrr_rows) >= chunk_size:
+                        yield np.vstack(lrr_rows), var_chunk
+                        lrr_rows = []
+                        var_chunk = []
+            except (ValueError, KeyError):
+                # Contig not present in this file — skip silently.
+                pass
+    else:
+        # Slow path: sequential scan, filter by contig name.
+        for rec in vcf_in:
+            if rec.chrom not in contig_set:
+                continue
+            row, meta = _process_record(rec)
+            lrr_rows.append(row)
+            var_chunk.append(meta)
+            if len(lrr_rows) >= chunk_size:
+                yield np.vstack(lrr_rows), var_chunk
+                lrr_rows = []
+                var_chunk = []
+
+    vcf_in.close()
+
+    if lrr_rows:
+        yield np.vstack(lrr_rows), var_chunk
+
+
 def stream_correct_write(
     path_in: str | Path,
     path_out: str | Path,

@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from array_lrr_gwas.cli import _build_parser, _variant_id, main
+from tests import mock_associate_io
 
 
 class TestCli:
@@ -517,10 +518,59 @@ class TestCli:
         assert out.exists()
         assert "does not use the GRM random effect" in caplog.text
 
-    def test_associate_lmm_plink2_fallbacks_to_numpy(
+    def test_associate_lmm_plink2_missing_errors(
         self, tmp_path, monkeypatch, caplog
     ):
-        """If plink2 is unavailable, CLI should fall back to NumPy pruning."""
+        """If plink2 is unavailable and --ld-backend plink2 (default),
+        the CLI exits with an error instead of silently falling back."""
+        import logging
+
+        # Minimal phenotype file
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t0.1\nS2\t0.2\nS3\t0.3\n"
+        )
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        # LRR + variant metadata for association
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
+
+        # In the plink2 path, the first plink2 call is make_plink2_bed.
+        # Simulate plink2 not being on PATH.
+        def _raise_plink2_missing(*_a, **_k):
+            raise FileNotFoundError("plink2")
+
+        monkeypatch.setattr(
+            "array_lrr_gwas.grm.make_plink2_bed",
+            _raise_plink2_missing,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--method", "lmm",
+                "-o", str(out),
+            ])
+
+        assert rc == 1
+        assert "plink2 backend requested but plink2 is not on PATH" in caplog.text
+        assert "--ld-backend numpy" in caplog.text
+
+    def test_associate_lmm_numpy_backend_explicit(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """With --ld-backend numpy, NumPy LD pruning is used without error."""
         import logging
 
         from array_lrr_gwas import association
@@ -542,10 +592,7 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         # GT input for GRM
         dosage = np.array(
@@ -562,13 +609,6 @@ class TestCli:
             lambda *_a, **_k: (dosage, samples, gt_variants),
         )
 
-        def _raise_plink2_missing(*_a, **_k):
-            raise FileNotFoundError("plink2")
-
-        monkeypatch.setattr(
-            "array_lrr_gwas.ld_prune.ld_prune_plink2",
-            _raise_plink2_missing,
-        )
         monkeypatch.setattr(
             "array_lrr_gwas.ld_prune.ld_prune",
             lambda *_a, **_k: np.array([True, False, True], dtype=bool),
@@ -581,6 +621,7 @@ class TestCli:
         monkeypatch.setattr("array_lrr_gwas.grm.compute_grm", _fake_grm)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -616,22 +657,23 @@ class TestCli:
 
         monkeypatch.setattr(
             association,
-            "run_association",
-            lambda *_a, **_k: _FakeResult(),
+            "run_association_streaming",
+            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}),
         )
 
-        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.cli"):
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
                 "associate",
                 str(fake_bcf),
                 "--phenotype", str(pheno),
                 "--method", "lmm",
+                "--ld-backend", "numpy",
                 "-o", str(out),
             ])
 
         assert rc == 0
         assert out.exists()
-        assert "falling back to NumPy LD pruning" in caplog.text
+        assert "LD pruning with NumPy" in caplog.text
 
     def test_associate_lmm_with_variant_qc(self, tmp_path, monkeypatch, caplog):
         """--variant-qc applies upstream QC mask to GRM markers before LD."""
@@ -664,10 +706,7 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         # 3 GT variants; v2 will be removed by QC mask
         dosage = np.array(
@@ -703,6 +742,7 @@ class TestCli:
         monkeypatch.setattr("array_lrr_gwas.grm.compute_grm", _fake_grm)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -722,8 +762,8 @@ class TestCli:
 
         monkeypatch.setattr(
             association,
-            "run_association",
-            lambda *_a, **_k: _FakeResult(),
+            "run_association_streaming",
+            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}),
         )
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
@@ -765,7 +805,7 @@ class TestCli:
         lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
         samples = ["S1", "S2", "S3"]
         assoc_variants = [{"chrom": "chr1", "pos": 100, "id": "a1"}, {"chrom": "chr1", "pos": 200, "id": "a2"}]
-        monkeypatch.setattr("array_lrr_gwas.io_vcf.read_lrr", lambda _p: (lrr, samples, assoc_variants))
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         dosage = np.array([[0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [2.0, 1.0, 0.0]], dtype=float)
         gt_variants = [
@@ -778,6 +818,7 @@ class TestCli:
         monkeypatch.setattr("array_lrr_gwas.grm.compute_grm", lambda d, **_k: np.eye(d.shape[1], dtype=float))
 
         class _FakeResult:
+            variant_id = ['a1']
             chrom = ["chr1"]
             p_value = np.array([1.0])
             stat = np.array([0.0])
@@ -792,7 +833,7 @@ class TestCli:
                     "n_samples": 3, "method": "lmm",
                 }]
 
-        monkeypatch.setattr(association, "run_association", lambda *_a, **_k: _FakeResult())
+        monkeypatch.setattr(association, "run_association_streaming", lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}))
 
         rc = main([
             "associate",
@@ -833,12 +874,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -857,8 +896,8 @@ class TestCli:
                 ]
 
         monkeypatch.setattr(
-            association, "run_association",
-            lambda *_a, **_k: _FakeResult(),
+            association, "run_association_streaming",
+            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}),
         )
 
         rc = main([
@@ -920,12 +959,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -944,8 +981,8 @@ class TestCli:
                 ]
 
         monkeypatch.setattr(
-            association, "run_association",
-            lambda *_a, **_k: _FakeResult(),
+            association, "run_association_streaming",
+            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}),
         )
 
         rc = main([
@@ -983,12 +1020,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -1007,8 +1042,8 @@ class TestCli:
                 ]
 
         monkeypatch.setattr(
-            association, "run_association",
-            lambda *_a, **_k: _FakeResult(),
+            association, "run_association_streaming",
+            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}),
         )
 
         rc = main([
@@ -1047,10 +1082,7 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         dosage = np.array(
             [[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]], dtype=float,
@@ -1073,6 +1105,7 @@ class TestCli:
         )
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -1091,8 +1124,8 @@ class TestCli:
                 ]
 
         monkeypatch.setattr(
-            association, "run_association",
-            lambda *_a, **_k: _FakeResult(),
+            association, "run_association_streaming",
+            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}),
         )
 
         with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.cli"):
@@ -1137,12 +1170,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -1160,13 +1191,14 @@ class TestCli:
                      "n_samples": 1, "method": "ols"},
                 ]
 
-        def _fake_run_association(lrr_sub, phenotype, variants, **_kwargs):
-            assert lrr_sub.shape == (2, 1)
+        def _fake_run_association_streaming(lrr_chunks, phenotype, **_kwargs):
+            for _chunk, _vars in lrr_chunks:
+                pass
             assert phenotype.shape == (1,)
             assert float(phenotype[0]) == 1.0
-            return _FakeResult()
+            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
 
-        monkeypatch.setattr(association, "run_association", _fake_run_association)
+        monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -1214,12 +1246,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -1237,13 +1267,14 @@ class TestCli:
                      "n_samples": 2, "method": "ols"},
                 ]
 
-        def _fake_run_association(lrr_sub, phenotype, variants, **_kwargs):
-            assert lrr_sub.shape == (2, 2)
+        def _fake_run_association_streaming(lrr_chunks, phenotype, **_kwargs):
+            for _chunk, _vars in lrr_chunks:
+                pass
             assert phenotype.shape == (2,)
             assert np.array_equal(phenotype, np.array([1.0, 2.0]))
-            return _FakeResult()
+            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
 
-        monkeypatch.setattr(association, "run_association", _fake_run_association)
+        monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -1300,12 +1331,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -1323,13 +1352,14 @@ class TestCli:
                      "n_samples": 2, "method": "ols"},
                 ]
 
-        def _fake_run_association(lrr_sub, phenotype, variants, **_kwargs):
+        def _fake_run_association_streaming(lrr_chunks, phenotype, **_kwargs):
             # S1 and S4 are HQ with valid phenotypes → 2 samples
-            assert lrr_sub.shape == (2, 2)
+            for _chunk, _vars in lrr_chunks:
+                pass
             assert phenotype.shape == (2,)
-            return _FakeResult()
+            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
 
-        monkeypatch.setattr(association, "run_association", _fake_run_association)
+        monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -1379,12 +1409,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -1402,12 +1430,13 @@ class TestCli:
                      "n_samples": 1, "method": "ols"},
                 ]
 
-        def _fake_run_association(lrr_sub, phenotype, variants, **_kwargs):
-            assert lrr_sub.shape == (2, 1)  # only S1
+        def _fake_run_association_streaming(lrr_chunks, phenotype, **_kwargs):
+            for _chunk, _vars in lrr_chunks:
+                pass
             assert phenotype.shape == (1,)
-            return _FakeResult()
+            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
 
-        monkeypatch.setattr(association, "run_association", _fake_run_association)
+        monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -1445,10 +1474,7 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         dosage = np.array(
             [[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]], dtype=float,
@@ -1467,6 +1493,7 @@ class TestCli:
         )
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
@@ -1485,8 +1512,8 @@ class TestCli:
                 ]
 
         monkeypatch.setattr(
-            association, "run_association",
-            lambda *_a, **_k: _FakeResult(),
+            association, "run_association_streaming",
+            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}),
         )
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
@@ -1495,6 +1522,7 @@ class TestCli:
                 str(fake_bcf),
                 "--phenotype", str(pheno),
                 "--method", "lmm",
+                "--ld-backend", "numpy",
                 "--no-ld-prune",
                 "-o", str(out),
             ])
@@ -1529,12 +1557,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([0.5, 0.3])
             stat = np.array([0.6, 0.9])
@@ -1552,8 +1578,8 @@ class TestCli:
                      "n_samples": 2, "method": "ols"},
                 ]
 
-        monkeypatch.setattr(association, "run_association",
-                            lambda *_a, **_k: _FakeResult())
+        monkeypatch.setattr(association, "run_association_streaming",
+                            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}))
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             with caplog.at_level(logging.INFO, logger="array_lrr_gwas.audit"):
@@ -1599,10 +1625,7 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples_list, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples_list, assoc_variants)
 
         dosage = np.array(
             [[0.0, 1.0, 2.0], [1.0, 0.0, 2.0], [2.0, 1.0, 0.0]], dtype=float
@@ -1627,6 +1650,7 @@ class TestCli:
         )
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([0.5, 0.3])
             stat = np.array([0.6, 0.9])
@@ -1644,8 +1668,8 @@ class TestCli:
                      "n_samples": 3, "method": "lmm"},
                 ]
 
-        monkeypatch.setattr(association, "run_association",
-                            lambda *_a, **_k: _FakeResult())
+        monkeypatch.setattr(association, "run_association_streaming",
+                            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}))
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             with caplog.at_level(logging.INFO, logger="array_lrr_gwas.audit"):
@@ -1688,12 +1712,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples_list, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples_list, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([1e-10, 0.3])
             stat = np.array([5.0, 1.0])
@@ -1711,8 +1733,8 @@ class TestCli:
                      "n_samples": 3, "method": "ols"},
                 ]
 
-        monkeypatch.setattr(association, "run_association",
-                            lambda *_a, **_k: _FakeResult())
+        monkeypatch.setattr(association, "run_association_streaming",
+                            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}))
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -1750,12 +1772,10 @@ class TestCli:
             {"chrom": "chr1", "pos": 100, "id": "a1"},
             {"chrom": "chr1", "pos": 200, "id": "a2"},
         ]
-        monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda _p: (lrr, samples_list, assoc_variants),
-        )
+        mock_associate_io(monkeypatch, lrr, samples_list, assoc_variants)
 
         class _FakeResult:
+            variant_id = ['a1', 'a2']
             chrom = ["chr1", "chr1"]
             p_value = np.array([0.5, 0.3])
             stat = np.array([0.6, 0.9])
@@ -1773,8 +1793,8 @@ class TestCli:
                      "n_samples": 3, "method": "ols"},
                 ]
 
-        monkeypatch.setattr(association, "run_association",
-                            lambda *_a, **_k: _FakeResult())
+        monkeypatch.setattr(association, "run_association_streaming",
+                            lambda *_a, **_k: (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]}))
 
         with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
             rc = main([
@@ -1786,7 +1806,7 @@ class TestCli:
             ])
 
         assert rc == 0
-        assert "n_markers=" in caplog.text
+        assert "n_markers_eligible=" in caplog.text
         assert "n_samples=" in caplog.text
         assert "n_covariates=" in caplog.text
 

@@ -560,8 +560,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Backend for LD pruning (default: plink2). "
             "'plink2' shells out to plink2 --indep-pairwise for "
-            "faster pruning on large datasets; if unavailable, the "
-            "CLI falls back to the NumPy backend with a warning."
+            "faster pruning on large datasets; if plink2 is not on PATH "
+            "the pipeline will exit with an error.  Use '--ld-backend numpy' "
+            "to explicitly select the pure-Python fallback."
         ),
     )
     assoc.add_argument(
@@ -641,6 +642,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "a detailed per-stage TSV and JSON summary of included/excluded "
             "markers and samples (with reasons) are written to this "
             "directory.  Enables full provenance tracking."
+        ),
+    )
+    assoc.add_argument(
+        "--sex-chr-mode",
+        type=str,
+        nargs="*",
+        default=None,
+        choices=[
+            "x_with_sex_covariate",
+            "x_male_only",
+            "x_female_only",
+            "y_male_only",
+        ],
+        help=(
+            "Run additional sex-chromosome association scans.  Multiple "
+            "modes may be listed.  Requires --sample-sheet with a "
+            "'predicted_sex' column (1=male, 2=female).  "
+            "Modes: x_with_sex_covariate — chrX with sex as a binary "
+            "covariate; x_male_only — chrX males only; x_female_only — "
+            "chrX females only; y_male_only — chrY males only.  Each "
+            "mode writes a separate TSV alongside the main output."
         ),
     )
     assoc.add_argument(
@@ -1006,12 +1028,13 @@ def _run_correct_full(args, input_path, audit, cfg, correct_kwargs,
         upstream_qc_mask = variant_qc_mask(
             variant_ids, qc_data,
             require_call_rate=True, require_hwe=True, require_maf=False,
+            require_qc_pass=True,
             audit=audit, audit_stage="correction_variant_qc",
         )
         n_pass = int(upstream_qc_mask.sum())
         logger.info(
             "Upstream variant QC (RSVD): %d / %d markers pass "
-            "(call rate + HWE; MAF not required)",
+            "(all_ancestries_qc_pass; falls back to call_rate+HWE if absent)",
             n_pass, len(upstream_qc_mask),
         )
 
@@ -1187,6 +1210,7 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
     upstream_qc_mask_sub = variant_qc_mask(
         variant_ids_sub, qc_data,
         require_call_rate=True, require_hwe=True, require_maf=False,
+        require_qc_pass=True,
         audit=audit, audit_stage="correction_variant_qc",
     )
 
@@ -1289,13 +1313,14 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
 def _run_associate(args: argparse.Namespace) -> int:
     """Execute the ``associate`` sub-command."""
     import csv
-    import warnings
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     import numpy as np
 
     from array_lrr_gwas.audit import AuditLogger
-    from array_lrr_gwas.association import run_association
-    from array_lrr_gwas.io_vcf import read_lrr
+    from array_lrr_gwas.association import run_association_streaming
+    from array_lrr_gwas.io_vcf import read_variant_metadata, stream_lrr_chunks
     from array_lrr_gwas.qc_config import defaults, load_config, apply_to_associate_args
 
     input_path = args.input
@@ -1318,11 +1343,15 @@ def _run_associate(args: argparse.Namespace) -> int:
     else:
         cfg = defaults()
 
-    # Read LRR
-    logger.info("Reading LRR from %s", input_path)
-    lrr, samples, variants = read_lrr(input_path)
+    # Read variant metadata and sample IDs without loading LRR values.
+    # This is a lightweight scan that keeps memory independent of matrix size.
+    logger.info("Scanning variant metadata from %s", input_path)
+    samples, variants = read_variant_metadata(input_path)
+    n_variants_total = len(variants)
+    n_samples_bcf = len(samples)
     logger.info(
-        "Loaded %d variants × %d samples", lrr.shape[0], lrr.shape[1]
+        "Found %d variants × %d samples (metadata only, LRR not loaded)",
+        n_variants_total, n_samples_bcf,
     )
 
     # Read phenotype TSV
@@ -1627,16 +1656,13 @@ def _run_associate(args: argparse.Namespace) -> int:
 
     # Subset to samples with phenotype
     phenotype = pheno_vals[analyzed_mask]
-    lrr_sub = lrr[:, analyzed_mask]
 
     # ------------------------------------------------------------------
-    # Association-stage marker exclusion
+    # Association-stage marker exclusion (metadata-only pre-filter)
     # ------------------------------------------------------------------
-    # Only two hard-fail pre-filters for LRR association markers:
-    #   1. INTENSITY_ONLY (no cluster model → unreliable LRR)
-    #   2. Monomorphic LRR (zero variance → degenerate statistics)
-    # Upstream variant QC flags are NOT used to pre-filter — they are
-    # propagated to the output TSV for post-hoc filtering.
+    # INTENSITY_ONLY markers can be identified from metadata alone
+    # (no LRR needed).  Monomorphic LRR filtering is deferred to the
+    # streaming association scan because it requires loading LRR values.
     amqc = cfg.get("association_marker_qc", {})
     exclude_intensity_only = amqc.get("exclude_intensity_only", True)
     if args.no_exclude_intensity_only:
@@ -1645,201 +1671,363 @@ def _run_associate(args: argparse.Namespace) -> int:
     if args.no_exclude_monomorphic_lrr:
         exclude_monomorphic = False
 
-    n_total_markers = lrr_sub.shape[0]
-    marker_keep = np.ones(n_total_markers, dtype=bool)
+    # Build a variant-level boolean mask for metadata-based exclusions.
+    # This mask is passed to stream_lrr_chunks() so excluded variants
+    # are never loaded into memory.
+    n_total_markers = len(variants)
+    variant_mask = np.ones(n_total_markers, dtype=bool)
 
-    # 1. Exclude INTENSITY_ONLY markers
     if exclude_intensity_only:
         intensity_mask = np.array(
             [v.get("intensity_only", False) for v in variants], dtype=bool,
         )
         n_intensity = int(intensity_mask.sum())
-        marker_keep &= ~intensity_mask
+        variant_mask &= ~intensity_mask
         logger.info(
-            "Association marker exclusion: INTENSITY_ONLY: %d / %d excluded "
-            "(non-polymorphic probes without GT; retained for correction only)",
+            "Metadata-based marker exclusion: INTENSITY_ONLY: %d / %d excluded "
+            "(%s; non-polymorphic probes without GT)",
             n_intensity, n_total_markers,
+            _fmt_pct(n_intensity, n_total_markers),
         )
 
-    # 2. Exclude monomorphic LRR markers (zero variance across samples)
-    # Always compute variance for provenance; optionally exclude.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        _pre_filter_lrr_var = np.nanvar(lrr_sub, axis=1)
-    _pre_filter_all_nan = np.all(np.isnan(lrr_sub), axis=1)
-    _pre_filter_mono = (_pre_filter_lrr_var == 0.0) | _pre_filter_all_nan
-
-    if exclude_monomorphic:
-        zero_var_mask = (_pre_filter_lrr_var == 0.0) & ~_pre_filter_all_nan
-        mono_mask = zero_var_mask | _pre_filter_all_nan
-        n_mono = int(mono_mask.sum())
-        n_zero_var = int(zero_var_mask.sum())
-        n_all_nan = int(_pre_filter_all_nan.sum())
-        marker_keep &= ~mono_mask
-        logger.info(
-            "Association marker exclusion: monomorphic LRR "
-            "(zero variance): %d / %d excluded "
-            "(%d constant, %d all-NaN)",
-            n_mono, n_total_markers, n_zero_var, n_all_nan,
-        )
-
-    n_keep = int(marker_keep.sum())
-    n_excluded = n_total_markers - n_keep
+    n_metadata_keep = int(variant_mask.sum())
     logger.info(
-        "Association marker exclusion summary: %d / %d markers pass all "
-        "filters (%d excluded, %.1f%%)",
-        n_keep, n_total_markers, n_excluded,
-        100.0 * n_excluded / n_total_markers if n_total_markers > 0 else 0.0,
+        "Metadata pre-filter: %d / %d markers pass (%d excluded, %s). "
+        "Monomorphic LRR filtering deferred to streaming scan.",
+        n_metadata_keep, n_total_markers,
+        n_total_markers - n_metadata_keep,
+        _fmt_pct(n_total_markers - n_metadata_keep, n_total_markers),
     )
 
-    # Record association marker exclusion in audit trail
-    _marker_excluded: dict[str, str] = {}
-    _marker_included: list[str] = []
-    for i, (v, keep) in enumerate(zip(variants, marker_keep)):
-        vid = _variant_id(v)
-        if keep:
-            _marker_included.append(vid)
-        else:
-            reasons = []
-            if exclude_intensity_only and v.get("intensity_only", False):
-                reasons.append("intensity_only")
-            if exclude_monomorphic and _pre_filter_mono[i]:
-                reasons.append("monomorphic_lrr")
-            _marker_excluded[vid] = ";".join(reasons) if reasons else "excluded"
-    audit.record(
-        stage="association_marker_exclusion",
-        id_type="marker",
-        included=_marker_included,
-        excluded=_marker_excluded,
-    )
+    # Variants surviving the metadata filter — used for output provenance.
+    # The full list of kept/excluded variants is populated during streaming.
+    variants_meta_pass = [v for v, k in zip(variants, variant_mask) if k]
 
-    if n_keep == 0:
-        logger.error(
-            "No markers remain after association-stage filtering. "
-            "Consider relaxing marker exclusion criteria."
-        )
-        return 1
-
-    # Apply marker filter and carry forward the pre-computed monomorphic
-    # flags for surviving markers (avoids recomputing variance later).
-    _post_filter_mono = _pre_filter_mono[marker_keep]
-    lrr_sub = lrr_sub[marker_keep]
-    variants = [v for v, k in zip(variants, marker_keep) if k]
-
-    # GRM for LMM
+    # ------------------------------------------------------------------
+    # GRM for LMM: full plink2-native pipeline (plink2 backend) or
+    # Python dosage-matrix fallback (--ld-backend numpy).
+    # ------------------------------------------------------------------
     grm = None
     if args.method == "lmm":
-        from array_lrr_gwas.genotypes import read_genotypes
-        from array_lrr_gwas.grm import compute_grm
         from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
         gt_path = args.genotype_bcf or input_path
-        logger.info("Reading genotypes from %s for GRM", gt_path)
-        dosage, gt_samples, gt_variants = read_genotypes(
-            gt_path,
-            min_maf=args.min_maf,
-            min_call_rate=args.min_gt_call_rate,
+        valid_samples = [samples[i] for i in range(len(samples)) if analyzed_mask[i]]
+        variant_qc_path = (
+            args.variant_qc
+            or cfg.get("upstream_qc", {}).get("variant_qc_path")
         )
 
-        if dosage.shape[0] == 0:
-            logger.error(
-                "No genotype variants passed QC filters from %s. "
-                "Ensure FORMAT/GT field is present. "
-                "Use --method ols to skip GRM requirement.",
+        if args.ld_backend == "plink2":
+            # -----------------------------------------------------------
+            # plink2-native path — no dosage matrix ever enters Python.
+            #
+            # Steps:
+            #   1. Lightweight metadata scan  → QC-passing variant IDs
+            #   2. BCF  →  plink2 BED         (QC-filtered + sample-filtered)
+            #   3. BED  →  LD-pruned IDs      (plink2 --indep-pairwise)
+            #   4. BED  →  GRM                (plink2 --make-grm-bin)
+            # -----------------------------------------------------------
+            from array_lrr_gwas.grm import (
+                _read_bim_variant_ids,
+                compute_grm_plink2,
+                make_plink2_bed,
+            )
+            from array_lrr_gwas.io_vcf import read_variant_metadata as _read_gt_meta
+            from array_lrr_gwas.ld_prune import ld_prune_plink2
+
+            # Step 1 — lightweight metadata scan: get variant IDs + sample list.
+            logger.info(
+                "Scanning genotype file metadata from %s (plink2 path)",
                 gt_path,
             )
-            return 1
-
-        n_initial = dosage.shape[0]
-        logger.info(
-            "%d genotype variants from %d samples passed initial QC",
-            n_initial, dosage.shape[1],
-        )
-
-        # Apply upstream variant QC mask (call rate + HWE + MAF)
-        variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
-        if variant_qc_path is not None:
+            try:
+                gt_samples, gt_variant_metas = _read_gt_meta(gt_path)
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                logger.error(
+                    "Failed to read genotype file metadata from %s: %s. "
+                    "Ensure the file exists, has FORMAT/GT, and is a valid "
+                    "BCF/VCF (or use --genotype-bcf to specify a separate "
+                    "genotype file).",
+                    gt_path, exc,
+                )
+                return 1
+            gt_variant_ids = [_variant_id(v) for v in gt_variant_metas]
             logger.info(
-                "Loading upstream variant QC from %s for GRM", variant_qc_path,
+                "%d genotype variants, %d samples in %s",
+                len(gt_variant_ids), len(gt_samples), Path(gt_path).name,
             )
-            qc_data = read_collated_variant_qc(variant_qc_path)
-            gt_variant_ids = [_variant_id(v) for v in gt_variants]
-            qc_keep = variant_qc_mask(
-                gt_variant_ids, qc_data,
-                require_call_rate=True, require_hwe=True, require_maf=True,
-                audit=audit, audit_stage="grm_variant_qc",
+
+            if not gt_variant_ids:
+                logger.error(
+                    "No variants found in genotype file %s. "
+                    "Ensure FORMAT/GT field is present. "
+                    "Use --method ols to skip GRM requirement.",
+                    gt_path,
+                )
+                return 1
+
+            # Verify all analyzed samples exist in the genotype file.
+            gt_sample_set = set(gt_samples)
+            missing_samples = [s for s in valid_samples if s not in gt_sample_set]
+            if missing_samples:
+                logger.error(
+                    "%d analyzed samples not found in genotype file %s "
+                    "(first 5: %s). Check that both files cover the same cohort.",
+                    len(missing_samples), Path(gt_path).name, missing_samples[:5],
+                )
+                return 1
+
+            # Record audit for GRM samples.
+            audit.record(
+                stage="grm_samples",
+                id_type="sample",
+                included=valid_samples,
+                excluded={
+                    s: "not_in_analyzed_set"
+                    for s in gt_samples if s not in set(valid_samples)
+                },
             )
-            n_before_qc = dosage.shape[0]
-            dosage = dosage[qc_keep]
-            gt_variants = [v for v, k in zip(gt_variants, qc_keep) if k]
-            logger.info(
-                "Upstream variant QC (GRM): %d → %d variants "
-                "(call rate + HWE + MAF required)",
-                n_before_qc, dosage.shape[0],
+
+            # Step 2 — apply upstream variant QC mask to get passing IDs.
+            if variant_qc_path is not None:
+                logger.info(
+                    "Loading upstream variant QC from %s for GRM",
+                    variant_qc_path,
+                )
+                qc_data = read_collated_variant_qc(variant_qc_path)
+                qc_keep = variant_qc_mask(
+                    gt_variant_ids, qc_data,
+                    require_call_rate=True, require_hwe=True, require_maf=True,
+                    require_qc_pass=True,
+                    audit=audit, audit_stage="grm_variant_qc",
+                )
+                qc_pass_ids: list[str] | None = [
+                    v for v, k in zip(gt_variant_ids, qc_keep) if k
+                ]
+                logger.info(
+                    "Upstream variant QC (GRM): %d → %d variants "
+                    "(all_ancestries_qc_pass; falls back to call_rate+HWE+MAF if absent)",
+                    len(gt_variant_ids), len(qc_pass_ids),
+                )
+                if not qc_pass_ids:
+                    logger.error(
+                        "No genotype variants pass upstream QC from %s. "
+                        "Check that variant IDs match collated_variant_qc.tsv.",
+                        gt_path,
+                    )
+                    return 1
+            else:
+                qc_pass_ids = None
+                logger.warning(
+                    "No upstream variant QC file provided (--variant-qc or "
+                    "upstream_qc.variant_qc_path).  plink2 will apply basic "
+                    "MAF (%.2f) and call-rate filters.  Provide "
+                    "collated_variant_qc.tsv for best-practice QC.",
+                    args.min_maf,
+                )
+
+            # Step 3 — convert QC-passing variants to plink2 BED.
+            # BED persists in --audit-dir when provided; otherwise temp.
+            _audit_dir_val = getattr(args, "audit_dir", None)
+            _tmp_bed_dir: object | None = None
+            if _audit_dir_val is not None:
+                bed_dir = Path(_audit_dir_val)
+                bed_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                import tempfile as _tf
+                _tmp_bed_dir = _tf.TemporaryDirectory()
+                bed_dir = Path(_tmp_bed_dir.name)
+
+            try:
+                bed_prefix = bed_dir / "grm_markers"
+                try:
+                    make_plink2_bed(
+                        gt_path,
+                        bed_prefix,
+                        keep_variants=qc_pass_ids,
+                        keep_samples=valid_samples,
+                        # QC-filtered IDs already pass MAF — skip re-filter.
+                        min_maf=0.0 if qc_pass_ids is not None else args.min_maf,
+                    )
+                    logger.info(
+                        "plink2 BED generated (%d samples, QC-filtered): %s",
+                        len(valid_samples), bed_prefix,
+                    )
+                except FileNotFoundError:
+                    logger.error(
+                        "plink2 backend requested but plink2 is not on PATH. "
+                        "Install plink2 (https://www.cog-genomics.org/plink/2.0/) "
+                        "or use --ld-backend numpy for the Python fallback."
+                    )
+                    return 1
+                except subprocess.CalledProcessError as exc:
+                    logger.error("plink2 BED generation failed: %s", exc)
+                    return 1
+
+                # Step 4 — LD prune the BED (variants already QC-filtered).
+                bim_path = bed_prefix.with_suffix(".bim")
+                _pre_ld_ids = _read_bim_variant_ids(bim_path)
+
+                if not args.no_ld_prune:
+                    ld_window_kb = max(1, args.ld_window_bp // 1000)
+                    logger.info(
+                        "LD pruning with plink2 (window=%dkb, r²=%.2f, input=BED)",
+                        ld_window_kb, args.ld_r2_thresh,
+                    )
+                    try:
+                        pruned_ids: set[str] | None = ld_prune_plink2(
+                            bed_prefix.with_suffix(".bed"),
+                            window_kb=ld_window_kb,
+                            r2_thresh=args.ld_r2_thresh,
+                        )
+                    except FileNotFoundError:
+                        logger.error(
+                            "plink2 backend requested but plink2 is not on PATH. "
+                            "Install plink2 (https://www.cog-genomics.org/plink/2.0/) "
+                            "or use --ld-backend numpy for the Python fallback."
+                        )
+                        return 1
+
+                    n_before_ld = len(_pre_ld_ids)
+                    n_after_ld = len(pruned_ids)
+                    logger.info(
+                        "LD pruning: %d → %d variants (removed %d)",
+                        n_before_ld, n_after_ld, n_before_ld - n_after_ld,
+                    )
+                    if n_after_ld == 0:
+                        logger.error(
+                            "No variants remain after LD pruning.  Consider "
+                            "relaxing --ld-r2-thresh or using --no-ld-prune."
+                        )
+                        return 1
+
+                    audit.record(
+                        stage="grm_ld_prune",
+                        id_type="marker",
+                        included=sorted(pruned_ids),
+                        excluded={
+                            vid: "ld_prune"
+                            for vid in _pre_ld_ids if vid not in pruned_ids
+                        },
+                    )
+                else:
+                    pruned_ids = None  # use all variants already in BED
+                    logger.info(
+                        "LD pruning disabled (--no-ld-prune). "
+                        "All %d BED markers retained for GRM.",
+                        len(_pre_ld_ids),
+                    )
+                    audit.record(
+                        stage="grm_ld_prune",
+                        id_type="marker",
+                        included=_pre_ld_ids,
+                        excluded={},
+                    )
+
+                # Step 5 — compute GRM from LD-pruned BED via plink2.
+                logger.info(
+                    "Computing GRM via plink2 --make-grm-bin (input=BED) ..."
+                )
+                try:
+                    grm_raw, plink2_ids = compute_grm_plink2(
+                        bed_prefix.with_suffix(".bed"),
+                        keep_variants=pruned_ids,
+                    )
+                except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+                    logger.error("plink2 GRM computation failed: %s", exc)
+                    return 1
+
+                # Reorder GRM rows/cols to match valid_samples ordering.
+                _p2_idx = {s: i for i, s in enumerate(plink2_ids)}
+                _missing_grm = [s for s in valid_samples if s not in _p2_idx]
+                if _missing_grm:
+                    logger.error(
+                        "plink2 GRM is missing %d analyzed samples (e.g. %s). "
+                        "Check that the genotype file covers all analyzed samples.",
+                        len(_missing_grm), _missing_grm[:3],
+                    )
+                    return 1
+                _reorder = [_p2_idx[s] for s in valid_samples]
+                grm = grm_raw[np.ix_(_reorder, _reorder)]
+                logger.info(
+                    "GRM computed via plink2: %d × %d",
+                    grm.shape[0], grm.shape[1],
+                )
+
+            finally:
+                if _tmp_bed_dir is not None:
+                    _tmp_bed_dir.cleanup()
+
+        else:
+            # -----------------------------------------------------------
+            # NumPy fallback path (--ld-backend numpy).
+            # Loads the full dosage matrix into Python memory.
+            # -----------------------------------------------------------
+            from array_lrr_gwas.genotypes import read_genotypes
+            from array_lrr_gwas.grm import compute_grm
+
+            logger.info("Reading genotypes from %s for GRM (numpy path)", gt_path)
+            dosage, gt_samples_np, gt_variants = read_genotypes(
+                gt_path,
+                min_maf=args.min_maf,
+                min_call_rate=args.min_gt_call_rate,
             )
 
             if dosage.shape[0] == 0:
                 logger.error(
-                    "No genotype variants remain after upstream QC mask "
-                    "(%d before filtering, file: %s). Check that variant "
-                    "IDs match between the genotype file and "
-                    "collated_variant_qc.tsv.",
-                    n_before_qc, variant_qc_path,
+                    "No genotype variants passed QC filters from %s. "
+                    "Ensure FORMAT/GT field is present. "
+                    "Use --method ols to skip GRM requirement.",
+                    gt_path,
                 )
                 return 1
-        else:
-            logger.warning(
-                "No upstream variant QC file provided (--variant-qc or "
-                "upstream_qc.variant_qc_path).  Skipping ancestry-informed "
-                "marker filtering for GRM.  Provide collated_variant_qc.tsv "
-                "for best-practice QC."
+
+            logger.info(
+                "%d genotype variants from %d samples passed initial QC",
+                dosage.shape[0], dosage.shape[1],
             )
 
-        # LD prune GRM markers
-        # Capture variants before pruning so we can report excluded IDs.
-        _grm_pre_ld_variants = list(gt_variants)
-        if not args.no_ld_prune:
-            if args.ld_backend == "plink2":
-                from array_lrr_gwas.ld_prune import ld_prune, ld_prune_plink2
-
-                ld_window_kb = max(1, args.ld_window_bp // 1000)
+            # Apply upstream variant QC mask.
+            if variant_qc_path is not None:
                 logger.info(
-                    "LD pruning with plink2 (window=%dkb, r²=%.2f)",
-                    ld_window_kb, args.ld_r2_thresh,
+                    "Loading upstream variant QC from %s for GRM",
+                    variant_qc_path,
                 )
-                try:
-                    keep_ids = ld_prune_plink2(
-                        gt_path,
-                        window_kb=ld_window_kb,
-                        r2_thresh=args.ld_r2_thresh,
-                        min_maf=args.min_maf,
+                qc_data = read_collated_variant_qc(variant_qc_path)
+                gt_variant_ids_np = [_variant_id(v) for v in gt_variants]
+                qc_keep = variant_qc_mask(
+                    gt_variant_ids_np, qc_data,
+                    require_call_rate=True, require_hwe=True, require_maf=True,
+                    require_qc_pass=True,
+                    audit=audit, audit_stage="grm_variant_qc",
+                )
+                n_before_qc = dosage.shape[0]
+                dosage = dosage[qc_keep]
+                gt_variants = [v for v, k in zip(gt_variants, qc_keep) if k]
+                logger.info(
+                    "Upstream variant QC (GRM): %d → %d variants "
+                    "(all_ancestries_qc_pass; falls back to call_rate+HWE+MAF if absent)",
+                    n_before_qc, dosage.shape[0],
+                )
+                if dosage.shape[0] == 0:
+                    logger.error(
+                        "No variants remain after upstream QC mask "
+                        "(%d before filtering). Check variant IDs match.",
+                        n_before_qc,
                     )
-                    # plink2 uses the VCF ID column; when ID is '.' it
-                    # constructs chrom:pos:ref:alt.  Match on both forms.
-                    ld_keep = np.array([
-                        v.get("id") in keep_ids
-                        or f"{v['chrom']}:{v['pos']}:{v.get('ref', '')}:{':'.join(v.get('alts', ()))}" in keep_ids
-                        for v in gt_variants
-                    ], dtype=bool)
-                except FileNotFoundError:
-                    logger.warning(
-                        "plink2 backend requested but plink2 is not on PATH; "
-                        "falling back to NumPy LD pruning."
-                    )
-                    gt_positions = np.array(
-                        [v["pos"] for v in gt_variants], dtype=np.intp
-                    )
-                    gt_chroms = np.array(
-                        [v["chrom"] for v in gt_variants], dtype=str
-                    )
-                    ld_keep = ld_prune(
-                        dosage,
-                        positions=gt_positions,
-                        chromosomes=gt_chroms,
-                        window_bp=args.ld_window_bp,
-                        r2_thresh=args.ld_r2_thresh,
-                    )
+                    return 1
             else:
+                logger.warning(
+                    "No upstream variant QC file provided (--variant-qc or "
+                    "upstream_qc.variant_qc_path).  Skipping ancestry-informed "
+                    "marker filtering for GRM.  Provide collated_variant_qc.tsv "
+                    "for best-practice QC."
+                )
+
+            # LD pruning (NumPy).
+            _grm_pre_ld_variants = list(gt_variants)
+            if not args.no_ld_prune:
                 from array_lrr_gwas.ld_prune import ld_prune
 
                 gt_positions = np.array(
@@ -1859,83 +2047,73 @@ def _run_associate(args: argparse.Namespace) -> int:
                     window_bp=args.ld_window_bp,
                     r2_thresh=args.ld_r2_thresh,
                 )
+                n_before = dosage.shape[0]
+                dosage = dosage[ld_keep]
+                gt_variants = [v for v, k in zip(gt_variants, ld_keep) if k]
+                logger.info(
+                    "LD pruning: %d → %d variants (removed %d)",
+                    n_before, dosage.shape[0], n_before - dosage.shape[0],
+                )
+                audit.record(
+                    stage="grm_ld_prune",
+                    id_type="marker",
+                    included=[_variant_id(v) for v in gt_variants],
+                    excluded={
+                        _variant_id(v): "ld_prune"
+                        for v, k in zip(_grm_pre_ld_variants, ld_keep) if not k
+                    },
+                )
+                if dosage.shape[0] == 0:
+                    logger.error(
+                        "No variants remain after LD pruning.  Consider "
+                        "relaxing --ld-r2-thresh or using --no-ld-prune."
+                    )
+                    return 1
+            else:
+                logger.info(
+                    "LD pruning disabled (--no-ld-prune). "
+                    "All %d GRM markers retained.",
+                    dosage.shape[0],
+                )
+                audit.record(
+                    stage="grm_ld_prune",
+                    id_type="marker",
+                    included=[_variant_id(v) for v in gt_variants],
+                    excluded={},
+                )
 
-            n_before = dosage.shape[0]
-            dosage = dosage[ld_keep]
-            gt_variants = [v for v, k in zip(gt_variants, ld_keep) if k]
             logger.info(
-                "LD pruning: %d → %d variants (removed %d)",
-                n_before, dosage.shape[0], n_before - dosage.shape[0],
+                "Using %d genotype variants from %d samples for GRM",
+                dosage.shape[0], dosage.shape[1],
             )
 
-            # Record GRM marker set after LD pruning in audit trail.
-            _ld_included = [_variant_id(v) for v in gt_variants]
-            _ld_excluded = {
-                _variant_id(v): "ld_prune"
-                for v, k in zip(_grm_pre_ld_variants, ld_keep) if not k
-            }
-            audit.record(
-                stage="grm_ld_prune",
-                id_type="marker",
-                included=_ld_included,
-                excluded=_ld_excluded,
-            )
-
-            if dosage.shape[0] == 0:
+            # Align GT samples to LRR analyzed samples.
+            gt_idx = {s: i for i, s in enumerate(gt_samples_np)}
+            missing_samples = [s for s in valid_samples if s not in gt_idx]
+            if missing_samples:
                 logger.error(
-                    "No variants remain after LD pruning.  Consider "
-                    "relaxing --ld-r2-thresh or using --no-ld-prune."
+                    "%d analyzed samples not found in genotype file (first 5: %s)",
+                    len(missing_samples), missing_samples[:5],
                 )
                 return 1
-        else:
-            logger.info(
-                "LD pruning disabled (--no-ld-prune).  All %d GRM markers "
-                "retained without LD filtering.",
-                dosage.shape[0],
-            )
-            # Record the full marker set (no exclusions) in audit trail.
+            gt_order = [gt_idx[s] for s in valid_samples]
             audit.record(
-                stage="grm_ld_prune",
-                id_type="marker",
-                included=[_variant_id(v) for v in gt_variants],
-                excluded={},
+                stage="grm_samples",
+                id_type="sample",
+                included=valid_samples,
+                excluded={
+                    s: "not_in_analyzed_set"
+                    for s in gt_samples_np if s not in set(valid_samples)
+                },
             )
 
-        logger.info(
-            "Using %d genotype variants from %d samples for GRM",
-            dosage.shape[0], dosage.shape[1],
-        )
+            dosage_aligned = dosage[:, gt_order]
+            logger.info("Computing GRM (NumPy)...")
+            grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
+            logger.info(
+                "GRM computed (NumPy): %d × %d", grm.shape[0], grm.shape[1],
+            )
 
-        # Align GT samples to LRR samples
-        gt_idx = {s: i for i, s in enumerate(gt_samples)}
-        valid_samples = [samples[i] for i in range(len(samples)) if analyzed_mask[i]]
-        gt_order = []
-        for s in valid_samples:
-            if s in gt_idx:
-                gt_order.append(gt_idx[s])
-            else:
-                logger.error("Sample %s not found in genotype file", s)
-                return 1
-
-        # Record which samples are included in the GRM in audit trail.
-        # Samples in the GT file that are not being analysed are excluded.
-        _grm_sample_excluded = {
-            s: "not_in_analyzed_set"
-            for s in gt_samples if s not in set(valid_samples)
-        }
-        audit.record(
-            stage="grm_samples",
-            id_type="sample",
-            included=valid_samples,
-            excluded=_grm_sample_excluded,
-        )
-
-        dosage_aligned = dosage[:, gt_order]
-        logger.info("Computing GRM...")
-        grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
-        logger.info(
-            "GRM computed: %d × %d", grm.shape[0], grm.shape[1],
-        )
 
     if args.method == "logistic":
         logger.warning(
@@ -1946,20 +2124,72 @@ def _run_associate(args: argparse.Namespace) -> int:
             "pre-filtering highly related individuals."
         )
 
-    # Run association
+    # ------------------------------------------------------------------
+    # Streaming association scan
+    # ------------------------------------------------------------------
+    # Stream LRR values from the BCF in chunks, applying per-chunk
+    # marker filtering (monomorphic LRR) inline.  The full LRR matrix
+    # is never held in memory.
     n_cov = covariates.shape[1] if covariates is not None else 0
     _grm_info = f", grm_size={grm.shape[0]}" if grm is not None else ""
     logger.info(
-        "Running %s association scan: n_markers=%d, n_samples=%d, "
-        "n_covariates=%d%s",
-        args.method, lrr_sub.shape[0], lrr_sub.shape[1], n_cov, _grm_info,
+        "Running streaming %s association scan: n_markers_eligible=%d, "
+        "n_samples=%d, n_covariates=%d%s",
+        args.method, n_metadata_keep, int(analyzed_mask.sum()),
+        n_cov, _grm_info,
     )
-    result = run_association(
-        lrr_sub, phenotype, variants,
+
+    lrr_stream = stream_lrr_chunks(
+        input_path,
+        chunk_size=5000,
+        sample_mask=analyzed_mask,
+        variant_mask=variant_mask,
+    )
+    result, exclusion_info = run_association_streaming(
+        lrr_stream,
+        phenotype,
         covariates=covariates,
         method=args.method,
         grm=grm,
+        exclude_monomorphic=exclude_monomorphic,
+        exclude_intensity_only=False,  # already excluded via variant_mask
     )
+    n_tested = exclusion_info["n_tested"]
+    n_mono_excluded = exclusion_info["n_monomorphic"]
+    logger.info(
+        "Streaming association complete: %d markers tested, "
+        "%d monomorphic LRR excluded during scan (%s)",
+        n_tested, n_mono_excluded,
+        _fmt_pct(n_mono_excluded, exclusion_info["n_total"]),
+    )
+
+    # Record association marker exclusion in audit trail.
+    # Combine metadata-based (INTENSITY_ONLY) and streaming (monomorphic)
+    # exclusions into a single audit record.
+    _all_marker_excluded: dict[str, str] = {}
+    if exclude_intensity_only:
+        for v, k in zip(variants, variant_mask):
+            if not k:
+                vid = _variant_id(v)
+                if v.get("intensity_only", False):
+                    _all_marker_excluded[vid] = "intensity_only"
+    _all_marker_excluded.update(exclusion_info["excluded_markers"])
+    _all_marker_included = list(result.variant_id)
+
+    audit.record(
+        stage="association_marker_exclusion",
+        id_type="marker",
+        included=_all_marker_included,
+        excluded=_all_marker_excluded,
+    )
+
+    if n_tested == 0:
+        logger.error(
+            "No markers remain after association-stage filtering. "
+            "Consider relaxing marker exclusion criteria."
+        )
+        return 1
+
     logger.info("Association complete for %d variants", len(result.chrom))
 
     # Log result summary statistics for auditing.
@@ -2028,7 +2258,7 @@ def _run_associate(args: argparse.Namespace) -> int:
         "all_ancestries_qc_pass",
     )
     if qc_provenance is not None:
-        lrr_variant_ids = [_variant_id(v) for v in variants]
+        lrr_variant_ids = list(result.variant_id)
         for rec, vid in zip(records, lrr_variant_ids):
             qc_rec = qc_provenance.get(vid)
             if qc_rec is not None:
@@ -2053,18 +2283,249 @@ def _run_associate(args: argparse.Namespace) -> int:
     # markers these will be False when default exclusions are on; when
     # --no-exclude-intensity-only or --no-exclude-monomorphic-lrr is
     # used, some True values may appear.
-    for rec, v in zip(records, variants):
-        rec["intensity_only"] = v.get("intensity_only", False)
-    # Use the pre-computed monomorphic flags from the exclusion step
-    # (cached in _post_filter_mono) to avoid recomputing variance.
+    # intensity_only is always False for tested markers (filtered upstream).
+    for rec in records:
+        rec["intensity_only"] = False
+    # Use the monomorphic flags collected during streaming scan.
+    _tested_mono = exclusion_info["tested_mono_flags"]
     for i, rec in enumerate(records):
-        rec["lrr_monomorphic"] = bool(_post_filter_mono[i])
+        rec["lrr_monomorphic"] = bool(_tested_mono[i]) if i < len(_tested_mono) else False
 
     header = list(records[0].keys()) if records else []
     with open(args.output, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
         writer.writeheader()
         writer.writerows(records)
+
+    # ------------------------------------------------------------------
+    # Sex-chromosome analysis modes
+    # ------------------------------------------------------------------
+    sex_chr_modes = getattr(args, "sex_chr_mode", None) or []
+    if sex_chr_modes:
+        _X_CHROMS = {"chrX", "X"}
+        _Y_CHROMS = {"chrY", "Y"}
+
+        if args.sample_sheet is None:
+            logger.error(
+                "Sex-chromosome modes require --sample-sheet with a "
+                "'predicted_sex' column (1=male, 2=female)."
+            )
+            return 1
+
+        # Warn about relatedness inflation when a GRM was computed for the
+        # autosomal scan.  Sex-chr scans use OLS (the autosomal GRM is not
+        # appropriate for X/Y), so cryptic relatedness is not corrected.
+        if grm is not None:
+            logger.warning(
+                "Sex-chromosome association scans use OLS (no GRM). "
+                "The autosomal GRM computed for the main scan is NOT applied "
+                "to sex-chromosome markers.  If your cohort contains related "
+                "individuals, type I error may be inflated for sex-chromosome "
+                "markers.  Consider pre-filtering close relatives (kinship > "
+                "0.125) before interpreting sex-chromosome results."
+            )
+
+        from array_lrr_gwas.sample_sheet import read_sample_sheet as _read_ss
+
+        _sx_ids, _sx_covs, _sx_names = _read_ss(
+            args.sample_sheet, n_pcs=0,
+            extra_covariates=["predicted_sex"],
+        )
+        _sex_idx = (
+            _sx_names.index("predicted_sex")
+            if "predicted_sex" in _sx_names else None
+        )
+        if _sex_idx is None:
+            logger.error(
+                "'predicted_sex' column not found in sample sheet %s. "
+                "Required for sex-chromosome analysis.",
+                args.sample_sheet,
+            )
+            return 1
+
+        # Build per-sample sex lookup (1=male, 2=female).
+        _sex_map: dict[str, int] = {}
+        for _sid, _row in zip(_sx_ids, _sx_covs):
+            v = _row[_sex_idx]
+            if np.isfinite(v):
+                _sex_map[_sid] = int(v)
+
+        _analyzed_ids = [
+            samples[i] for i in range(len(samples)) if analyzed_mask[i]
+        ]
+        _sample_sex = np.array(
+            [_sex_map.get(s, 0) for s in _analyzed_ids], dtype=int,
+        )
+        _male = _sample_sex == 1
+        _female = _sample_sex == 2
+
+        out_stem = args.output.stem
+        out_sfx = args.output.suffix
+        out_dir = args.output.parent
+
+        # ------------------------------------------------------------------
+        # Single-pass sex-chromosome scan
+        # ------------------------------------------------------------------
+        # Instead of re-reading the entire BCF for every sex-chr mode we:
+        # 1. Use pysam.fetch (indexed BCF) or a sequential contig-filtered
+        #    scan to read chrX and chrY variants exactly once.
+        # 2. Split the resulting (lrr_row, var_meta) pairs into X and Y
+        #    buckets (applying the intensity-only pre-filter).
+        # 3. Run all modes in parallel threads from the in-memory buckets.
+        # ------------------------------------------------------------------
+        from array_lrr_gwas.io_vcf import stream_lrr_contig_chunks
+
+        _need_x = any(
+            m in ("x_with_sex_covariate", "x_male_only", "x_female_only")
+            for m in sex_chr_modes
+        )
+        _need_y = "y_male_only" in sex_chr_modes
+        _needed_contigs: list[str] = []
+        if _need_x:
+            _needed_contigs.extend(["chrX", "X"])
+        if _need_y:
+            _needed_contigs.extend(["chrY", "Y"])
+
+        # Collect X and Y LRR rows (full analyzed_mask, all samples).
+        # Each entry: (lrr_row[n_analyzed_samples], var_meta)
+        _x_rows: list[np.ndarray] = []
+        _x_vars: list[dict] = []
+        _y_rows: list[np.ndarray] = []
+        _y_vars: list[dict] = []
+
+        if _needed_contigs:
+            logger.info(
+                "Single-pass sex-chromosome BCF scan (contigs: %s)",
+                _needed_contigs,
+            )
+            for _c_lrr, _c_vars in stream_lrr_contig_chunks(
+                input_path,
+                _needed_contigs,
+                chunk_size=5000,
+                sample_mask=analyzed_mask,
+            ):
+                for _row, _v in zip(_c_lrr, _c_vars):
+                    if exclude_intensity_only and _v.get("intensity_only", False):
+                        continue
+                    if _v.get("chrom", "") in _X_CHROMS:
+                        _x_rows.append(_row)
+                        _x_vars.append(_v)
+                    elif _v.get("chrom", "") in _Y_CHROMS:
+                        _y_rows.append(_row)
+                        _y_vars.append(_v)
+
+        _n_analyzed = int(analyzed_mask.sum())
+        _x_lrr = np.vstack(_x_rows) if _x_rows else np.empty((0, _n_analyzed))
+        _y_lrr = np.vstack(_y_rows) if _y_rows else np.empty((0, _n_analyzed))
+
+        logger.info(
+            "Sex-chromosome data loaded: %d chrX variants, %d chrY variants",
+            len(_x_vars), len(_y_vars),
+        )
+
+        def _make_in_memory_stream(lrr_full, var_list, col_mask, chunk_size=5000):
+            """Yield chunks from in-memory LRR matrix, applying column mask."""
+            if lrr_full.shape[0] == 0:
+                return
+            lrr_sub = lrr_full[:, col_mask]
+            for _s in range(0, lrr_sub.shape[0], chunk_size):
+                _e = min(_s + chunk_size, lrr_sub.shape[0])
+                yield lrr_sub[_s:_e], var_list[_s:_e]
+
+        def _run_one_sex_chr_mode(mode):
+            if mode in ("x_with_sex_covariate", "x_male_only", "x_female_only"):
+                _lrr_full = _x_lrr
+                _var_list = _x_vars
+                n_mv = len(_x_vars)
+            else:  # y_male_only
+                _lrr_full = _y_lrr
+                _var_list = _y_vars
+                n_mv = len(_y_vars)
+
+            if n_mv == 0:
+                logger.warning("No sex-chr variants for mode %s; skipping.", mode)
+                return None
+
+            if mode == "x_with_sex_covariate":
+                _col_mask = np.ones(int(analyzed_mask.sum()), dtype=bool)
+                _sub_pheno = phenotype
+                _sex_cov = _male.astype(float)[:, np.newaxis]
+                _sub_cov = (
+                    np.column_stack([covariates, _sex_cov])
+                    if covariates is not None else _sex_cov
+                )
+            elif mode == "x_male_only":
+                _col_mask = _male
+                _sub_pheno = phenotype[_male]
+                _sub_cov = covariates[_male] if covariates is not None else None
+            elif mode == "x_female_only":
+                _col_mask = _female
+                _sub_pheno = phenotype[_female]
+                _sub_cov = covariates[_female] if covariates is not None else None
+            else:  # y_male_only
+                _col_mask = _male
+                _sub_pheno = phenotype[_male]
+                _sub_cov = covariates[_male] if covariates is not None else None
+
+            n_sub = int(_col_mask.sum())
+            if n_sub < 3:
+                logger.warning(
+                    "Fewer than 3 samples for mode %s (%d); skipping.",
+                    mode, n_sub,
+                )
+                return None
+
+            logger.info(
+                "Sex-chr mode %s: %d variants, %d samples",
+                mode, n_mv, n_sub,
+            )
+
+            _stream = _make_in_memory_stream(_lrr_full, _var_list, _col_mask)
+            _res, _excl = run_association_streaming(
+                _stream,
+                _sub_pheno,
+                covariates=_sub_cov,
+                method="ols",
+                exclude_monomorphic=exclude_monomorphic,
+                exclude_intensity_only=False,
+            )
+            return mode, _res, _excl
+
+        # Run all modes in parallel threads (OLS releases GIL for most ops).
+        valid_modes = [
+            m for m in sex_chr_modes
+            if m in ("x_with_sex_covariate", "x_male_only", "x_female_only", "y_male_only")
+        ]
+        sex_chr_results: dict[str, tuple] = {}
+
+        with ThreadPoolExecutor(max_workers=len(valid_modes) or 1) as _pool:
+            _futures = {_pool.submit(_run_one_sex_chr_mode, m): m for m in valid_modes}
+            for _fut in as_completed(_futures):
+                _out = _fut.result()
+                if _out is not None:
+                    _mode, _sx_res, _sx_excl = _out
+                    sex_chr_results[_mode] = (_sx_res, _sx_excl)
+
+        # Write outputs and record audit for each completed mode.
+        for mode, (_sx_res, _sx_excl) in sex_chr_results.items():
+            _sx_path = out_dir / f"{out_stem}.{mode}{out_sfx}"
+            _sx_recs = _sx_res.to_records()
+            if _sx_recs:
+                _sh = list(_sx_recs[0].keys())
+                with open(_sx_path, "w", newline="") as fh:
+                    w = csv.DictWriter(fh, fieldnames=_sh, delimiter="\t")
+                    w.writeheader()
+                    w.writerows(_sx_recs)
+            logger.info(
+                "Sex-chr mode %s: %d markers tested → %s",
+                mode, _sx_excl["n_tested"], _sx_path,
+            )
+            audit.record(
+                stage=f"sex_chr_{mode}",
+                id_type="marker",
+                included=list(_sx_res.variant_id),
+                excluded=_sx_excl["excluded_markers"],
+            )
 
     # Write audit trail if requested
     audit_dir = getattr(args, "audit_dir", None)

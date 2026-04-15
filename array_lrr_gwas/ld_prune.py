@@ -161,7 +161,7 @@ def _plink2_available() -> bool:
 
 
 def ld_prune_plink2(
-    bcf_path: str | Path,
+    input_path: str | Path,
     *,
     window_kb: int = 1000,
     step: int = 50,
@@ -174,8 +174,12 @@ def ld_prune_plink2(
 
     Parameters
     ----------
-    bcf_path : str or Path
-        Path to BCF/VCF with FORMAT/GT.
+    input_path : str or Path
+        Path to BCF/VCF with ``FORMAT/GT``, **or** the prefix of a plink2
+        BED/BIM/FAM fileset (with ``.bed``, ``.bim``, or ``.fam`` extension,
+        or bare prefix).  When a BED fileset is provided, plink2 uses
+        ``--bfile`` and skips the ``--maf`` re-filter (variants were already
+        QC-filtered during BED generation).
     window_kb : int
         Window size in kilobases (default: 1000).
     step : int
@@ -183,7 +187,8 @@ def ld_prune_plink2(
     r2_thresh : float
         r² threshold for pruning (default: 0.2).
     min_maf : float
-        Minimum MAF filter applied during pruning (default: 0.01).
+        Minimum MAF filter applied when reading BCF/VCF input (default: 0.01).
+        Ignored when *input_path* points to a BED fileset.
 
     Returns
     -------
@@ -203,22 +208,27 @@ def ld_prune_plink2(
             "the 'numpy' LD-pruning backend."
         )
 
-    bcf_path = Path(bcf_path)
-    suffix = bcf_path.suffix.lower()
+    input_path = Path(input_path)
+    suffix = input_path.suffix.lower()
 
     with tempfile.TemporaryDirectory() as tmp:
         out_prefix = str(Path(tmp) / "prune")
         cmd: list[str] = ["plink2"]
 
-        if suffix == ".bcf":
-            cmd += ["--bcf", str(bcf_path)]
+        if suffix in (".bed", ".bim", ".fam"):
+            # plink1 BED fileset — strip extension to get prefix
+            bfile_prefix = str(input_path.with_suffix(""))
+            cmd += ["--bfile", bfile_prefix]
+        elif suffix == ".bcf":
+            cmd += ["--bcf", str(input_path)]
+            cmd += ["--maf", str(min_maf)]
         else:
-            cmd += ["--vcf", str(bcf_path)]
+            cmd += ["--vcf", str(input_path)]
+            cmd += ["--maf", str(min_maf)]
 
         cmd += [
             "--allow-extra-chr",
             "--indep-pairwise", f"{window_kb}kb", str(step), str(r2_thresh),
-            "--maf", str(min_maf),
             "--out", out_prefix,
         ]
 

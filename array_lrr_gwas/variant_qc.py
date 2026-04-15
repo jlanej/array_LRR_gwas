@@ -163,6 +163,7 @@ def variant_qc_mask(
     require_call_rate: bool = True,
     require_hwe: bool = True,
     require_maf: bool = False,
+    require_qc_pass: bool = False,
     audit: object | None = None,
     audit_stage: str = "variant_qc",
 ) -> NDArray[np.bool_]:
@@ -185,6 +186,15 @@ def variant_qc_mask(
         If ``True``, variants failing ``all_ancestries_maf_pass`` are
         masked out.  Default ``False`` (appropriate for RSVD); set
         ``True`` for GRM construction.
+    require_qc_pass : bool
+        If ``True``, use ``all_ancestries_qc_pass`` as the **sole** filter
+        criterion when that composite column is present.  Because
+        ``all_ancestries_qc_pass`` is ``True`` only when call rate, HWE,
+        and MAF all pass, this is the most concise and correct single-column
+        gate.  When the composite column is absent from the QC file, the
+        function falls back to the individual ``require_call_rate``,
+        ``require_hwe``, and ``require_maf`` flags.  Default ``False``
+        (preserves existing behaviour).
     audit : AuditLogger or None
         Optional :class:`~array_lrr_gwas.audit.AuditLogger` instance.
         When provided, included/excluded variants and reasons are
@@ -210,11 +220,37 @@ def variant_qc_mask(
         )
         return np.ones(n, dtype=bool)
 
+    # Log which criteria will be applied.
+    _active_criteria: list[str] = []
+    if require_qc_pass:
+        _active_criteria.append(
+            "all_ancestries_qc_pass (composite; falls back to individual columns "
+            "when absent)"
+        )
+    else:
+        if require_call_rate:
+            _active_criteria.append("all_ancestries_call_rate_pass")
+        if require_hwe:
+            _active_criteria.append("all_ancestries_hwe_pass")
+        if require_maf:
+            _active_criteria.append("all_ancestries_maf_pass")
+    logger.info(
+        "[%s] Applying variant QC to %d variant(s) using criteria: %s",
+        audit_stage, n, ", ".join(_active_criteria) if _active_criteria else "none",
+    )
+
     # --- Build mask in variant_ids order ---------------------------------
     mask = np.ones(n, dtype=bool)
     missing_ids: list[str] = []
     # Track per-variant exclusion reasons for audit trail
     excluded_with_reason: dict[str, str] = {}
+
+    # Per-criterion counters for progress logging.
+    n_fail_call_rate = 0
+    n_fail_hwe = 0
+    n_fail_maf = 0
+    n_fail_qc_pass = 0
+    n_fail_not_in_qc = 0
 
     for i, vid in enumerate(ids):
         rec = qc_data.get(str(vid))
@@ -223,14 +259,40 @@ def variant_qc_mask(
             # Treat missing QC data as failing — conservative default.
             mask[i] = False
             excluded_with_reason[vid] = "not_in_variant_qc"
+            n_fail_not_in_qc += 1
             continue
+
         reasons: list[str] = []
-        if require_call_rate and not rec.call_rate_pass:
-            reasons.append("failed_call_rate")
-        if require_hwe and not rec.hwe_pass:
-            reasons.append("failed_hwe")
-        if require_maf and not rec.maf_pass:
-            reasons.append("failed_maf")
+
+        if require_qc_pass:
+            if rec.qc_pass is not None:
+                # Composite column present — use it as the sole criterion.
+                # It is True only when call_rate, HWE, and MAF all pass.
+                if not rec.qc_pass:
+                    reasons.append("failed_qc_pass")
+                    n_fail_qc_pass += 1
+            else:
+                # Composite column absent — fall back to individual checks.
+                if require_call_rate and not rec.call_rate_pass:
+                    reasons.append("failed_call_rate")
+                    n_fail_call_rate += 1
+                if require_hwe and not rec.hwe_pass:
+                    reasons.append("failed_hwe")
+                    n_fail_hwe += 1
+                if require_maf and not rec.maf_pass:
+                    reasons.append("failed_maf")
+                    n_fail_maf += 1
+        else:
+            if require_call_rate and not rec.call_rate_pass:
+                reasons.append("failed_call_rate")
+                n_fail_call_rate += 1
+            if require_hwe and not rec.hwe_pass:
+                reasons.append("failed_hwe")
+                n_fail_hwe += 1
+            if require_maf and not rec.maf_pass:
+                reasons.append("failed_maf")
+                n_fail_maf += 1
+
         if reasons:
             mask[i] = False
             excluded_with_reason[vid] = ";".join(reasons)
@@ -266,6 +328,28 @@ def variant_qc_mask(
             n_extra,
             sample_extra,
         )
+
+    # --- Per-criterion progress summary ----------------------------------
+    n_pass = int(mask.sum())
+    n_fail = n - n_pass
+    _criterion_detail: list[str] = []
+    if require_call_rate and n_fail_call_rate:
+        _criterion_detail.append(f"call_rate={n_fail_call_rate}")
+    if require_hwe and n_fail_hwe:
+        _criterion_detail.append(f"hwe={n_fail_hwe}")
+    if require_maf and n_fail_maf:
+        _criterion_detail.append(f"maf={n_fail_maf}")
+    if require_qc_pass and n_fail_qc_pass:
+        _criterion_detail.append(f"qc_pass={n_fail_qc_pass}")
+    if n_fail_not_in_qc:
+        _criterion_detail.append(f"not_in_qc={n_fail_not_in_qc}")
+    _detail_str = " | ".join(_criterion_detail) if _criterion_detail else "none"
+    logger.info(
+        "[%s] Variant QC result: %d / %d pass (%.1f%%) — "
+        "excluded by criterion: %s",
+        audit_stage, n_pass, n, 100.0 * n_pass / n if n > 0 else 0.0,
+        _detail_str,
+    )
 
     # --- Record audit trail if logger is provided ------------------------
     if audit is not None:

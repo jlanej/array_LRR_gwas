@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from array_lrr_gwas.audit import AuditLogger, AuditRecord
+from tests import mock_associate_io
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +164,12 @@ class TestAuditLoggerOutput:
         assert rows[0]["stage"] == "s1"
         assert rows[0]["total_included"] == "2"
         assert rows[0]["total_excluded"] == "1"
+        assert "included_fraction" in rows[0]
+        assert "excluded_fraction" in rows[0]
         assert rows[1]["stage"] == "s2"
         assert rows[1]["total_excluded"] == "2"
+        assert "included_fraction" in rows[1]
+        assert "excluded_fraction" in rows[1]
 
 
 class TestAuditLoggerLogging:
@@ -468,6 +473,7 @@ class TestInVariantQcColumn:
 
         class _FakeResult:
             chrom = np.array(["chr1", "chr1", "chr1"])
+            variant_id = ["a1", "a2", "a3"]
             p_value = np.array([1.0, 1.0, 1.0])
             stat = np.array([0.0, 0.0, 0.0])
             beta = np.array([0.0, 0.0, 0.0])
@@ -487,13 +493,17 @@ class TestInVariantQcColumn:
                      "n_samples": 3, "method": "ols"},
                 ]
 
+        mock_associate_io(monkeypatch, lrr, samples, variants)
         monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda *a, **kw: (lrr.copy(), list(samples), list(variants)),
-        )
-        monkeypatch.setattr(
-            "array_lrr_gwas.association.run_association",
-            lambda *a, **kw: _FakeResult(),
+            "array_lrr_gwas.association.run_association_streaming",
+            lambda *a, **kw: (_FakeResult(), {
+                "n_total": len(variants),
+                "n_tested": len(_FakeResult.chrom),
+                "n_intensity_only": 0,
+                "n_monomorphic": 0,
+                "excluded_markers": {},
+                "tested_mono_flags": [False] * len(_FakeResult.chrom),
+            }),
         )
 
         # Write phenotype
@@ -548,6 +558,7 @@ class TestInVariantQcColumn:
 
         class _FakeResult:
             chrom = np.array(["chr1", "chr1"])
+            variant_id = ["a1", "a2"]
             p_value = np.array([1.0, 1.0])
             stat = np.array([0.0, 0.0])
             beta = np.array([0.0, 0.0])
@@ -564,13 +575,17 @@ class TestInVariantQcColumn:
                      "n_samples": 2, "method": "ols"},
                 ]
 
+        mock_associate_io(monkeypatch, lrr, samples, variants)
         monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda *a, **kw: (lrr.copy(), list(samples), list(variants)),
-        )
-        monkeypatch.setattr(
-            "array_lrr_gwas.association.run_association",
-            lambda *a, **kw: _FakeResult(),
+            "array_lrr_gwas.association.run_association_streaming",
+            lambda *a, **kw: (_FakeResult(), {
+                "n_total": len(variants),
+                "n_tested": len(_FakeResult.chrom),
+                "n_intensity_only": 0,
+                "n_monomorphic": 0,
+                "excluded_markers": {},
+                "tested_mono_flags": [False] * len(_FakeResult.chrom),
+            }),
         )
 
         pheno = tmp_path / "pheno.tsv"
@@ -619,6 +634,7 @@ class TestAuditDirCli:
 
         class _FakeResult:
             chrom = np.array(["chr1", "chr1", "chr1"])
+            variant_id = ["a1", "a2", "a3"]
             p_value = np.array([1.0, 1.0, 1.0])
             stat = np.array([0.0, 0.0, 0.0])
             beta = np.array([0.0, 0.0, 0.0])
@@ -638,13 +654,17 @@ class TestAuditDirCli:
                      "n_samples": 3, "method": "ols"},
                 ]
 
+        mock_associate_io(monkeypatch, lrr, samples, variants)
         monkeypatch.setattr(
-            "array_lrr_gwas.io_vcf.read_lrr",
-            lambda *a, **kw: (lrr.copy(), list(samples), list(variants)),
-        )
-        monkeypatch.setattr(
-            "array_lrr_gwas.association.run_association",
-            lambda *a, **kw: _FakeResult(),
+            "array_lrr_gwas.association.run_association_streaming",
+            lambda *a, **kw: (_FakeResult(), {
+                "n_total": len(variants),
+                "n_tested": len(_FakeResult.chrom),
+                "n_intensity_only": 0,
+                "n_monomorphic": 0,
+                "excluded_markers": {},
+                "tested_mono_flags": [False] * len(_FakeResult.chrom),
+            }),
         )
 
         pheno = tmp_path / "pheno.tsv"
