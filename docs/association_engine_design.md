@@ -113,12 +113,15 @@ Two backends are available:
 
 | Backend  | When to use                              |
 |----------|------------------------------------------|
-| `plink2` | Default. Fastest on large datasets; uses |
+| `plink2` | **Default and required.** Fastest on     |
+|          | large datasets; uses                     |
 |          | `plink2 --indep-pairwise`. Requires      |
 |          | `plink2` on `$PATH` (included in Docker  |
-|          | image).                                  |
-| `numpy`  | No external tools; fallback backend when |
-|          | plink2 is unavailable or not desired.    |
+|          | image). If plink2 is not found, the      |
+|          | pipeline exits with an error.            |
+| `numpy`  | Explicit fallback via `--ld-backend       |
+|          | numpy`. No external tools needed. Must   |
+|          | be requested explicitly.                 |
 
 CLI flags:
 
@@ -131,10 +134,47 @@ CLI flags:
 
 ## Scalability
 
-Both the OLS and LMM association scans process markers in chunks
-(default: 10 000) so that only `chunk_size × n_samples` floats are
-ever resident at once.  For LMM, the eigendecomposition and null-model
-REML fit are performed once; only the per-marker WLS scan is chunked.
+The association pipeline uses a **streaming architecture** that never holds
+the full sample × marker LRR matrix in RAM:
+
+1. **Metadata scan** — `read_variant_metadata()` reads only variant-level
+   metadata (chrom, pos, id, intensity_only flag) and sample IDs from the
+   BCF header.  No `FORMAT/LRR` values are loaded.
+2. **Metadata-based pre-filter** — INTENSITY_ONLY markers are excluded via
+   a boolean mask *before* any LRR values are read.
+3. **Chunked LRR streaming** — `stream_lrr_chunks()` yields
+   `(lrr_chunk, variants_chunk)` tuples with at most `chunk_size` markers
+   each.  `sample_mask` and `variant_mask` ensure that only the relevant
+   subset of the BCF is decoded.
+4. **Streaming association** — `run_association_streaming()` consumes the
+   chunk generator, applies per-chunk monomorphic-LRR filtering inline,
+   and accumulates per-marker results without materialising the full
+   matrix.
+
+Peak RAM is bounded by `chunk_size × n_samples` floats (plus the GRM
+when using LMM).  For the default chunk size of 5 000 and 10 000 samples,
+this is about 400 MB — well within typical workstation limits.
+
+## Sex-Chromosome Analysis
+
+The `--sex-chr-mode` CLI option runs additional association scans on sex
+chromosomes.  Four modes are supported:
+
+| Mode | Chromosome | Sample subset | Extra covariates |
+|------|-----------|--------------|-----------------|
+| `x_with_sex_covariate` | chrX | All | Sex (binary) |
+| `x_male_only` | chrX | Males only | — |
+| `x_female_only` | chrX | Females only | — |
+| `y_male_only` | chrY | Males only | — |
+
+Each mode writes a separate TSV file alongside the main output
+(e.g. `results.x_male_only.tsv`).  Sex-chromosome scans always use OLS
+(no GRM) because the autosomal GRM is not appropriate for sex-linked
+markers.
+
+Requires `--sample-sheet` with a `predicted_sex` column (1 = male,
+2 = female).  Modes with fewer than 3 qualifying samples are skipped
+with a warning.
 
 ## Logistic Regression and Relatedness
 

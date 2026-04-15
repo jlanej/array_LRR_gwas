@@ -645,6 +645,27 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     assoc.add_argument(
+        "--sex-chr-mode",
+        type=str,
+        nargs="*",
+        default=None,
+        choices=[
+            "x_with_sex_covariate",
+            "x_male_only",
+            "x_female_only",
+            "y_male_only",
+        ],
+        help=(
+            "Run additional sex-chromosome association scans.  Multiple "
+            "modes may be listed.  Requires --sample-sheet with a "
+            "'predicted_sex' column (1=male, 2=female).  "
+            "Modes: x_with_sex_covariate — chrX with sex as a binary "
+            "covariate; x_male_only — chrX males only; x_female_only — "
+            "chrX females only; y_male_only — chrY males only.  Each "
+            "mode writes a separate TSV alongside the main output."
+        ),
+    )
+    assoc.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -1290,12 +1311,11 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
 def _run_associate(args: argparse.Namespace) -> int:
     """Execute the ``associate`` sub-command."""
     import csv
-    import warnings
 
     import numpy as np
 
     from array_lrr_gwas.audit import AuditLogger
-    from array_lrr_gwas.association import run_association, run_association_streaming
+    from array_lrr_gwas.association import run_association_streaming
     from array_lrr_gwas.io_vcf import read_variant_metadata, stream_lrr_chunks
     from array_lrr_gwas.qc_config import defaults, load_config, apply_to_associate_args
 
@@ -2066,6 +2086,163 @@ def _run_associate(args: argparse.Namespace) -> int:
         writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
         writer.writeheader()
         writer.writerows(records)
+
+    # ------------------------------------------------------------------
+    # Sex-chromosome analysis modes
+    # ------------------------------------------------------------------
+    sex_chr_modes = getattr(args, "sex_chr_mode", None) or []
+    if sex_chr_modes:
+        _X_CHROMS = {"chrX", "X"}
+        _Y_CHROMS = {"chrY", "Y"}
+
+        if args.sample_sheet is None:
+            logger.error(
+                "Sex-chromosome modes require --sample-sheet with a "
+                "'predicted_sex' column (1=male, 2=female)."
+            )
+            return 1
+
+        from array_lrr_gwas.sample_sheet import read_sample_sheet as _read_ss
+
+        _sx_ids, _sx_covs, _sx_names = _read_ss(
+            args.sample_sheet, n_pcs=0,
+            extra_covariates=["predicted_sex"],
+        )
+        _sex_idx = (
+            _sx_names.index("predicted_sex")
+            if "predicted_sex" in _sx_names else None
+        )
+        if _sex_idx is None:
+            logger.error(
+                "'predicted_sex' column not found in sample sheet %s. "
+                "Required for sex-chromosome analysis.",
+                args.sample_sheet,
+            )
+            return 1
+
+        # Build per-sample sex lookup (1=male, 2=female).
+        _sex_map: dict[str, int] = {}
+        for _sid, _row in zip(_sx_ids, _sx_covs):
+            v = _row[_sex_idx]
+            if np.isfinite(v):
+                _sex_map[_sid] = int(v)
+
+        _analyzed_ids = [
+            samples[i] for i in range(len(samples)) if analyzed_mask[i]
+        ]
+        _sample_sex = np.array(
+            [_sex_map.get(s, 0) for s in _analyzed_ids], dtype=int,
+        )
+        _male = _sample_sex == 1
+        _female = _sample_sex == 2
+
+        _x_vmask = np.array(
+            [v.get("chrom", "") in _X_CHROMS for v in variants], dtype=bool,
+        ) & variant_mask
+        _y_vmask = np.array(
+            [v.get("chrom", "") in _Y_CHROMS for v in variants], dtype=bool,
+        ) & variant_mask
+
+        out_stem = args.output.stem
+        out_sfx = args.output.suffix
+        out_dir = args.output.parent
+
+        for mode in sex_chr_modes:
+            logger.info("Running sex-chromosome mode: %s", mode)
+
+            if mode in ("x_with_sex_covariate", "x_male_only", "x_female_only"):
+                _mv = _x_vmask
+            elif mode == "y_male_only":
+                _mv = _y_vmask
+            else:
+                logger.warning("Unknown sex-chr-mode %s; skipping.", mode)
+                continue
+
+            n_mv = int(_mv.sum())
+            if n_mv == 0:
+                logger.warning(
+                    "No sex-chr variants for mode %s; skipping.", mode,
+                )
+                continue
+
+            # Choose sample subset and extra covariates per mode.
+            if mode == "x_with_sex_covariate":
+                _sub_mask = analyzed_mask.copy()
+                _sub_pheno = phenotype
+                _sex_cov = _male.astype(float)[:, np.newaxis]
+                _sub_cov = (
+                    np.column_stack([covariates, _sex_cov])
+                    if covariates is not None else _sex_cov
+                )
+            elif mode == "x_male_only":
+                _sub_mask = analyzed_mask.copy()
+                # Narrow to males within the already-analyzed set.
+                _tmp = np.zeros(len(samples), dtype=bool)
+                _tmp[analyzed_mask] = _male
+                _sub_mask = _tmp
+                _sub_pheno = phenotype[_male]
+                _sub_cov = covariates[_male] if covariates is not None else None
+            elif mode == "x_female_only":
+                _sub_mask = analyzed_mask.copy()
+                _tmp = np.zeros(len(samples), dtype=bool)
+                _tmp[analyzed_mask] = _female
+                _sub_mask = _tmp
+                _sub_pheno = phenotype[_female]
+                _sub_cov = covariates[_female] if covariates is not None else None
+            else:  # y_male_only
+                _sub_mask = analyzed_mask.copy()
+                _tmp = np.zeros(len(samples), dtype=bool)
+                _tmp[analyzed_mask] = _male
+                _sub_mask = _tmp
+                _sub_pheno = phenotype[_male]
+                _sub_cov = covariates[_male] if covariates is not None else None
+
+            n_sub = int(_sub_mask.sum())
+            if n_sub < 3:
+                logger.warning(
+                    "Fewer than 3 samples for mode %s (%d); skipping.",
+                    mode, n_sub,
+                )
+                continue
+
+            logger.info(
+                "Sex-chr mode %s: %d variants, %d samples",
+                mode, n_mv, n_sub,
+            )
+
+            _sx_stream = stream_lrr_chunks(
+                input_path, chunk_size=5000,
+                sample_mask=_sub_mask, variant_mask=_mv,
+            )
+            _sx_res, _sx_excl = run_association_streaming(
+                _sx_stream,
+                _sub_pheno,
+                covariates=_sub_cov,
+                method="ols",  # no GRM for sex-chr
+                exclude_monomorphic=exclude_monomorphic,
+                exclude_intensity_only=False,
+            )
+
+            _sx_path = out_dir / f"{out_stem}.{mode}{out_sfx}"
+            _sx_recs = _sx_res.to_records()
+            if _sx_recs:
+                _sh = list(_sx_recs[0].keys())
+                with open(_sx_path, "w", newline="") as fh:
+                    w = csv.DictWriter(fh, fieldnames=_sh, delimiter="\t")
+                    w.writeheader()
+                    w.writerows(_sx_recs)
+
+            logger.info(
+                "Sex-chr mode %s: %d markers tested → %s",
+                mode, _sx_excl["n_tested"], _sx_path,
+            )
+
+            audit.record(
+                stage=f"sex_chr_{mode}",
+                id_type="marker",
+                included=list(_sx_res.variant_id),
+                excluded=_sx_excl["excluded_markers"],
+            )
 
     # Write audit trail if requested
     audit_dir = getattr(args, "audit_dir", None)
