@@ -176,10 +176,10 @@ def ld_prune_plink2(
     ----------
     input_path : str or Path
         Path to BCF/VCF with ``FORMAT/GT``, **or** the prefix of a plink2
-        BED/BIM/FAM fileset (with or without the ``.bed`` extension).
-        When a BED fileset is provided, plink2 uses ``--bfile`` and skips
-        the ``--maf`` re-filter (variants were already QC-filtered during
-        BED generation).
+        BED/BIM/FAM fileset (with ``.bed``, ``.bim``, or ``.fam`` extension,
+        or bare prefix).  When a BED fileset is provided, plink2 uses
+        ``--bfile`` and skips the ``--maf`` re-filter (variants were already
+        QC-filtered during BED generation).
     window_kb : int
         Window size in kilobases (default: 1000).
     step : int
@@ -215,7 +215,7 @@ def ld_prune_plink2(
         out_prefix = str(Path(tmp) / "prune")
         cmd: list[str] = ["plink2"]
 
-        if suffix == ".bed":
+        if suffix in (".bed", ".bim", ".fam"):
             # plink1 BED fileset — strip extension to get prefix
             bfile_prefix = str(input_path.with_suffix(""))
             cmd += ["--bfile", bfile_prefix]

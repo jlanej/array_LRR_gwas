@@ -1739,7 +1739,17 @@ def _run_associate(args: argparse.Namespace) -> int:
                 "Scanning genotype file metadata from %s (plink2 path)",
                 gt_path,
             )
-            gt_samples, gt_variant_metas = _read_gt_meta(gt_path)
+            try:
+                gt_samples, gt_variant_metas = _read_gt_meta(gt_path)
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                logger.error(
+                    "Failed to read genotype file metadata from %s: %s. "
+                    "Ensure the file exists, has FORMAT/GT, and is a valid "
+                    "BCF/VCF (or use --genotype-bcf to specify a separate "
+                    "genotype file).",
+                    gt_path, exc,
+                )
+                return 1
             gt_variant_ids = [_variant_id(v) for v in gt_variant_metas]
             logger.info(
                 "%d genotype variants, %d samples in %s",

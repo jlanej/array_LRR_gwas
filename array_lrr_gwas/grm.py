@@ -113,7 +113,20 @@ def _read_bim_variant_ids(bim_path: str | Path) -> list[str]:
     """Read variant IDs (column 2) from a plink1 BIM file.
 
     BIM columns: chrom, variant_id, cm, pos, alt, ref
+
+    Raises
+    ------
+    FileNotFoundError
+        If *bim_path* does not exist.
+    ValueError
+        If *bim_path* is empty or contains no valid variant IDs.
     """
+    bim_path = Path(bim_path)
+    if not bim_path.exists():
+        raise FileNotFoundError(
+            f"plink2 BIM file not found: {bim_path}. "
+            "Ensure that make_plink2_bed() completed successfully."
+        )
     ids: list[str] = []
     with open(bim_path) as fh:
         for line in fh:
@@ -126,11 +139,12 @@ def _read_bim_variant_ids(bim_path: str | Path) -> list[str]:
 def _plink2_input_args(input_path: Path) -> list[str]:
     """Return the plink2 input flag(s) for *input_path*.
 
-    Supports BCF, VCF, and plink1 BED filesets.  When a ``.bed`` suffix is
-    detected the prefix (without extension) is used with ``--bfile``.
+    Supports BCF, VCF, and plink1 BED filesets.  When a ``.bed``, ``.bim``,
+    or ``.fam`` suffix is detected, the prefix (without extension) is used
+    with ``--bfile``.
     """
     suffix = input_path.suffix.lower()
-    if suffix == ".bed":
+    if suffix in (".bed", ".bim", ".fam"):
         return ["--bfile", str(input_path.with_suffix(""))]
     if suffix == ".bcf":
         return ["--bcf", str(input_path)]
