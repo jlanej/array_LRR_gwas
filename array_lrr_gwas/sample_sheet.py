@@ -364,7 +364,19 @@ class ExclusionResult(NamedTuple):
     Attributes
     ----------
     hq_ids : set of str
-        Sample IDs passing all enabled exclusion criteria.
+        Sample IDs passing **all** enabled exclusion criteria, including
+        relatedness-based flags.  Used as the unrelated sample set for
+        LD pruning during GRM marker selection.
+    grm_ids : set of str
+        Sample IDs passing all **technical** QC criteria but allowing
+        relatedness-based exclusions (``pre_pca_excluded`` and
+        ``excluded_relatedness``).  This is the recommended set for GRM
+        computation and association analysis: the LMM random effect already
+        accounts for cryptic relatedness, so related samples should remain
+        in the analysis.  Only hard technical failures (low call rate,
+        high LRR SD, het outlier, high BAF SD, sex discordance, extreme
+        inbreeding coefficient) exclude samples from ``grm_ids``.
+        ``hq_ids`` is always a subset of ``grm_ids``.
     counts : dict of str to int
         Number of samples excluded by each category.  Keys include
         ``"low_call_rate"``, ``"high_lrr_sd"``, ``"pre_pca_excluded"``,
@@ -379,6 +391,7 @@ class ExclusionResult(NamedTuple):
     """
 
     hq_ids: set[str]
+    grm_ids: set[str]
     counts: dict[str, int]
     total: int
     excluded_reasons: dict[str, list[str]]
@@ -435,25 +448,35 @@ def classify_samples_for_association(
     **Pre-computed upstream exclusions** (``honor_precomputed=True``):
 
     * ``pre_pca_excluded`` — sample excluded before ancestry PCA
-      (e.g. failed upstream genotype QC).
+      (e.g. failed upstream genotype QC or kinship pruning).
+      This is treated as a **soft** exclusion: the sample is excluded
+      from LD pruning (``hq_ids``) but included in the GRM and
+      association analysis (``grm_ids``), because the LMM random effect
+      already accounts for population structure and relatedness.
     * ``excluded_relatedness`` — removed as part of a related pair
       (typically up to 2nd degree, kinship > 0.0884; UK Biobank and
-      TOPMed convention).  While the GRM/LMM can correct for moderate
-      kinship, removing close relatives reduces bias in effect estimates
-      and avoids overcounting families.
+      TOPMed convention).  This is a **soft** exclusion: related samples
+      are excluded from LD pruning (to keep marker LD estimates
+      unbiased) but are re-included in the GRM and association analysis,
+      where the LMM handles relatedness via the random effect.
+      Note: in many pipelines ``pre_pca_excluded`` and
+      ``excluded_relatedness`` are set simultaneously during the same
+      kinship pruning step.
     * ``excluded_het_outlier`` — extreme heterozygosity outlier,
-      suggesting potential DNA contamination or sample mix-up.
+      suggesting potential DNA contamination or sample mix-up.  This is
+      a **hard** exclusion: samples are removed from both LD pruning and
+      the GRM.
 
     **Optional exclusions** (enabled by default per user request):
 
     * ``exclude_baf_sd`` — high BAF standard deviation (> ``max_baf_sd``,
       default 0.15) indicates potential sample contamination
-      (Marees et al. 2018).
+      (Marees et al. 2018).  Hard exclusion.
     * ``exclude_sex_discordant`` — ``sex_status == "DISCORDANT"``
-      flags possible sample swaps (Anderson et al. 2010).
+      flags possible sample swaps (Anderson et al. 2010).  Hard exclusion.
     * ``exclude_extreme_inbreeding`` — |inbreeding_F| > threshold
       (default 0.15) as a safety net for extreme population structure
-      or sample issues (Anderson et al. 2010).
+      or sample issues (Anderson et al. 2010).  Hard exclusion.
 
     Missing columns for optional criteria are silently skipped (with a
     logged info message).  Missing or non-parseable values for a sample
@@ -469,7 +492,10 @@ def classify_samples_for_association(
         Minimum per-sample genotype call rate.
     honor_precomputed : bool
         If True (default), exclude samples flagged by ``pre_pca_excluded``,
-        ``excluded_relatedness``, or ``excluded_het_outlier``.
+        ``excluded_relatedness``, or ``excluded_het_outlier`` from
+        ``hq_ids`` (for LD pruning).  ``pre_pca_excluded`` and
+        ``excluded_relatedness`` are soft exclusions: those samples are
+        still included in ``grm_ids`` (for GRM and association analysis).
     exclude_baf_sd : bool
         If True (default), exclude samples with ``baf_sd > max_baf_sd``.
     max_baf_sd : float
@@ -490,7 +516,9 @@ def classify_samples_for_association(
     Returns
     -------
     ExclusionResult
-        Named tuple with ``hq_ids`` (set of str), ``counts`` (dict),
+        Named tuple with ``hq_ids`` (unrelated, all-QC-passing, for LD
+        pruning), ``grm_ids`` (all technical-QC-passing including related
+        samples, for GRM and association analysis), ``counts`` (dict),
         and ``total`` (int).
 
     Raises
@@ -591,6 +619,7 @@ def classify_samples_for_association(
         }
         total = 0
         hq_ids: set[str] = set()
+        grm_ids: set[str] = set()
         per_sample_reasons: dict[str, list[str]] = {}
 
         for row in reader:
@@ -599,9 +628,15 @@ def classify_samples_for_association(
                 continue
             total += 1
             excluded = False
+            # grm_excluded tracks hard technical QC failures only; soft
+            # exclusions (pre_pca_excluded, excluded_relatedness) set
+            # excluded=True (removing from hq_ids/LD pruning) but leave
+            # grm_excluded=False so the sample stays in grm_ids (GRM +
+            # association analysis).
+            grm_excluded = False
             reasons: list[str] = []
 
-            # Core QC: call rate
+            # Core QC: call rate (hard exclusion)
             try:
                 cr = float(row.get(resolved_cr, ""))
             except (TypeError, ValueError):
@@ -609,9 +644,10 @@ def classify_samples_for_association(
             if cr is None or cr < min_call_rate:
                 counts["low_call_rate"] += 1
                 excluded = True
+                grm_excluded = True
                 reasons.append("low_call_rate")
 
-            # Core QC: LRR SD
+            # Core QC: LRR SD (hard exclusion)
             try:
                 sd = float(row.get(resolved_sd, ""))
             except (TypeError, ValueError):
@@ -619,24 +655,37 @@ def classify_samples_for_association(
             if sd is None or sd > max_lrr_sd:
                 counts["high_lrr_sd"] += 1
                 excluded = True
+                grm_excluded = True
                 reasons.append("high_lrr_sd")
 
             # Pre-computed exclusions
             if honor_precomputed:
+                # Soft exclusion: pre_pca_excluded samples are removed from
+                # hq_ids (LD pruning) but kept in grm_ids (GRM + association).
+                # In many pipelines this flag co-occurs with excluded_relatedness
+                # because the same kinship pruning step sets both flags.
                 if has_pre_pca and _parse_bool_field(row.get(resolved_pre_pca)) is True:
                     counts["pre_pca_excluded"] += 1
                     excluded = True
                     reasons.append("pre_pca_excluded")
+                # Soft exclusion: excluded_relatedness samples are removed from
+                # hq_ids (LD pruning) but retained in grm_ids (GRM + association).
+                # The LMM random effect handles relatedness via the GRM; excluding
+                # related samples from the analysis would reduce power and is
+                # inconsistent with best-practice LMM usage.
                 if has_relatedness and _parse_bool_field(row.get(resolved_relatedness)) is True:
                     counts["excluded_relatedness"] += 1
                     excluded = True
                     reasons.append("excluded_relatedness")
+                # Hard exclusion: het outliers indicate contamination or mix-up
+                # and should be excluded from both LD pruning and GRM.
                 if has_het_outlier and _parse_bool_field(row.get(resolved_het_outlier)) is True:
                     counts["excluded_het_outlier"] += 1
                     excluded = True
+                    grm_excluded = True
                     reasons.append("excluded_het_outlier")
 
-            # BAF SD exclusion (contamination proxy)
+            # BAF SD exclusion (contamination proxy — hard exclusion)
             if exclude_baf_sd and has_baf_sd:
                 try:
                     baf = float(row.get(resolved_baf_sd, ""))
@@ -645,17 +694,19 @@ def classify_samples_for_association(
                 if baf is not None and baf > max_baf_sd:
                     counts["high_baf_sd"] += 1
                     excluded = True
+                    grm_excluded = True
                     reasons.append("high_baf_sd")
 
-            # Sex discordance exclusion
+            # Sex discordance exclusion (hard exclusion)
             if exclude_sex_discordant and has_sex_status:
                 sex_val = (row.get(resolved_sex_status) or "").strip().upper()
                 if sex_val == "DISCORDANT":
                     counts["sex_discordant"] += 1
                     excluded = True
+                    grm_excluded = True
                     reasons.append("sex_discordant")
 
-            # Extreme inbreeding F exclusion
+            # Extreme inbreeding F exclusion (hard exclusion)
             if exclude_extreme_inbreeding and has_inbreeding:
                 try:
                     f_val = float(row.get(resolved_inbreeding, ""))
@@ -664,6 +715,7 @@ def classify_samples_for_association(
                 if f_val is not None and abs(f_val) > max_abs_inbreeding_f:
                     counts["extreme_inbreeding_f"] += 1
                     excluded = True
+                    grm_excluded = True
                     reasons.append("extreme_inbreeding_f")
 
             if excluded:
@@ -672,7 +724,10 @@ def classify_samples_for_association(
             else:
                 hq_ids.add(sid)
 
+            if not grm_excluded:
+                grm_ids.add(sid)
+
     return ExclusionResult(
-        hq_ids=hq_ids, counts=counts, total=total,
+        hq_ids=hq_ids, grm_ids=grm_ids, counts=counts, total=total,
         excluded_reasons=per_sample_reasons,
     )

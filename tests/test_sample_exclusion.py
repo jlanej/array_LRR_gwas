@@ -81,6 +81,8 @@ class TestAssociationExclusionCoreQC:
         )
         assert isinstance(result, ExclusionResult)
         assert result.hq_ids == {"S1", "S4"}
+        # Core QC failures are hard: grm_ids == hq_ids
+        assert result.grm_ids == {"S1", "S4"}
         assert result.total == 4
         assert result.counts["low_call_rate"] == 1
         assert result.counts["high_lrr_sd"] == 1
@@ -153,6 +155,8 @@ class TestPrecomputedExclusions:
         )
         assert result.hq_ids == {"S1"}
         assert result.counts["pre_pca_excluded"] == 1
+        # pre_pca_excluded is a soft exclusion: S2 is still in grm_ids
+        assert result.grm_ids == {"S1", "S2"}
 
     def test_excluded_relatedness(self, tmp_path):
         tsv = _write_sheet(tmp_path, [
@@ -167,6 +171,8 @@ class TestPrecomputedExclusions:
         )
         assert result.hq_ids == set()
         assert result.counts["excluded_relatedness"] == 1
+        # excluded_relatedness is a soft exclusion: S1 is in grm_ids
+        assert result.grm_ids == {"S1"}
 
     def test_excluded_het_outlier(self, tmp_path):
         tsv = _write_sheet(tmp_path, [
@@ -181,6 +187,8 @@ class TestPrecomputedExclusions:
         )
         assert result.hq_ids == set()
         assert result.counts["excluded_het_outlier"] == 1
+        # excluded_het_outlier is a hard exclusion: S1 is not in grm_ids either
+        assert result.grm_ids == set()
 
     def test_honor_precomputed_off(self, tmp_path):
         """When honor_precomputed=False, pre-computed flags are ignored."""
@@ -195,6 +203,7 @@ class TestPrecomputedExclusions:
             exclude_extreme_inbreeding=False,
         )
         assert result.hq_ids == {"S1"}
+        assert result.grm_ids == {"S1"}
         assert result.counts["pre_pca_excluded"] == 0
         assert result.counts["excluded_relatedness"] == 0
         assert result.counts["excluded_het_outlier"] == 0
@@ -379,27 +388,27 @@ class TestCombinedExclusions:
              "pre_pca_excluded": "false", "excluded_relatedness": "false",
              "excluded_het_outlier": "false", "baf_sd": "0.05",
              "sex_status": "OK", "inbreeding_F": "0.01"},
-            # Excluded: low call rate
+            # Excluded: low call rate (hard QC failure → excluded from grm_ids too)
             {"Sample_ID": "S2", "call_rate": "0.90", "lrr_sd": "0.10",
              "pre_pca_excluded": "false", "excluded_relatedness": "false",
              "excluded_het_outlier": "false", "baf_sd": "0.05",
              "sex_status": "OK", "inbreeding_F": "0.01"},
-            # Excluded: related
+            # Soft-excluded: related only (in grm_ids, not in hq_ids)
             {"Sample_ID": "S3", "call_rate": "0.99", "lrr_sd": "0.10",
              "pre_pca_excluded": "false", "excluded_relatedness": "true",
              "excluded_het_outlier": "false", "baf_sd": "0.05",
              "sex_status": "OK", "inbreeding_F": "0.01"},
-            # Excluded: high BAF SD
+            # Excluded: high BAF SD (hard QC failure → excluded from grm_ids too)
             {"Sample_ID": "S4", "call_rate": "0.99", "lrr_sd": "0.10",
              "pre_pca_excluded": "false", "excluded_relatedness": "false",
              "excluded_het_outlier": "false", "baf_sd": "0.50",
              "sex_status": "OK", "inbreeding_F": "0.01"},
-            # Excluded: sex discordant
+            # Excluded: sex discordant (hard QC failure)
             {"Sample_ID": "S5", "call_rate": "0.99", "lrr_sd": "0.10",
              "pre_pca_excluded": "false", "excluded_relatedness": "false",
              "excluded_het_outlier": "false", "baf_sd": "0.05",
              "sex_status": "DISCORDANT", "inbreeding_F": "0.01"},
-            # Excluded: extreme inbreeding
+            # Excluded: extreme inbreeding (hard QC failure)
             {"Sample_ID": "S6", "call_rate": "0.99", "lrr_sd": "0.10",
              "pre_pca_excluded": "false", "excluded_relatedness": "false",
              "excluded_het_outlier": "false", "baf_sd": "0.05",
@@ -412,6 +421,8 @@ class TestCombinedExclusions:
         ], cols=self._ALL_COLS)
         result = classify_samples_for_association(tsv)
         assert result.hq_ids == {"S1", "S7"}
+        # S3 is related (soft exclusion): in grm_ids but not hq_ids
+        assert result.grm_ids == {"S1", "S3", "S7"}
         assert result.total == 7
         assert result.counts["low_call_rate"] == 1
         assert result.counts["excluded_relatedness"] == 1
@@ -430,6 +441,9 @@ class TestCombinedExclusions:
         ], cols=self._ALL_COLS)
         result = classify_samples_for_association(tsv)
         assert result.hq_ids == set()
+        # hard QC failures (low_call_rate, high_lrr_sd, het_outlier, baf_sd,
+        # sex_discordant, inbreeding) cause grm exclusion too
+        assert result.grm_ids == set()
         assert result.counts["total_excluded"] == 1  # only 1 sample total
         assert result.counts["low_call_rate"] == 1
         assert result.counts["high_lrr_sd"] == 1
@@ -449,6 +463,7 @@ class TestCombinedExclusions:
             exclude_sex_discordant=False, exclude_extreme_inbreeding=False,
         )
         assert result.hq_ids == set()
+        assert result.grm_ids == set()
         assert result.total == 0
 
     def test_all_exclusions_off_is_core_qc_only(self, tmp_path):
@@ -464,6 +479,149 @@ class TestCombinedExclusions:
             exclude_sex_discordant=False, exclude_extreme_inbreeding=False,
         )
         assert result.hq_ids == {"S1"}
+        assert result.grm_ids == {"S1"}
+
+
+# ---------------------------------------------------------------------------
+# grm_ids: soft vs hard exclusion distinction
+# ---------------------------------------------------------------------------
+
+class TestGrmIds:
+    """grm_ids includes related samples (soft exclusions) for GRM computation.
+
+    Soft exclusions (pre_pca_excluded, excluded_relatedness) exclude from
+    hq_ids (LD pruning) but not from grm_ids (GRM + association analysis).
+    Hard technical QC failures exclude from both hq_ids and grm_ids.
+    """
+
+    _ALL_COLS = [
+        "Sample_ID", "call_rate", "lrr_sd",
+        "pre_pca_excluded", "excluded_relatedness", "excluded_het_outlier",
+        "baf_sd", "sex_status", "inbreeding_F",
+    ]
+
+    def test_hq_ids_is_subset_of_grm_ids(self, tmp_path):
+        """hq_ids is always a subset of grm_ids."""
+        tsv = _write_sheet(tmp_path, [
+            {"Sample_ID": "S1", "call_rate": "0.99", "lrr_sd": "0.10",
+             "pre_pca_excluded": "false", "excluded_relatedness": "false",
+             "excluded_het_outlier": "false", "baf_sd": "0.05",
+             "sex_status": "OK", "inbreeding_F": "0.01"},
+            {"Sample_ID": "S2", "call_rate": "0.99", "lrr_sd": "0.10",
+             "pre_pca_excluded": "true", "excluded_relatedness": "true",
+             "excluded_het_outlier": "false", "baf_sd": "0.05",
+             "sex_status": "OK", "inbreeding_F": "0.01"},
+        ], cols=self._ALL_COLS)
+        result = classify_samples_for_association(tsv)
+        assert result.hq_ids.issubset(result.grm_ids)
+
+    def test_relatedness_only_in_grm_ids_not_hq_ids(self, tmp_path):
+        """Samples excluded only for relatedness appear in grm_ids but not hq_ids."""
+        tsv = _write_sheet(tmp_path, [
+            {"Sample_ID": "S1", "call_rate": "0.99", "lrr_sd": "0.10",
+             "pre_pca_excluded": "false", "excluded_relatedness": "true",
+             "excluded_het_outlier": "false", "baf_sd": "0.05",
+             "sex_status": "OK", "inbreeding_F": "0.01"},
+        ], cols=self._ALL_COLS)
+        result = classify_samples_for_association(tsv)
+        assert "S1" not in result.hq_ids
+        assert "S1" in result.grm_ids
+
+    def test_pre_pca_only_in_grm_ids_not_hq_ids(self, tmp_path):
+        """Samples excluded only for pre_pca are in grm_ids but not hq_ids."""
+        tsv = _write_sheet(tmp_path, [
+            {"Sample_ID": "S1", "call_rate": "0.99", "lrr_sd": "0.10",
+             "pre_pca_excluded": "true", "excluded_relatedness": "false",
+             "excluded_het_outlier": "false", "baf_sd": "0.05",
+             "sex_status": "OK", "inbreeding_F": "0.01"},
+        ], cols=self._ALL_COLS)
+        result = classify_samples_for_association(tsv)
+        assert "S1" not in result.hq_ids
+        assert "S1" in result.grm_ids
+
+    def test_pre_pca_and_relatedness_together_in_grm_ids(self, tmp_path):
+        """pre_pca+relatedness together (common pipeline pattern) → in grm_ids."""
+        tsv = _write_sheet(tmp_path, [
+            {"Sample_ID": "S1", "call_rate": "0.99", "lrr_sd": "0.10",
+             "pre_pca_excluded": "true", "excluded_relatedness": "true",
+             "excluded_het_outlier": "false", "baf_sd": "0.05",
+             "sex_status": "OK", "inbreeding_F": "0.01"},
+        ], cols=self._ALL_COLS)
+        result = classify_samples_for_association(tsv)
+        assert "S1" not in result.hq_ids
+        assert "S1" in result.grm_ids
+
+    def test_het_outlier_excludes_from_grm_ids(self, tmp_path):
+        """het_outlier is a hard exclusion: sample absent from both hq_ids and grm_ids."""
+        tsv = _write_sheet(tmp_path, [
+            {"Sample_ID": "S1", "call_rate": "0.99", "lrr_sd": "0.10",
+             "pre_pca_excluded": "false", "excluded_relatedness": "false",
+             "excluded_het_outlier": "true", "baf_sd": "0.05",
+             "sex_status": "OK", "inbreeding_F": "0.01"},
+        ], cols=self._ALL_COLS)
+        result = classify_samples_for_association(tsv)
+        assert "S1" not in result.hq_ids
+        assert "S1" not in result.grm_ids
+
+    def test_relatedness_plus_het_outlier_excludes_from_grm_ids(self, tmp_path):
+        """If a related sample also fails het_outlier it is hard-excluded."""
+        tsv = _write_sheet(tmp_path, [
+            {"Sample_ID": "S1", "call_rate": "0.99", "lrr_sd": "0.10",
+             "pre_pca_excluded": "false", "excluded_relatedness": "true",
+             "excluded_het_outlier": "true", "baf_sd": "0.05",
+             "sex_status": "OK", "inbreeding_F": "0.01"},
+        ], cols=self._ALL_COLS)
+        result = classify_samples_for_association(tsv)
+        assert "S1" not in result.hq_ids
+        assert "S1" not in result.grm_ids
+
+    def test_hard_qc_failures_exclude_from_grm_ids(self, tmp_path):
+        """All hard QC failures (call_rate, lrr_sd, baf_sd, sex, inbreeding)
+        exclude from grm_ids regardless of relatedness flags."""
+        cols = self._ALL_COLS
+        for sid, row in [
+            ("low_cr", {"call_rate": "0.80", "lrr_sd": "0.10",
+                        "excluded_relatedness": "true"}),
+            ("high_sd", {"call_rate": "0.99", "lrr_sd": "0.50",
+                         "excluded_relatedness": "true"}),
+            ("high_baf", {"call_rate": "0.99", "lrr_sd": "0.10",
+                          "baf_sd": "0.50", "excluded_relatedness": "true"}),
+            ("discordant", {"call_rate": "0.99", "lrr_sd": "0.10",
+                            "sex_status": "DISCORDANT",
+                            "excluded_relatedness": "true"}),
+            ("inbreeding", {"call_rate": "0.99", "lrr_sd": "0.10",
+                            "inbreeding_F": "0.50",
+                            "excluded_relatedness": "true"}),
+        ]:
+            default_row = {
+                "pre_pca_excluded": "false", "excluded_relatedness": "false",
+                "excluded_het_outlier": "false", "baf_sd": "0.05",
+                "sex_status": "OK", "inbreeding_F": "0.01",
+            }
+            default_row.update(row)
+            default_row["Sample_ID"] = sid
+            sub = tmp_path / sid
+            sub.mkdir()
+            tsv = _write_sheet(sub, [default_row], cols=cols)
+            result = classify_samples_for_association(tsv)
+            assert sid not in result.grm_ids, (
+                f"{sid} should be hard-excluded from grm_ids"
+            )
+
+    def test_grm_ids_equals_hq_ids_when_no_relatedness(self, tmp_path):
+        """Without any soft-excluded samples, grm_ids == hq_ids."""
+        tsv = _write_sheet(tmp_path, [
+            {"Sample_ID": "S1", "call_rate": "0.99", "lrr_sd": "0.10",
+             "pre_pca_excluded": "false", "excluded_relatedness": "false",
+             "excluded_het_outlier": "false", "baf_sd": "0.05",
+             "sex_status": "OK", "inbreeding_F": "0.01"},
+            {"Sample_ID": "S2", "call_rate": "0.80", "lrr_sd": "0.10",
+             "pre_pca_excluded": "false", "excluded_relatedness": "false",
+             "excluded_het_outlier": "false", "baf_sd": "0.05",
+             "sex_status": "OK", "inbreeding_F": "0.01"},
+        ], cols=self._ALL_COLS)
+        result = classify_samples_for_association(tsv)
+        assert result.grm_ids == result.hq_ids
 
 
 # ---------------------------------------------------------------------------
