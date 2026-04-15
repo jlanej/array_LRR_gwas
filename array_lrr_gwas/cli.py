@@ -1311,6 +1311,8 @@ def _run_correct_streaming(args, input_path, audit, cfg, correct_kwargs,
 def _run_associate(args: argparse.Namespace) -> int:
     """Execute the ``associate`` sub-command."""
     import csv
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     import numpy as np
 
@@ -1893,12 +1895,92 @@ def _run_associate(args: argparse.Namespace) -> int:
             excluded=_grm_sample_excluded,
         )
 
-        dosage_aligned = dosage[:, gt_order]
-        logger.info("Computing GRM...")
-        grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
-        logger.info(
-            "GRM computed: %d × %d", grm.shape[0], grm.shape[1],
-        )
+        # ------------------------------------------------------------------
+        # Generate upfront plink2 BED/BIM/FAM for the LD-pruned marker set.
+        # This binary file captures which markers were used in the GRM,
+        # enabling downstream provenance checks and QC plots.
+        # Written to the audit directory when --audit-dir is provided.
+        # ------------------------------------------------------------------
+        _pruned_ids = [_variant_id(v) for v in gt_variants]
+        _bed_prefix: Path | None = None
+        if args.ld_backend == "plink2":
+            _audit_dir_val = getattr(args, "audit_dir", None)
+            _bed_out_dir = (
+                Path(_audit_dir_val) if _audit_dir_val is not None else None
+            )
+            if _bed_out_dir is not None:
+                from array_lrr_gwas.grm import make_plink2_bed
+
+                _bed_out_dir.mkdir(parents=True, exist_ok=True)
+                _bed_prefix = _bed_out_dir / "grm_markers"
+                try:
+                    make_plink2_bed(
+                        gt_path,
+                        _bed_prefix,
+                        keep_variants=_pruned_ids,
+                        keep_samples=valid_samples,
+                        min_maf=args.min_maf,
+                    )
+                    logger.info(
+                        "Saved LD-pruned GRM marker set as plink2 BED: %s",
+                        _bed_prefix,
+                    )
+                except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+                    logger.warning(
+                        "plink2 BED generation failed (non-fatal): %s", exc,
+                    )
+
+        # ------------------------------------------------------------------
+        # GRM computation: use plink2 --make-grm-bin when the plink2 backend
+        # is selected (avoids loading the full dosage matrix into Python).
+        # Fall back to the Python implementation otherwise.
+        # ------------------------------------------------------------------
+        if args.ld_backend == "plink2":
+            from array_lrr_gwas.grm import compute_grm_plink2
+
+            logger.info("Computing GRM via plink2 --make-grm-bin ...")
+            try:
+                grm_raw, plink2_ids = compute_grm_plink2(
+                    gt_path,
+                    keep_variants=_pruned_ids,
+                    keep_samples=valid_samples,
+                    min_maf=args.min_maf,
+                )
+                # plink2 may return samples in different order; reorder.
+                _p2_idx = {s: i for i, s in enumerate(plink2_ids)}
+                _missing = [s for s in valid_samples if s not in _p2_idx]
+                if _missing:
+                    logger.error(
+                        "plink2 GRM is missing %d analyzed samples (e.g. %s). "
+                        "Check that the genotype file covers all analyzed samples.",
+                        len(_missing), _missing[:3],
+                    )
+                    return 1
+                _reorder = [_p2_idx[s] for s in valid_samples]
+                grm = grm_raw[np.ix_(_reorder, _reorder)]
+                logger.info(
+                    "GRM computed via plink2: %d × %d",
+                    grm.shape[0], grm.shape[1],
+                )
+            except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+                logger.warning(
+                    "plink2 GRM failed (%s); falling back to Python GRM.",
+                    exc,
+                )
+                dosage_aligned = dosage[:, gt_order]
+                grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
+                logger.info(
+                    "GRM computed (Python fallback): %d × %d",
+                    grm.shape[0], grm.shape[1],
+                )
+        else:
+            dosage_aligned = dosage[:, gt_order]
+            logger.info("Computing GRM (Python)...")
+            grm = compute_grm(dosage_aligned, min_maf=args.min_maf)
+            logger.info(
+                "GRM computed: %d × %d", grm.shape[0], grm.shape[1],
+            )
+
 
     if args.method == "logistic":
         logger.warning(
@@ -2097,6 +2179,19 @@ def _run_associate(args: argparse.Namespace) -> int:
             )
             return 1
 
+        # Warn about relatedness inflation when a GRM was computed for the
+        # autosomal scan.  Sex-chr scans use OLS (the autosomal GRM is not
+        # appropriate for X/Y), so cryptic relatedness is not corrected.
+        if grm is not None:
+            logger.warning(
+                "Sex-chromosome association scans use OLS (no GRM). "
+                "The autosomal GRM computed for the main scan is NOT applied "
+                "to sex-chromosome markers.  If your cohort contains related "
+                "individuals, type I error may be inflated for sex-chromosome "
+                "markers.  Consider pre-filtering close relatives (kinship > "
+                "0.125) before interpreting sex-chromosome results."
+            )
+
         from array_lrr_gwas.sample_sheet import read_sample_sheet as _read_ss
 
         _sx_ids, _sx_covs, _sx_names = _read_ss(
@@ -2131,38 +2226,94 @@ def _run_associate(args: argparse.Namespace) -> int:
         _male = _sample_sex == 1
         _female = _sample_sex == 2
 
-        _x_vmask = np.array(
-            [v.get("chrom", "") in _X_CHROMS for v in variants], dtype=bool,
-        ) & variant_mask
-        _y_vmask = np.array(
-            [v.get("chrom", "") in _Y_CHROMS for v in variants], dtype=bool,
-        ) & variant_mask
-
         out_stem = args.output.stem
         out_sfx = args.output.suffix
         out_dir = args.output.parent
 
-        for mode in sex_chr_modes:
-            logger.info("Running sex-chromosome mode: %s", mode)
+        # ------------------------------------------------------------------
+        # Single-pass sex-chromosome scan
+        # ------------------------------------------------------------------
+        # Instead of re-reading the entire BCF for every sex-chr mode we:
+        # 1. Use pysam.fetch (indexed BCF) or a sequential contig-filtered
+        #    scan to read chrX and chrY variants exactly once.
+        # 2. Split the resulting (lrr_row, var_meta) pairs into X and Y
+        #    buckets (applying the intensity-only pre-filter).
+        # 3. Run all modes in parallel threads from the in-memory buckets.
+        # ------------------------------------------------------------------
+        from array_lrr_gwas.io_vcf import stream_lrr_contig_chunks
 
+        _need_x = any(
+            m in ("x_with_sex_covariate", "x_male_only", "x_female_only")
+            for m in sex_chr_modes
+        )
+        _need_y = "y_male_only" in sex_chr_modes
+        _needed_contigs: list[str] = []
+        if _need_x:
+            _needed_contigs.extend(["chrX", "X"])
+        if _need_y:
+            _needed_contigs.extend(["chrY", "Y"])
+
+        # Collect X and Y LRR rows (full analyzed_mask, all samples).
+        # Each entry: (lrr_row[n_analyzed_samples], var_meta)
+        _x_rows: list[np.ndarray] = []
+        _x_vars: list[dict] = []
+        _y_rows: list[np.ndarray] = []
+        _y_vars: list[dict] = []
+
+        if _needed_contigs:
+            logger.info(
+                "Single-pass sex-chromosome BCF scan (contigs: %s)",
+                _needed_contigs,
+            )
+            for _c_lrr, _c_vars in stream_lrr_contig_chunks(
+                input_path,
+                _needed_contigs,
+                chunk_size=5000,
+                sample_mask=analyzed_mask,
+            ):
+                for _row, _v in zip(_c_lrr, _c_vars):
+                    if exclude_intensity_only and _v.get("intensity_only", False):
+                        continue
+                    if _v.get("chrom", "") in _X_CHROMS:
+                        _x_rows.append(_row)
+                        _x_vars.append(_v)
+                    elif _v.get("chrom", "") in _Y_CHROMS:
+                        _y_rows.append(_row)
+                        _y_vars.append(_v)
+
+        _x_lrr = np.vstack(_x_rows) if _x_rows else np.empty((0, int(analyzed_mask.sum())))
+        _y_lrr = np.vstack(_y_rows) if _y_rows else np.empty((0, int(analyzed_mask.sum())))
+
+        logger.info(
+            "Sex-chromosome data loaded: %d chrX variants, %d chrY variants",
+            len(_x_vars), len(_y_vars),
+        )
+
+        def _make_in_memory_stream(lrr_full, var_list, col_mask, chunk_size=5000):
+            """Yield chunks from in-memory LRR matrix, applying column mask."""
+            if lrr_full.shape[0] == 0:
+                return
+            lrr_sub = lrr_full[:, col_mask]
+            for _s in range(0, lrr_sub.shape[0], chunk_size):
+                _e = min(_s + chunk_size, lrr_sub.shape[0])
+                yield lrr_sub[_s:_e], var_list[_s:_e]
+
+        def _run_one_sex_chr_mode(mode):
             if mode in ("x_with_sex_covariate", "x_male_only", "x_female_only"):
-                _mv = _x_vmask
-            elif mode == "y_male_only":
-                _mv = _y_vmask
-            else:
-                logger.warning("Unknown sex-chr-mode %s; skipping.", mode)
-                continue
+                _lrr_full = _x_lrr
+                _var_list = _x_vars
+                n_mv = len(_x_vars)
+            else:  # y_male_only
+                _lrr_full = _y_lrr
+                _var_list = _y_vars
+                n_mv = len(_y_vars)
 
-            n_mv = int(_mv.sum())
             if n_mv == 0:
-                logger.warning(
-                    "No sex-chr variants for mode %s; skipping.", mode,
-                )
-                continue
+                logger.warning("No sex-chr variants for mode %s; skipping.", mode)
+                return None
 
-            # Choose sample subset and extra covariates per mode.
             if mode == "x_with_sex_covariate":
-                _sub_mask = analyzed_mask.copy()
+                _col_mask = np.ones(int(analyzed_mask.sum()), dtype=bool)
                 _sub_pheno = phenotype
                 _sex_cov = _male.astype(float)[:, np.newaxis]
                 _sub_cov = (
@@ -2170,54 +2321,59 @@ def _run_associate(args: argparse.Namespace) -> int:
                     if covariates is not None else _sex_cov
                 )
             elif mode == "x_male_only":
-                _sub_mask = analyzed_mask.copy()
-                # Narrow to males within the already-analyzed set.
-                _tmp = np.zeros(len(samples), dtype=bool)
-                _tmp[analyzed_mask] = _male
-                _sub_mask = _tmp
+                _col_mask = _male
                 _sub_pheno = phenotype[_male]
                 _sub_cov = covariates[_male] if covariates is not None else None
             elif mode == "x_female_only":
-                _sub_mask = analyzed_mask.copy()
-                _tmp = np.zeros(len(samples), dtype=bool)
-                _tmp[analyzed_mask] = _female
-                _sub_mask = _tmp
+                _col_mask = _female
                 _sub_pheno = phenotype[_female]
                 _sub_cov = covariates[_female] if covariates is not None else None
             else:  # y_male_only
-                _sub_mask = analyzed_mask.copy()
-                _tmp = np.zeros(len(samples), dtype=bool)
-                _tmp[analyzed_mask] = _male
-                _sub_mask = _tmp
+                _col_mask = _male
                 _sub_pheno = phenotype[_male]
                 _sub_cov = covariates[_male] if covariates is not None else None
 
-            n_sub = int(_sub_mask.sum())
+            n_sub = int(_col_mask.sum())
             if n_sub < 3:
                 logger.warning(
                     "Fewer than 3 samples for mode %s (%d); skipping.",
                     mode, n_sub,
                 )
-                continue
+                return None
 
             logger.info(
                 "Sex-chr mode %s: %d variants, %d samples",
                 mode, n_mv, n_sub,
             )
 
-            _sx_stream = stream_lrr_chunks(
-                input_path, chunk_size=5000,
-                sample_mask=_sub_mask, variant_mask=_mv,
-            )
-            _sx_res, _sx_excl = run_association_streaming(
-                _sx_stream,
+            _stream = _make_in_memory_stream(_lrr_full, _var_list, _col_mask)
+            _res, _excl = run_association_streaming(
+                _stream,
                 _sub_pheno,
                 covariates=_sub_cov,
-                method="ols",  # no GRM for sex-chr
+                method="ols",
                 exclude_monomorphic=exclude_monomorphic,
                 exclude_intensity_only=False,
             )
+            return mode, _res, _excl
 
+        # Run all modes in parallel threads (OLS releases GIL for most ops).
+        valid_modes = [
+            m for m in sex_chr_modes
+            if m in ("x_with_sex_covariate", "x_male_only", "x_female_only", "y_male_only")
+        ]
+        sex_chr_results: dict[str, tuple] = {}
+
+        with ThreadPoolExecutor(max_workers=len(valid_modes) or 1) as _pool:
+            _futures = {_pool.submit(_run_one_sex_chr_mode, m): m for m in valid_modes}
+            for _fut in as_completed(_futures):
+                _out = _fut.result()
+                if _out is not None:
+                    _mode, _sx_res, _sx_excl = _out
+                    sex_chr_results[_mode] = (_sx_res, _sx_excl)
+
+        # Write outputs and record audit for each completed mode.
+        for mode, (_sx_res, _sx_excl) in sex_chr_results.items():
             _sx_path = out_dir / f"{out_stem}.{mode}{out_sfx}"
             _sx_recs = _sx_res.to_records()
             if _sx_recs:
@@ -2226,12 +2382,10 @@ def _run_associate(args: argparse.Namespace) -> int:
                     w = csv.DictWriter(fh, fieldnames=_sh, delimiter="\t")
                     w.writeheader()
                     w.writerows(_sx_recs)
-
             logger.info(
                 "Sex-chr mode %s: %d markers tested → %s",
                 mode, _sx_excl["n_tested"], _sx_path,
             )
-
             audit.record(
                 stage=f"sex_chr_{mode}",
                 id_type="marker",

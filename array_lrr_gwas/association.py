@@ -789,12 +789,17 @@ def run_association_streaming(
             n_intensity += n_io
             keep &= ~io_mask
 
-        # Monomorphic check (zero variance or all-NaN)
+        # Monomorphic check: a marker is monomorphic when nanmin == nanmax
+        # (all finite values identical) or the entire row is NaN.
+        # Using nanmin/nanmax is more robust to floating-point imprecision
+        # than exact equality on nanvar (which can yield 1e-16 for identical
+        # floats after arithmetic operations).
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            lrr_var = np.nanvar(lrr_chunk, axis=1)
+            _lrr_min = np.nanmin(lrr_chunk, axis=1)
+            _lrr_max = np.nanmax(lrr_chunk, axis=1)
         all_nan = np.all(np.isnan(lrr_chunk), axis=1)
-        mono_mask = (lrr_var == 0.0) | all_nan
+        mono_mask = (_lrr_min == _lrr_max) | all_nan
 
         if exclude_monomorphic:
             n_m = int((mono_mask & keep).sum())

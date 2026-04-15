@@ -2,12 +2,12 @@
 
 
 def mock_associate_io(monkeypatch, lrr, samples, variants):
-    """Patch ``read_variant_metadata`` and ``stream_lrr_chunks`` for tests.
+    """Patch BCF I/O functions in ``_run_associate`` with in-memory data.
 
-    Replaces the BCF I/O in ``_run_associate`` with in-memory data so that
-    tests can run without a real BCF file.
+    Replaces ``read_variant_metadata``, ``stream_lrr_chunks``, and
+    ``stream_lrr_contig_chunks`` so that tests can run without a real BCF file.
     """
-    import numpy as np
+    import numpy as np  # noqa: F401 (keep unused import for potential use in helpers)
 
     monkeypatch.setattr(
         "array_lrr_gwas.io_vcf.read_variant_metadata",
@@ -30,4 +30,27 @@ def mock_associate_io(monkeypatch, lrr, samples, variants):
     monkeypatch.setattr(
         "array_lrr_gwas.io_vcf.stream_lrr_chunks",
         _fake_stream,
+    )
+
+    def _fake_contig_stream(path, contigs, *, chunk_size=5000, sample_mask=None):
+        """Return only variants whose chrom matches one of the requested contigs."""
+        _contig_set = set(contigs)
+        _lrr = lrr.copy()
+        if sample_mask is not None:
+            _lrr = _lrr[:, sample_mask]
+        _sel_idx = [
+            i for i, v in enumerate(variants)
+            if v.get("chrom", "") in _contig_set
+        ]
+        if not _sel_idx:
+            return
+        _sel_lrr = _lrr[_sel_idx]
+        _sel_vars = [variants[i] for i in _sel_idx]
+        for start in range(0, _sel_lrr.shape[0], chunk_size):
+            end = min(start + chunk_size, _sel_lrr.shape[0])
+            yield _sel_lrr[start:end], _sel_vars[start:end]
+
+    monkeypatch.setattr(
+        "array_lrr_gwas.io_vcf.stream_lrr_contig_chunks",
+        _fake_contig_stream,
     )

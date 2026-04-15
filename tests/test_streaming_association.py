@@ -522,3 +522,214 @@ class TestPlink2Enforcement:
 
         assert rc == 1
         assert "plink2" in caplog.text
+
+
+# ===================================================================
+# 7. stream_lrr_contig_chunks
+# ===================================================================
+
+
+class TestStreamLrrContigChunks:
+    """Test the contig-based LRR streamer."""
+
+    def test_returns_only_requested_contigs(self, test_bcf_path):
+        from array_lrr_gwas.io_vcf import read_variant_metadata, stream_lrr_contig_chunks
+
+        _, variants = read_variant_metadata(test_bcf_path)
+        # Find a contig that exists in the test BCF.
+        first_chrom = variants[0]["chrom"]
+        chunks = list(stream_lrr_contig_chunks(test_bcf_path, [first_chrom]))
+        if chunks:
+            all_chroms = {v["chrom"] for _, vlist in chunks for v in vlist}
+            assert all_chroms == {first_chrom}
+
+    def test_empty_when_contig_missing(self, test_bcf_path):
+        from array_lrr_gwas.io_vcf import stream_lrr_contig_chunks
+
+        chunks = list(stream_lrr_contig_chunks(
+            test_bcf_path, ["chrX_does_not_exist_xyz"]
+        ))
+        assert chunks == []
+
+    def test_sample_mask_applies(self, test_bcf_path):
+        from array_lrr_gwas.io_vcf import read_variant_metadata, stream_lrr_contig_chunks
+
+        _, variants = read_variant_metadata(test_bcf_path)
+        first_chrom = variants[0]["chrom"]
+        mask = np.zeros(BCF_N_SAMPLES, dtype=bool)
+        mask[:2] = True
+        chunks = list(stream_lrr_contig_chunks(
+            test_bcf_path, [first_chrom], sample_mask=mask
+        ))
+        if chunks:
+            for lrr_c, _ in chunks:
+                assert lrr_c.shape[1] == 2
+
+    def test_chunk_size_respected(self, test_bcf_path):
+        from array_lrr_gwas.io_vcf import read_variant_metadata, stream_lrr_contig_chunks
+
+        _, variants = read_variant_metadata(test_bcf_path)
+        first_chrom = variants[0]["chrom"]
+        for lrr_c, vars_c in stream_lrr_contig_chunks(
+            test_bcf_path, [first_chrom], chunk_size=20
+        ):
+            assert lrr_c.shape[0] <= 20
+            assert len(vars_c) == lrr_c.shape[0]
+
+
+# ===================================================================
+# 8. Monomorphic LRR check (nanmin == nanmax robustness)
+# ===================================================================
+
+
+class TestMonomorphicCheck:
+    """Ensure monomorphic detection uses nanmin==nanmax, not exact 0.0."""
+
+    def test_identical_floats_not_missed_by_floating_point(self):
+        """Verify that tiny non-zero variance from floating-point arithmetic
+        doesn't let a monomorphic marker slip through."""
+        from array_lrr_gwas.association import run_association_streaming
+
+        # Build a marker where all values are the same constant,
+        # but represented as a result of arithmetic that may yield
+        # tiny non-zero nanvar due to floating-point rounding.
+        base = 0.1 + 0.2  # 0.30000000000000004 in IEEE-754
+        lrr = np.full((1, 10), base)
+        pheno = np.random.default_rng(0).standard_normal(10)
+        variants = [{"chrom": "chr1", "pos": 1, "id": "m1", "intensity_only": False}]
+
+        result, excl = run_association_streaming(
+            iter([(lrr, variants)]),
+            pheno,
+            method="ols",
+            exclude_monomorphic=True,
+        )
+        assert excl["n_monomorphic"] == 1, (
+            "Monomorphic marker (identical floats) should be excluded"
+        )
+
+    def test_all_nan_row_is_monomorphic(self):
+        from array_lrr_gwas.association import run_association_streaming
+
+        lrr = np.full((1, 5), np.nan)
+        pheno = np.ones(5)
+        variants = [{"chrom": "chr1", "pos": 1, "id": "m1", "intensity_only": False}]
+
+        result, excl = run_association_streaming(
+            iter([(lrr, variants)]),
+            pheno,
+            method="ols",
+            exclude_monomorphic=True,
+        )
+        assert excl["n_monomorphic"] == 1
+
+    def test_variable_marker_not_excluded(self):
+        from array_lrr_gwas.association import run_association_streaming
+
+        rng = np.random.default_rng(42)
+        lrr = rng.standard_normal((1, 20))
+        pheno = rng.standard_normal(20)
+        variants = [{"chrom": "chr1", "pos": 1, "id": "m1", "intensity_only": False}]
+
+        result, excl = run_association_streaming(
+            iter([(lrr, variants)]),
+            pheno,
+            method="ols",
+            exclude_monomorphic=True,
+        )
+        assert excl["n_monomorphic"] == 0
+
+
+# ===================================================================
+# 9. Relatedness warning for sex-chr OLS
+# ===================================================================
+
+
+class TestSexChrRelatednessWarning:
+    """Verify that a warning is emitted when sex-chr OLS may have inflated
+    type I error due to sample relatedness."""
+
+    def test_warning_emitted_when_grm_was_computed(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from array_lrr_gwas.cli import main
+
+        bcf = tmp_path / "in.bcf"
+        bcf.write_text("stub")
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t1\nS2\t2\nS3\t3\nS4\t4\n")
+
+        sheet = tmp_path / "sheet.tsv"
+        sheet.write_text(
+            "Sample_ID\tpredicted_sex\tcall_rate\tlrr_sd\n"
+            "S1\t1\t0.99\t0.1\nS2\t2\t0.99\t0.1\nS3\t1\t0.99\t0.1\nS4\t2\t0.99\t0.1\n"
+        )
+
+        out = tmp_path / "results.tsv"
+
+        samples = ["S1", "S2", "S3", "S4"]
+        rng = np.random.default_rng(7)
+        lrr = rng.standard_normal((6, 4))
+        variants = [
+            {"chrom": "chr1", "pos": i * 100, "id": f"v{i}",
+             "intensity_only": False}
+            for i in range(6)
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, variants)
+
+        dosage = rng.integers(0, 3, size=(5, 4)).astype(float)
+        gt_variants = [
+            {"chrom": "chr1", "pos": i * 100, "id": f"g{i}",
+             "ref": "A", "alts": ("C",)}
+            for i in range(5)
+        ]
+        monkeypatch.setattr(
+            "array_lrr_gwas.genotypes.read_genotypes",
+            lambda *_a, **_k: (dosage, samples, gt_variants),
+        )
+        # Disable plink2 so numpy path is used
+        monkeypatch.setattr(
+            "array_lrr_gwas.ld_prune._plink2_available",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "array_lrr_gwas.grm._plink2_available",
+            lambda: False,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate", str(bcf),
+                "--phenotype", str(pheno),
+                "--method", "lmm",
+                "--ld-backend", "numpy",
+                "--sample-sheet", str(sheet),
+                "--sex-chr-mode", "x_male_only",
+                "-o", str(out),
+            ])
+
+        assert "type I error" in caplog.text or "relatedness" in caplog.text.lower()
+
+
+# ===================================================================
+# 10. plink2 GRM / BED generation
+# ===================================================================
+
+
+class TestPlink2Grm:
+    """Unit tests for compute_grm_plink2 and make_plink2_bed."""
+
+    def test_compute_grm_plink2_raises_when_no_plink2(self, tmp_path, monkeypatch):
+        from array_lrr_gwas.grm import compute_grm_plink2
+
+        monkeypatch.setattr("array_lrr_gwas.grm._plink2_available", lambda: False)
+        with pytest.raises(FileNotFoundError, match="plink2"):
+            compute_grm_plink2(tmp_path / "fake.bcf")
+
+    def test_make_plink2_bed_raises_when_no_plink2(self, tmp_path, monkeypatch):
+        from array_lrr_gwas.grm import make_plink2_bed
+
+        monkeypatch.setattr("array_lrr_gwas.grm._plink2_available", lambda: False)
+        with pytest.raises(FileNotFoundError, match="plink2"):
+            make_plink2_bed(tmp_path / "fake.bcf", tmp_path / "out")
