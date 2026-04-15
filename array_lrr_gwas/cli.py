@@ -1439,7 +1439,7 @@ def _run_associate(args: argparse.Namespace) -> int:
             if bad:
                 logger.error(
                     "Covariate column(s) not found in phenotype file: %s",
-                    bad,
+                    ", ".join(bad),
                 )
                 return 1
             if "sample_id" in args.covariate_cols:
@@ -1462,9 +1462,9 @@ def _run_associate(args: argparse.Namespace) -> int:
                 continue
             idx = sample_to_idx[sid]
             pheno_seen[idx] = True
-            pheno_vals[idx] = _parse_float(row.get(pheno_col))
+            pheno_vals[idx] = _parse_float(row[pheno_col])
             for cn in pheno_cov_names:
-                pheno_cov_vals[idx].append(_parse_float(row.get(cn)))
+                pheno_cov_vals[idx].append(_parse_float(row[cn]))
 
     valid_mask = ~np.isnan(pheno_vals)
     n_samples_total = len(samples)

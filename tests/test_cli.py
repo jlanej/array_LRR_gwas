@@ -1208,7 +1208,17 @@ class TestCli:
                 pass
             assert phenotype.shape == (1,)
             assert float(phenotype[0]) == 1.0
-            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
 
         monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
@@ -1284,7 +1294,17 @@ class TestCli:
                 pass
             assert phenotype.shape == (2,)
             assert np.array_equal(phenotype, np.array([1.0, 2.0]))
-            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
 
         monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
@@ -1369,7 +1389,17 @@ class TestCli:
             for _chunk, _vars in lrr_chunks:
                 pass
             assert phenotype.shape == (2,)
-            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
 
         monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
@@ -1446,7 +1476,17 @@ class TestCli:
             for _chunk, _vars in lrr_chunks:
                 pass
             assert phenotype.shape == (1,)
-            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
 
         monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
@@ -1591,8 +1631,21 @@ class TestCli:
             covariates = kwargs.get("covariates")
             assert covariates is not None
             # Order must follow --covariate-cols arguments: age then sex.
-            np.testing.assert_allclose(covariates, np.array([[40.0, 0.0], [50.0, 1.0]]))
-            return (_FakeResult(), {"n_total": 2, "n_tested": 2, "n_intensity_only": 0, "n_monomorphic": 0, "excluded_markers": {}, "tested_mono_flags": [False, False]})
+            np.testing.assert_allclose(
+                covariates,
+                np.array([[40.0, 0.0], [50.0, 1.0]]),
+            )
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
 
         monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
 
@@ -1602,6 +1655,81 @@ class TestCli:
             "--phenotype", str(pheno),
             "--phenotype-col", "trait_used",
             "--covariate-cols", "age", "sex",
+            "--method", "ols",
+            "-o", str(out),
+        ])
+        assert rc == 0
+
+    def test_associate_uses_default_covariate_column_order(
+        self, tmp_path, monkeypatch
+    ):
+        """Without --covariate-cols, covariates follow phenotype-file column order."""
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\ttrait\tage\tsex\tPC1\n"
+            "S1\t1\t40\t0\t10\n"
+            "S2\t2\t50\t1\t20\n"
+        )
+        out = tmp_path / "results.tsv"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2], [0.0, 0.1]], dtype=float)
+        samples = ["S1", "S2"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
+
+        class _FakeResult:
+            variant_id = ['a1', 'a2']
+            chrom = ["chr1", "chr1"]
+            p_value = np.array([1.0, 1.0])
+            stat = np.array([0.0, 0.0])
+            beta = np.array([0.0, 0.0])
+            se = np.array([1.0, 1.0])
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": 2, "method": "ols"},
+                ]
+
+        def _fake_run_association_streaming(_lrr_chunks, phenotype, **kwargs):
+            np.testing.assert_allclose(phenotype, np.array([1.0, 2.0]))
+            covariates = kwargs.get("covariates")
+            assert covariates is not None
+            # Default order should follow file order: age, sex, PC1
+            np.testing.assert_allclose(
+                covariates,
+                np.array([[40.0, 0.0, 10.0], [50.0, 1.0, 20.0]]),
+            )
+            return (
+                _FakeResult(),
+                {
+                    "n_total": 2,
+                    "n_tested": 2,
+                    "n_intensity_only": 0,
+                    "n_monomorphic": 0,
+                    "excluded_markers": {},
+                    "tested_mono_flags": [False, False],
+                },
+            )
+
+        monkeypatch.setattr(association, "run_association_streaming", _fake_run_association_streaming)
+
+        rc = main([
+            "associate",
+            str(fake_bcf),
+            "--phenotype", str(pheno),
             "--method", "ols",
             "-o", str(out),
         ])
