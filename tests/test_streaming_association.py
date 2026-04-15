@@ -234,12 +234,8 @@ class TestRunAssociationStreaming:
     def test_empty_stream_returns_empty(self):
         from array_lrr_gwas.association import run_association_streaming
 
-        def _empty():
-            return
-            yield  # pragma: no cover
-
         result, info = run_association_streaming(
-            _empty(),
+            iter([]),
             np.array([1.0, 2.0, 3.0]),
             method="ols",
         )

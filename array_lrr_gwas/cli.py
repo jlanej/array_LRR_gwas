@@ -1959,11 +1959,6 @@ def _run_associate(args: argparse.Namespace) -> int:
                 if v.get("intensity_only", False):
                     _all_marker_excluded[vid] = "intensity_only"
     _all_marker_excluded.update(exclusion_info["excluded_markers"])
-    _all_marker_included = [
-        v.get("id") or f"{v['chrom']}:{v['pos']}"
-        for v in result.to_records()
-    ] if n_tested > 0 else []
-    # Use variant_id from result directly
     _all_marker_included = list(result.variant_id)
 
     audit.record(
