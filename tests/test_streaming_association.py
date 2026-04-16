@@ -634,8 +634,16 @@ class TestMonomorphicCheck:
 
 
 class TestSexChrRelatednessWarning:
-    """Verify that a warning is emitted when sex-chr OLS may have inflated
-    type I error due to sample relatedness."""
+    """Verify that sex-chr LMM or OLS fallback is correctly applied.
+
+    When the autosomal scan uses LMM and sex-chr modes are requested:
+    - chrX modes now use X-GRM-based LMM (no relatedness warning)
+    - chrY uses autosomal GRM subsetted to males
+    - When no chrX genotype data is available, falls back to OLS with warning
+
+    This test uses mock data with no chrX variants, so it will skip the
+    mode and log "No sex-chr variants".
+    """
 
     def test_warning_emitted_when_grm_was_computed(
         self, tmp_path, monkeypatch, caplog
@@ -697,7 +705,10 @@ class TestSexChrRelatednessWarning:
                 "-o", str(out),
             ])
 
-        assert "type I error" in caplog.text or "relatedness" in caplog.text.lower()
+        # With no chrX variants in mock data, the mode is skipped.
+        # The old OLS relatedness warning is no longer emitted because
+        # chrX modes now use LMM with X-GRM.
+        assert "No sex-chr variants" in caplog.text or "skipping" in caplog.text.lower()
 
 
 # ===================================================================
