@@ -37,6 +37,70 @@ def _fmt_float(val: float) -> str:
     return f"{float(val):.10g}"
 
 
+def _drop_constant_covariates(
+    covariates: "np.ndarray | None",
+    names: "list[str]",
+    context: str = "",
+) -> "tuple[np.ndarray | None, list[str]]":
+    """Drop covariates whose values are constant (zero variance) among the
+    samples being analysed, and emit a warning for each dropped covariate.
+
+    A constant covariate is completely uninformative and will cause a
+    singular design matrix.  This situation arises naturally in
+    sex-stratified analyses (e.g. ``x_male_only`` or ``x_female_only``)
+    when the user's phenotype file contains a sex covariate, because all
+    samples in the stratum are of the same sex.
+
+    Parameters
+    ----------
+    covariates:
+        Array of shape ``(n_samples, n_covariates)`` or ``None``.
+    names:
+        Covariate column names corresponding to ``covariates`` columns.
+    context:
+        Human-readable label for warning messages (e.g. ``"x_male_only"``).
+
+    Returns
+    -------
+    filtered_covariates:
+        Covariate array with constant columns removed, or ``None`` if all
+        columns were dropped (or input was ``None``).
+    filtered_names:
+        Remaining covariate names after filtering.
+    """
+    if covariates is None or covariates.shape[1] == 0:
+        return covariates, names
+
+    keep = []
+    dropped = []
+    for col_idx in range(covariates.shape[1]):
+        col = covariates[:, col_idx]
+        finite = col[np.isfinite(col)]
+        if finite.size == 0 or np.std(finite) == 0.0:
+            dropped.append(names[col_idx] if col_idx < len(names) else str(col_idx))
+        else:
+            keep.append(col_idx)
+
+    if dropped:
+        ctx_str = f" [{context}]" if context else ""
+        logger.warning(
+            "Dropping %d constant covariate(s)%s (zero variance among "
+            "analysed samples; these are uninformative and would cause a "
+            "singular design matrix): %s",
+            len(dropped), ctx_str, dropped,
+        )
+
+    if not keep:
+        return None, []
+
+    if len(keep) == covariates.shape[1]:
+        return covariates, names
+
+    filtered = covariates[:, keep]
+    filtered_names = [names[i] for i in keep if i < len(names)]
+    return filtered, filtered_names
+
+
 def _write_svd_text_outputs(
     prefix: Path,
     *,
@@ -668,13 +732,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "y_male_only",
         ],
         help=(
-            "Run additional sex-chromosome association scans.  Multiple "
-            "modes may be listed.  Requires --sample-sheet with a "
-            "'predicted_sex' column (1=male, 2=female).  "
-            "Modes: x_with_sex_covariate — chrX with sex as a binary "
-            "covariate; x_male_only — chrX males only; x_female_only — "
-            "chrX females only; y_male_only — chrY males only.  Each "
-            "mode writes a separate TSV alongside the main output.  "
+            "Sex-chromosome association scans to run.  When --sample-sheet "
+            "is provided (with a 'predicted_sex' column, 1=male, 2=female), "
+            "all four modes are run by default: x_with_sex_covariate, "
+            "x_male_only, x_female_only, y_male_only.  To skip all "
+            "sex-chromosome analyses pass --sex-chr-mode with no arguments.  "
+            "Modes: x_with_sex_covariate — chrX full cohort with sex as a "
+            "binary covariate; x_male_only — chrX males only (sex covariate "
+            "dropped automatically); x_female_only — chrX females only (sex "
+            "covariate dropped automatically); y_male_only — chrY males only "
+            "(sex covariate dropped automatically).  Each mode writes a "
+            "separate TSV alongside the main output (e.g. results.x_male_only.tsv).  "
+            "Constant covariates (zero variance among the analysed stratum) "
+            "are dropped with a warning before each mode runs.  "
             "When --method lmm is used, chrX modes compute a dedicated "
             "X-chromosome GRM (X-GRM) with male 0/2 dosage coding, PAR "
             "exclusion, and sex-aware standardisation.  chrY modes use "
@@ -1725,6 +1795,12 @@ def _run_associate(args: argparse.Namespace) -> int:
     if cov_parts:
         covariates = np.column_stack(cov_parts)
 
+    # Drop any covariates that are constant among the analysed samples.
+    # Such covariates are uninformative and cause a singular design matrix.
+    covariates, pheno_cov_names = _drop_constant_covariates(
+        covariates, pheno_cov_names, context="autosomal scan",
+    )
+
     # Subset to samples with phenotype
     phenotype = pheno_vals[analyzed_mask]
     pbar.set_postfix(
@@ -2506,7 +2582,27 @@ def _run_associate(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------
     # Sex-chromosome analysis modes
     # ------------------------------------------------------------------
-    sex_chr_modes = getattr(args, "sex_chr_mode", None) or []
+    # When --sex-chr-mode is not specified (None) and a --sample-sheet is
+    # provided, run all four sex-chromosome modes by default.  Users who
+    # want to skip sex-chromosome analyses can pass --sex-chr-mode with no
+    # arguments (which produces an empty list and is treated as "none").
+    _ALL_SEX_CHR_MODES = [
+        "x_with_sex_covariate",
+        "x_male_only",
+        "x_female_only",
+        "y_male_only",
+    ]
+    sex_chr_modes = getattr(args, "sex_chr_mode", None)
+    if sex_chr_modes is None:
+        if args.sample_sheet is not None:
+            sex_chr_modes = list(_ALL_SEX_CHR_MODES)
+            logger.info(
+                "--sex-chr-mode not specified; running all sex-chromosome "
+                "modes by default (%s) because --sample-sheet was provided.",
+                _ALL_SEX_CHR_MODES,
+            )
+        else:
+            sex_chr_modes = []
     if sex_chr_modes:
         _X_CHROMS = {"chrX", "X"}
         _Y_CHROMS = {"chrY", "Y"}
@@ -2790,11 +2886,23 @@ def _run_associate(args: argparse.Namespace) -> int:
                     np.column_stack([covariates, _sex_cov])
                     if covariates is not None else _sex_cov
                 )
+                # For x_with_sex_covariate, sex is intentionally added as a
+                # covariate (not dropped).  Still drop any other constant
+                # covariates from the user-supplied set.
+                _sub_cov_names = list(pheno_cov_names) + ["sex"]
+                _sub_cov, _ = _drop_constant_covariates(
+                    _sub_cov, _sub_cov_names, context=mode,
+                )
                 _mode_grm = _x_grm
             elif mode == "x_male_only":
                 _col_mask = _male
                 _sub_pheno = phenotype[_male]
                 _sub_cov = covariates[_male] if covariates is not None else None
+                # Drop covariates that are constant among males (e.g. a sex
+                # covariate is uninformative when all samples are male).
+                _sub_cov, _ = _drop_constant_covariates(
+                    _sub_cov, list(pheno_cov_names), context=mode,
+                )
                 # Subset X-GRM to male samples
                 _mode_grm = (
                     _x_grm[np.ix_(np.where(_male)[0], np.where(_male)[0])]
@@ -2804,6 +2912,11 @@ def _run_associate(args: argparse.Namespace) -> int:
                 _col_mask = _female
                 _sub_pheno = phenotype[_female]
                 _sub_cov = covariates[_female] if covariates is not None else None
+                # Drop covariates that are constant among females (e.g. a sex
+                # covariate is uninformative when all samples are female).
+                _sub_cov, _ = _drop_constant_covariates(
+                    _sub_cov, list(pheno_cov_names), context=mode,
+                )
                 # Subset X-GRM to female samples
                 _mode_grm = (
                     _x_grm[np.ix_(np.where(_female)[0], np.where(_female)[0])]
@@ -2813,6 +2926,11 @@ def _run_associate(args: argparse.Namespace) -> int:
                 _col_mask = _male
                 _sub_pheno = phenotype[_male]
                 _sub_cov = covariates[_male] if covariates is not None else None
+                # Drop covariates that are constant among males (e.g. a sex
+                # covariate is uninformative when all samples are male).
+                _sub_cov, _ = _drop_constant_covariates(
+                    _sub_cov, list(pheno_cov_names), context=mode,
+                )
                 _mode_grm = _y_grm
 
             n_sub = int(_col_mask.sum())
