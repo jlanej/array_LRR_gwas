@@ -277,6 +277,20 @@ boolean flags, plus an optional composite flag:
 | `all_ancestries_maf_pass` | MAF ≥ 0.01 per ancestry | Marker is polymorphic in **all** ancestries |
 | `all_ancestries_qc_pass` | composite (typically all 3 flags pass) | Optional convenience flag from upstream collation |
 
+#### ChrX-Specific QC Columns
+
+For X-chromosome markers, the upstream pipeline may also provide
+sex-aware QC columns (see `illumina_idat_processing` PR #96):
+
+| TSV column | Upstream threshold | Interpretation |
+|---|---|---|
+| `all_ancestries_chrX_female_hwe_pass` | HWE *p* ≥ 1 × 10⁻⁶, **females only** | ChrX marker is in HWE among diploid females (HWE is invalid for hemizygous males) |
+| `all_ancestries_chrX_call_rate_pass` | call rate ≥ 0.98, chrX-specific | ChrX marker has adequate genotyping across all ancestries |
+
+When present, these columns are used by `variant_qc_mask_chrx()` for
+X-chromosome GRM (X-GRM) variant filtering.  When absent, autosomal QC
+flags are used as a fallback.
+
 A variant **must pass a flag in every ancestry** for that flag to be
 `True`.  This conservative intersection ensures that included markers
 are well-behaved across the full multi-ancestry cohort.
@@ -293,7 +307,9 @@ applies the following processing sequence:
    boolean keep-mask using the flags above.  The required flags differ
    by context:
    - **RSVD batch correction**: call rate + HWE (MAF **not** required).
-   - **GRM construction**: call rate + HWE + MAF (all three required).
+   - **Autosomal GRM construction**: call rate + HWE + MAF (all three required).
+   - **X-GRM construction**: `chrX_female_hwe_pass` + `chrX_call_rate_pass`
+     when available; otherwise falls back to autosomal QC flags.
 3. **LD prune (GRM only)** — After the QC mask is applied, GRM markers
    are LD-pruned (default: r² < 0.2, 1 Mb window) to prevent highly
    linked regions from dominating the GRM eigenstructure.

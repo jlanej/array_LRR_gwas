@@ -41,6 +41,10 @@ _COL_MAF = "all_ancestries_maf_pass"
 _COL_QC_PASS = "all_ancestries_qc_pass"
 _REQUIRED_COLUMNS = frozenset({_COL_VARIANT_ID, _COL_CALL_RATE, _COL_HWE, _COL_MAF})
 
+# Sex-chromosome-specific QC columns (optional; from illumina_idat_processing PR #96).
+_COL_CHRX_FEMALE_HWE_PASS = "all_ancestries_chrX_female_hwe_pass"
+_COL_CHRX_CALL_RATE_PASS = "all_ancestries_chrX_call_rate_pass"
+
 # Recognised boolean true literals (case-insensitive).
 _TRUE_LITERALS = frozenset({"true", "1", "yes"})
 
@@ -62,7 +66,10 @@ def _parse_bool(value: str) -> bool:
 class VariantQCRecord:
     """Lightweight container for a single variant's QC flags."""
 
-    __slots__ = ("variant_id", "call_rate_pass", "hwe_pass", "maf_pass", "qc_pass")
+    __slots__ = (
+        "variant_id", "call_rate_pass", "hwe_pass", "maf_pass", "qc_pass",
+        "chrx_female_hwe_pass", "chrx_call_rate_pass",
+    )
 
     def __init__(
         self,
@@ -71,12 +78,16 @@ class VariantQCRecord:
         hwe_pass: bool,
         maf_pass: bool,
         qc_pass: bool | None = None,
+        chrx_female_hwe_pass: bool | None = None,
+        chrx_call_rate_pass: bool | None = None,
     ) -> None:
         self.variant_id = variant_id
         self.call_rate_pass = call_rate_pass
         self.hwe_pass = hwe_pass
         self.maf_pass = maf_pass
         self.qc_pass = qc_pass
+        self.chrx_female_hwe_pass = chrx_female_hwe_pass
+        self.chrx_call_rate_pass = chrx_call_rate_pass
 
 
 def read_collated_variant_qc(
@@ -136,6 +147,18 @@ def read_collated_variant_qc(
                 qc_pass=(
                     _parse_bool(row[_COL_QC_PASS])
                     if _COL_QC_PASS in present_columns
+                    else None
+                ),
+                chrx_female_hwe_pass=(
+                    _parse_bool(row[_COL_CHRX_FEMALE_HWE_PASS])
+                    if _COL_CHRX_FEMALE_HWE_PASS in present_columns
+                    and row.get(_COL_CHRX_FEMALE_HWE_PASS, "NA").strip().upper() != "NA"
+                    else None
+                ),
+                chrx_call_rate_pass=(
+                    _parse_bool(row[_COL_CHRX_CALL_RATE_PASS])
+                    if _COL_CHRX_CALL_RATE_PASS in present_columns
+                    and row.get(_COL_CHRX_CALL_RATE_PASS, "NA").strip().upper() != "NA"
                     else None
                 ),
             )
@@ -360,5 +383,81 @@ def variant_qc_mask(
             included=included_ids,
             excluded=excluded_with_reason,
         )
+
+    return mask
+
+
+def variant_qc_mask_chrx(
+    variant_ids: Sequence[str] | NDArray,
+    qc_data: dict[str, VariantQCRecord] | None = None,
+) -> NDArray[np.bool_]:
+    """Build a boolean keep-mask for chrX variants using sex-chromosome QC.
+
+    Uses ``all_ancestries_chrX_female_hwe_pass`` and
+    ``all_ancestries_chrX_call_rate_pass`` columns from the upstream
+    collated variant QC.  When those columns are absent, falls back to
+    the standard autosomal ``all_ancestries_qc_pass`` composite.
+
+    Parameters
+    ----------
+    variant_ids : sequence of str
+        Ordered variant identifiers.
+    qc_data : dict or None
+        Output of :func:`read_collated_variant_qc`.
+
+    Returns
+    -------
+    mask : ndarray of bool
+        ``True`` for variants that pass chrX QC.
+    """
+    ids = np.asarray(variant_ids, dtype=str)
+    n = len(ids)
+
+    if qc_data is None:
+        warnings.warn(
+            "No upstream variant QC data provided for chrX; "
+            "returning all-True mask.",
+            stacklevel=2,
+        )
+        return np.ones(n, dtype=bool)
+
+    mask = np.ones(n, dtype=bool)
+    n_fail_hwe = 0
+    n_fail_cr = 0
+    n_not_in_qc = 0
+    n_used_autosomal_fallback = 0
+
+    for i, vid in enumerate(ids):
+        rec = qc_data.get(str(vid))
+        if rec is None:
+            mask[i] = False
+            n_not_in_qc += 1
+            continue
+
+        # Prefer sex-chromosome-specific QC columns
+        if rec.chrx_female_hwe_pass is not None or rec.chrx_call_rate_pass is not None:
+            if rec.chrx_female_hwe_pass is not None and not rec.chrx_female_hwe_pass:
+                mask[i] = False
+                n_fail_hwe += 1
+            if rec.chrx_call_rate_pass is not None and not rec.chrx_call_rate_pass:
+                mask[i] = False
+                n_fail_cr += 1
+        else:
+            # Fall back to autosomal composite when chrX-specific columns absent
+            n_used_autosomal_fallback += 1
+            if rec.qc_pass is not None:
+                if not rec.qc_pass:
+                    mask[i] = False
+            else:
+                if not rec.call_rate_pass or not rec.hwe_pass:
+                    mask[i] = False
+
+    n_pass = int(mask.sum())
+    logger.info(
+        "[chrx_variant_qc] %d / %d pass — hwe_fail=%d, cr_fail=%d, "
+        "not_in_qc=%d, autosomal_fallback=%d",
+        n_pass, n, n_fail_hwe, n_fail_cr, n_not_in_qc,
+        n_used_autosomal_fallback,
+    )
 
     return mask

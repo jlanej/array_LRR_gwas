@@ -7,6 +7,11 @@ immunoglobulin heavy- and light-chain loci – all of which are known to
 confound array-based LRR analyses due to structural complexity, segmental
 duplication, or copy-number polymorphism.
 
+Also provides pseudoautosomal region (PAR1/PAR2) and X-transposed region
+(XTR) coordinates for each build.  PAR/XTR regions on the X chromosome
+recombine and segregate like autosomes; they must be excluded from
+X-chromosome GRM (X-GRM) computation.
+
 T2T-CHM13 (CHM13v2.0) is included because the fully resolved centromeric
 satellite arrays are substantially larger than the gap-based coordinates
 in GRCh37/38 and must be excluded from batch-effect estimation.
@@ -19,6 +24,8 @@ Sources
   (Altemose et al. 2022, *Science*).
 - MHC/HLA: classical MHC region boundaries (chr6).
 - Immunoglobulin loci: IGH (chr14), IGK (chr2), IGL (chr22).
+- PAR/XTR regions: derived from illumina_idat_processing utils.sh
+  (Laurie et al. 2012, *Genet Epidemiol* 36:384–91).
 """
 
 from __future__ import annotations
@@ -152,6 +159,66 @@ _T2T_CHM13_REGIONS: dict[str, list[tuple[int, int]]] = {
 _T2T_CHM13_REGIONS["chr2"].append((88_857_361, 89_331_083))
 
 
+# ── Pseudoautosomal / X-transposed region catalogues ──────────────────────
+# PAR1 and PAR2 recombine and segregate like autosomes; XTR is the
+# X-transposed region that also shows autosomal-like behaviour.
+# Coordinates are 1-based, inclusive (VCF POS convention) and sourced
+# from illumina_idat_processing/scripts/utils.sh.
+
+# ---------- GRCh37 (hg19) PAR ----------
+_GRCH37_PAR: dict[str, list[tuple[int, int]]] = {
+    "X":    [(60_001, 2_699_520),              # PAR1
+             (2_699_520, 6_100_000),            # XTR
+             (154_931_044, 155_260_560)],        # PAR2
+    "Y":    [(10_001, 2_649_520),               # PAR1
+             (59_034_050, 59_363_566)],          # PAR2
+}
+
+# ---------- GRCh38 (hg38) PAR ----------
+_GRCH38_PAR: dict[str, list[tuple[int, int]]] = {
+    "chrX": [(10_001, 2_781_479),              # PAR1
+             (2_781_479, 6_400_000),            # XTR
+             (155_701_383, 156_030_895)],        # PAR2
+    "chrY": [(10_001, 2_781_479),              # PAR1
+             (56_887_903, 57_217_415)],          # PAR2
+}
+
+# ---------- T2T-CHM13 (CHM13v2.0) PAR ----------
+_T2T_CHM13_PAR: dict[str, list[tuple[int, int]]] = {
+    "chrX": [(0, 2_781_479),                   # PAR1
+             (2_781_479, 6_400_875),            # XTR
+             (155_701_382, 156_040_895)],        # PAR2
+    "chrY": [(0, 2_458_320),                   # PAR1
+             (2_458_320, 6_400_875),            # XTR
+             (62_122_809, 62_460_029)],          # PAR2
+}
+
+# Bare-number variants for GRCh38/T2T PAR (GRCh37 already uses bare names)
+_GRCH38_PAR_NOPREFIX = {
+    k.replace("chr", ""): v for k, v in _GRCH38_PAR.items()
+}
+_T2T_CHM13_PAR_NOPREFIX = {
+    k.replace("chr", ""): v for k, v in _T2T_CHM13_PAR.items()
+}
+# GRCh37 uses bare-number by default; create chr-prefixed variant
+_GRCH37_PAR_PREFIX = {
+    f"chr{k}": v for k, v in _GRCH37_PAR.items()
+}
+
+# Master PAR lookups
+_BUILD_PAR: dict[str, dict[str, list[tuple[int, int]]]] = {
+    "GRCh37": _GRCH37_PAR_PREFIX,
+    "GRCh38": _GRCH38_PAR,
+    "T2T-CHM13": _T2T_CHM13_PAR,
+}
+
+_BUILD_PAR_NOPREFIX: dict[str, dict[str, list[tuple[int, int]]]] = {
+    "GRCh37": _GRCH37_PAR,
+    "GRCh38": _GRCH38_PAR_NOPREFIX,
+    "T2T-CHM13": _T2T_CHM13_PAR_NOPREFIX,
+}
+
+
 # Bare-number (Ensembl-style) variants of each catalogue
 _GRCH37_REGIONS_NOPREFIX = {
     k.replace("chr", ""): v for k, v in _GRCH37_REGIONS.items()
@@ -216,6 +283,48 @@ def get_exclusion_regions(
         regions = _BUILD_REGIONS[canon]
     else:
         regions = _BUILD_REGIONS_NOPREFIX[canon]
+
+    return dict(regions)
+
+
+def get_par_regions(
+    build: str,
+    chromosomes: list[str] | None = None,
+) -> dict[str, list[tuple[int, int]]]:
+    """Return PAR/XTR regions for a genome build.
+
+    These regions should be excluded from X-chromosome GRM (X-GRM)
+    computation because they recombine and segregate like autosomes.
+
+    Parameters
+    ----------
+    build : str
+        ``"GRCh37"``, ``"GRCh38"``, or ``"T2T-CHM13"`` (case-insensitive;
+        common aliases accepted).
+    chromosomes : list of str or None
+        If provided, the returned regions use matching chromosome naming
+        (``chr``-prefixed or bare numbers).
+
+    Returns
+    -------
+    regions : dict mapping chromosome → list of (start, end)
+        1-based inclusive coordinates.
+    """
+    canon = _normalise_build(build)
+    if canon not in _BUILD_PAR:
+        raise ValueError(
+            f"Unknown genome build {build!r}. "
+            f"Supported: {', '.join(SUPPORTED_BUILDS)}."
+        )
+
+    use_prefix = True
+    if chromosomes:
+        use_prefix = any(c.startswith("chr") for c in chromosomes)
+
+    if use_prefix:
+        regions = _BUILD_PAR[canon]
+    else:
+        regions = _BUILD_PAR_NOPREFIX[canon]
 
     return dict(regions)
 

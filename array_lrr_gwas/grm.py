@@ -18,6 +18,11 @@ where *Z* is the *n × M* matrix of standardised genotypes:
 
 Missing genotypes are mean-imputed *before* standardisation.
 
+For the **X-chromosome GRM (X-GRM)**, males are hemizygous and must be
+coded as 0/2 (not 0/1) so that their dosage maps onto the female scale.
+PAR/XTR regions are excluded because they recombine like autosomes.
+See :func:`compute_x_grm` for the full implementation.
+
 .. note::
 
    For best-practice GRM estimation, the input dosage matrix should be
@@ -102,6 +107,158 @@ def compute_grm(
 
     # GRM = (1/M) Z^T Z  (Z is m×n, we want n×n)
     grm = (Z.T @ Z) / m
+    return grm
+
+
+def compute_x_grm(
+    dosage: NDArray[np.floating],
+    is_male: NDArray[np.bool_],
+    *,
+    variant_positions: list[tuple[str, int]] | None = None,
+    par_regions: dict[str, list[tuple[int, int]]] | None = None,
+    min_maf: float = 0.01,
+) -> NDArray[np.floating]:
+    """Compute the X-chromosome Genetic Relationship Matrix (X-GRM).
+
+    Implements the GCTA X-GRM mathematics (Yang et al. 2011) with
+    sex-aware genotype coding:
+
+    * **Males** (hemizygous): dosage coded as 0 or 2 (not 0/1).
+    * **Females** (diploid): dosage coded as 0, 1, or 2.
+    * **PAR/XTR regions** are excluded (autosomal-like recombination).
+    * Allele frequencies are computed jointly across all samples
+      using the 0/2 male coding.
+    * Standardisation uses the autosomal formula which correctly
+      yields variance = 2 for males (complete hemizygosity).
+
+    Parameters
+    ----------
+    dosage : ndarray, shape (n_variants, n_samples)
+        Additive dosage matrix for non-PAR chrX variants.
+        Males **should** already be coded as 0/2 from the BCF/VCF;
+        if 0/1 coding is detected it is automatically rescaled.
+    is_male : ndarray of bool, shape (n_samples,)
+        ``True`` for male samples, ``False`` for female samples.
+    variant_positions : list of (chrom, pos) or None
+        Per-variant chromosome and position for PAR exclusion.
+        When ``None``, no PAR filtering is performed (caller is
+        responsible for pre-filtering).
+    par_regions : dict mapping chrom → list of (start, end) or None
+        PAR/XTR regions to exclude.  Only used when
+        *variant_positions* is also provided.
+    min_maf : float
+        Minimum minor allele frequency.  Variants below this
+        threshold are excluded.
+
+    Returns
+    -------
+    grm : ndarray, shape (n_samples, n_samples)
+        Symmetric X-chromosome GRM.
+
+    Raises
+    ------
+    ValueError
+        If no variants remain after filtering, or dimension mismatches.
+    """
+    n_variants, n_samples = dosage.shape
+    if is_male.shape != (n_samples,):
+        raise ValueError(
+            f"is_male must have shape ({n_samples},), got {is_male.shape}"
+        )
+
+    Z = dosage.copy()
+
+    # --- PAR/XTR exclusion ---
+    if variant_positions is not None and par_regions is not None:
+        par_mask = np.zeros(n_variants, dtype=bool)
+        for i, (chrom, pos) in enumerate(variant_positions):
+            regions = par_regions.get(chrom, [])
+            for start, end in regions:
+                if start <= pos <= end:
+                    par_mask[i] = True
+                    break
+        n_par = int(par_mask.sum())
+        if n_par > 0:
+            logger.info(
+                "X-GRM: excluding %d PAR/XTR variants (%d remain)",
+                n_par, n_variants - n_par,
+            )
+            Z = Z[~par_mask]
+            n_variants = Z.shape[0]
+
+    if n_variants == 0:
+        raise ValueError(
+            "No X-chromosome variants remain after PAR/XTR exclusion; "
+            "cannot compute X-GRM."
+        )
+
+    # --- Male dosage rescaling (0/1 → 0/2) ---
+    # Males are hemizygous on chrX, so their genotype dosage should be
+    # 0 or 2 (not 0/1).  If any male value is near 1.0 (heterozygous
+    # call) *and* the maximum male dosage is ≤ 1, assume the input uses
+    # 0/1 coding and rescale to 0/2.  The max-dosage check prevents
+    # corrupting data that is already on the 0/2 scale but contains a
+    # noisy imputed value near 1.0.
+    _MALE_HET_DETECT_TOL = 0.05
+    _MALE_MAX_DOSAGE_01_THRESHOLD = 1.05
+    male_cols = np.where(is_male)[0]
+    if male_cols.size > 0:
+        male_data = Z[:, male_cols]
+        finite_male = male_data[np.isfinite(male_data)]
+        if finite_male.size > 0:
+            has_het = np.any(np.abs(finite_male - 1.0) < _MALE_HET_DETECT_TOL)
+            if has_het:
+                if np.max(finite_male) <= _MALE_MAX_DOSAGE_01_THRESHOLD:
+                    logger.info(
+                        "X-GRM: rescaling male dosages from 0/1 to 0/2 coding"
+                    )
+                    Z[:, male_cols] = male_data * 2.0
+                else:
+                    logger.debug(
+                        "X-GRM: detected male dosages near 1.0, but max "
+                        "dosage (%.2f) suggests 0/2 coding; skipping rescale",
+                        np.max(finite_male),
+                    )
+
+    # --- Mean-impute missing values per variant ---
+    nan_mask = np.isnan(Z)
+    if nan_mask.any():
+        row_means = np.nanmean(Z, axis=1, keepdims=True)
+        Z = np.where(nan_mask, row_means, Z)
+
+    # --- Joint allele frequency: p_j = sum(x_ij) / (2N) ---
+    freq = Z.mean(axis=1) / 2.0
+    maf = np.minimum(freq, 1.0 - freq)
+
+    # --- MAF filter ---
+    keep = maf >= min_maf
+    Z = Z[keep]
+    freq = freq[keep]
+
+    if Z.shape[0] == 0:
+        raise ValueError(
+            "No X-chromosome variants remain after MAF filtering "
+            f"(min_maf={min_maf}); cannot compute X-GRM."
+        )
+
+    m = Z.shape[0]
+
+    # --- Standardise: z_ij = (x_ij - 2p_j) / sqrt(2 p_j (1 - p_j)) ---
+    denom = np.sqrt(2.0 * freq * (1.0 - freq))
+    safe = denom > 0
+    Z[safe] = (Z[safe] - 2.0 * freq[safe, np.newaxis]) / denom[safe, np.newaxis]
+    Z[~safe] = 0.0
+
+    # --- X-GRM = (1/M) Z Z^T ---
+    grm = (Z.T @ Z) / m
+
+    logger.info(
+        "X-GRM computed: %d × %d from %d non-PAR X-chromosome variants "
+        "(%d males, %d females)",
+        grm.shape[0], grm.shape[1], m,
+        int(is_male.sum()), int((~is_male).sum()),
+    )
+
     return grm
 
 
