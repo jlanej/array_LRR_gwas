@@ -409,7 +409,8 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--ld-backend` | str | `plink2` | LD-pruning backend: `plink2` (default, **required** — install from [cog-genomics.org](https://www.cog-genomics.org/plink/2.0/)) or `numpy` (explicit fallback). If plink2 is not on PATH and `plink2` is selected, the pipeline exits with an error. |
 | `--no-exclude-intensity-only` | flag | `False` | Retain INTENSITY_ONLY markers in association (excluded by default because they lack GT) |
 | `--no-exclude-monomorphic-lrr` | flag | `False` | Retain markers with zero LRR variance in association |
-| `--sex-chr-mode` | str(s) | `None` | Additional sex-chromosome scans. Requires `--sample-sheet` with `predicted_sex` column (1=male, 2=female). Values: `x_with_sex_covariate`, `x_male_only`, `x_female_only`, `y_male_only`. Each mode writes a separate TSV (e.g. `results.x_male_only.tsv`). |
+| `--sex-chr-mode` | str(s) | `None` | Additional sex-chromosome scans. Requires `--sample-sheet` with `predicted_sex` column (1=male, 2=female). Values: `x_with_sex_covariate`, `x_male_only`, `x_female_only`, `y_male_only`. Each mode writes a separate TSV (e.g. `results.x_male_only.tsv`). When `--method lmm` is used, chrX modes compute a dedicated X-chromosome GRM (X-GRM) with male 0/2 dosage coding, PAR exclusion, and sex-aware standardisation; chrY modes use the autosomal GRM subsetted to males. Falls back to OLS with a warning when X-GRM computation fails. |
+| `--build` | str | auto-detect | Genome build: `GRCh37`, `GRCh38`, `T2T-CHM13` (aliases: `hg19`, `hg38`, `hs1`). Auto-detected from the input file when possible. Used for PAR region exclusion in X-GRM computation when `--sex-chr-mode` is enabled. |
 | `--config` | path | `None` | YAML config file; reads `upstream_qc.variant_qc_path`, `sample_qc`, `association_qc`, and `association_marker_qc` settings |
 | `--audit-dir` | path | `None` | Directory for structured audit trail (per-stage TSV, JSON summary with included/excluded fractions). Enables full provenance tracking. |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
@@ -1092,6 +1093,22 @@ of these issues is essential for responsible use.
   intensity, not true copy number.  It is influenced by GC content,
   probe design, and DNA quality.  Significant associations should be
   validated with orthogonal methods (e.g. WGS, digital PCR).
+- **X-GRM requires genotype dosages.**  The X-chromosome GRM is
+  computed from `FORMAT/GT` dosages, not from LRR.  If no chrX genotype
+  data is available (e.g. the `--genotype-bcf` lacks chrX markers),
+  chrX sex-chromosome modes fall back to OLS regression.
+- **PAR exclusion depends on `--build`.**  Without a resolved genome
+  build (via `--build` or auto-detection), pseudoautosomal regions
+  cannot be excluded from the X-GRM.  The X-GRM will still be computed
+  but may include PAR variants that segregate like autosomes, slightly
+  biasing X-linked relatedness estimates.
+- **Male dosage rescaling heuristic.**  The automatic 0/1 → 0/2
+  rescaling of male chrX dosages uses a max-dosage check (≤ 1.05) to
+  avoid corrupting data already on the 0/2 scale.  In rare cases where
+  imputed male dosages have values near 1.0 (e.g. low-confidence
+  imputation), the heuristic skips rescaling and logs a debug message.
+  Verify that input genotype dosages use the expected 0/2 coding for
+  males.
 
 ### Segmentation
 
@@ -1158,11 +1175,12 @@ array_lrr_gwas/
 ├── decomposition.py     # Randomised SVD (rsvd / fbpca backends)
 ├── correction.py        # End-to-end batch correction pipeline
 ├── select_k.py          # Component selection (Marchenko-Pastur, elbow)
-├── genome_build.py      # Build detection + exclusion regions
+├── genome_build.py      # Build detection + exclusion/PAR regions
 ├── qc_config.py         # YAML configuration with override hierarchy
 ├── io_vcf.py            # BCF/VCF I/O for LRR
 ├── genotypes.py         # Genotype extraction (FORMAT/GT → dosage)
-├── grm.py               # Genetic Relationship Matrix (Yang et al. 2011)
+├── grm.py               # Genetic Relationship Matrix (autosomal + X-GRM)
+├── variant_qc.py        # Variant QC parsing (autosomal + chrX)
 ├── sample_sheet.py      # Compiled sample sheet parser
 ├── association.py        # LMM / OLS / logistic association scans
 └── segmentation.py       # HMM / threshold-merge segmentation

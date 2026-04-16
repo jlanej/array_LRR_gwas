@@ -674,7 +674,23 @@ def _build_parser() -> argparse.ArgumentParser:
             "Modes: x_with_sex_covariate — chrX with sex as a binary "
             "covariate; x_male_only — chrX males only; x_female_only — "
             "chrX females only; y_male_only — chrY males only.  Each "
-            "mode writes a separate TSV alongside the main output."
+            "mode writes a separate TSV alongside the main output.  "
+            "When --method lmm is used, chrX modes compute a dedicated "
+            "X-chromosome GRM (X-GRM) with male 0/2 dosage coding, PAR "
+            "exclusion, and sex-aware standardisation.  chrY modes use "
+            "the autosomal GRM subsetted to males.  If the X-GRM cannot "
+            "be computed, falls back to OLS with a warning."
+        ),
+    )
+    assoc.add_argument(
+        "--build",
+        type=str,
+        default=None,
+        help=(
+            "Reference genome build (GRCh37, GRCh38, T2T-CHM13, hg19, hg38, "
+            "hs1). Auto-detected from the input file when possible.  Used "
+            "for PAR region exclusion in X-GRM computation when "
+            "--sex-chr-mode is enabled."
         ),
     )
     assoc.add_argument(

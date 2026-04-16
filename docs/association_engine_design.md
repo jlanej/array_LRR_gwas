@@ -182,9 +182,53 @@ chromosomes.  Four modes are supported:
 | `y_male_only` | chrY | Males only | — |
 
 Each mode writes a separate TSV file alongside the main output
-(e.g. `results.x_male_only.tsv`).  Sex-chromosome scans always use OLS
-(no GRM) because the autosomal GRM is not appropriate for sex-linked
-markers.
+(e.g. `results.x_male_only.tsv`).
+
+### X-Chromosome GRM (X-GRM)
+
+When `--method lmm` is used, chrX modes compute a **dedicated
+X-chromosome GRM (X-GRM)** following the GCTA methodology (Yang et al.
+2011) rather than using the autosomal GRM or falling back to OLS.  The
+X-GRM correctly handles male hemizygosity and sex-specific allele
+frequency contributions:
+
+1. **Male dosage coding:** Males are coded as 0/2 (not 0/1) to map
+   hemizygous dosage onto the diploid female scale.  If 0/1 coding is
+   detected (max male dosage ≤ 1.05), dosages are automatically
+   rescaled to 0/2.
+2. **PAR/XTR exclusion:** Pseudoautosomal regions (PAR1, PAR2) and the
+   X-transposed region (XTR) are excluded from X-GRM computation using
+   build-specific coordinates (GRCh37, GRCh38, T2T-CHM13).  PAR
+   markers segregate like autosomes and must not contribute to X-linked
+   relatedness.  The genome build is specified via `--build` or
+   auto-detected from the input BCF.
+3. **Joint allele frequency:** Allele frequency is computed jointly
+   across males (0/2) and females (0/1/2): p_j = sum(x_ij) / 2N.
+4. **Standardisation:** z_ij = (x_ij − 2p_j) / sqrt(2p_j(1−p_j)).
+   This yields male diagonal values ≈ 2.0 (reflecting complete
+   hemizygous homozygosity) and female diagonal values ≈ 1.0.
+5. **Matrix construction:** K_X = (1/M) Z Zᵀ.
+6. **Upstream chrX QC:** When `--variant-qc` is provided, chrX-specific
+   QC columns (`all_ancestries_chrX_female_hwe_pass`,
+   `all_ancestries_chrX_call_rate_pass`) are used for variant filtering.
+   HWE is computed from **females only** (standard for chrX).  When
+   chrX-specific columns are absent, autosomal QC flags are used as a
+   fallback.
+
+### chrY Handling
+
+The `y_male_only` mode uses the **autosomal GRM subsetted to males** to
+control for population structure.  The Y chromosome is strictly
+paternally inherited and does not recombine, so true Y-IBD is a step
+function.  As GCTA does not implement `--make-grm-y`, reusing the
+autosomal GRM to control for baseline population structure and cryptic
+relatedness is the standard pragmatic approach (GCTA, fastGWA).
+
+### Fallback Behaviour
+
+If the X-GRM cannot be computed (e.g. no chrX genotypes available, all
+variants filtered, or insufficient samples), the pipeline falls back to
+OLS regression with a warning.
 
 Requires `--sample-sheet` with a `predicted_sex` column (1 = male,
 2 = female).  Modes with fewer than 3 qualifying samples are skipped
