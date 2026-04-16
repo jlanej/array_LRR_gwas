@@ -409,7 +409,7 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--ld-backend` | str | `plink2` | LD-pruning backend: `plink2` (default, **required** — install from [cog-genomics.org](https://www.cog-genomics.org/plink/2.0/)) or `numpy` (explicit fallback). If plink2 is not on PATH and `plink2` is selected, the pipeline exits with an error. |
 | `--no-exclude-intensity-only` | flag | `False` | Retain INTENSITY_ONLY markers in association (excluded by default because they lack GT) |
 | `--no-exclude-monomorphic-lrr` | flag | `False` | Retain markers with zero LRR variance in association |
-| `--sex-chr-mode` | str(s) | `None` | Additional sex-chromosome scans. Requires `--sample-sheet` with `predicted_sex` column (1=male, 2=female). Values: `x_with_sex_covariate`, `x_male_only`, `x_female_only`, `y_male_only`. Each mode writes a separate TSV (e.g. `results.x_male_only.tsv`). When `--method lmm` is used, chrX modes compute a dedicated X-chromosome GRM (X-GRM) with male 0/2 dosage coding, PAR exclusion, and sex-aware standardisation; chrY modes use the autosomal GRM subsetted to males. Falls back to OLS with a warning when X-GRM computation fails. |
+| `--sex-chr-mode` | str(s) | all modes when `--sample-sheet` provided | Sex-chromosome scans. When `--sample-sheet` is provided, all four modes run by default: `x_with_sex_covariate`, `x_male_only`, `x_female_only`, `y_male_only`. Pass `--sex-chr-mode` with no arguments to skip all sex-chromosome analyses. Requires `--sample-sheet` with `predicted_sex` column (1=male, 2=female). Modes: `x_with_sex_covariate` — chrX full cohort with sex as a binary covariate; `x_male_only` — chrX males only; `x_female_only` — chrX females only; `y_male_only` — chrY males only. Each mode writes a separate TSV (e.g. `results.x_male_only.tsv`). **Constant covariates** (zero variance among the analysed stratum, e.g. a sex covariate in `x_male_only`) are automatically dropped with a warning. When `--method lmm` is used, chrX modes compute a dedicated X-chromosome GRM (X-GRM) with male 0/2 dosage coding, PAR exclusion, and sex-aware standardisation; chrY modes use the autosomal GRM subsetted to males. Falls back to OLS with a warning when X-GRM computation fails. |
 | `--build` | str | auto-detect | Genome build: `GRCh37`, `GRCh38`, `T2T-CHM13` (aliases: `hg19`, `hg38`, `hs1`). Auto-detected from the input file when possible. Used for PAR region exclusion in X-GRM computation when `--sex-chr-mode` is enabled. |
 | `--config` | path | `None` | YAML config file; reads `upstream_qc.variant_qc_path`, `sample_qc`, `association_qc`, and `association_marker_qc` settings |
 | `--audit-dir` | path | `None` | Directory for structured audit trail (per-stage TSV, JSON summary with included/excluded fractions). Enables full provenance tracking. |
@@ -1093,6 +1093,19 @@ of these issues is essential for responsible use.
   intensity, not true copy number.  It is influenced by GC content,
   probe design, and DNA quality.  Significant associations should be
   validated with orthogonal methods (e.g. WGS, digital PCR).
+- **Sex-stratified analyses drop constant covariates automatically.**
+  In sex-stratified modes (`x_male_only`, `x_female_only`, `y_male_only`)
+  all analysed samples are of the same sex, so any sex covariate in the
+  phenotype file would be constant (zero variance) and uninformative.
+  The pipeline scans covariates for each mode before fitting, automatically
+  drops constant columns, and emits a `WARNING` log line listing the
+  dropped names.  The `x_with_sex_covariate` mode adds sex explicitly as
+  a covariate after this scan, so it is never dropped in that mode.
+- **Sex-chromosome analyses default to all four modes.**  When
+  `--sample-sheet` is provided with a `predicted_sex` column, all four
+  sex-chromosome modes (`x_with_sex_covariate`, `x_male_only`,
+  `x_female_only`, `y_male_only`) run automatically.  Pass
+  `--sex-chr-mode` with no arguments to opt out entirely.
 - **X-GRM requires genotype dosages.**  The X-chromosome GRM is
   computed from `FORMAT/GT` dosages, not from LRR.  If no chrX genotype
   data is available (e.g. the `--genotype-bcf` lacks chrX markers),
