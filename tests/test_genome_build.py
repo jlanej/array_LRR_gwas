@@ -11,6 +11,7 @@ from array_lrr_gwas.genome_build import (
     _normalise_build,
     detect_build,
     get_exclusion_regions,
+    get_par_regions,
 )
 
 
@@ -141,3 +142,47 @@ class TestDetectBuild:
         # Our test BCF doesn't embed contig lengths, so detection may
         # return None – that's fine; the CLI requires --build in that case.
         assert result is None or result in SUPPORTED_BUILDS
+
+
+class TestGetParRegions:
+    """Tests for ``get_par_regions``."""
+
+    @pytest.mark.parametrize("build", SUPPORTED_BUILDS)
+    def test_all_builds_return_regions(self, build):
+        regions = get_par_regions(build)
+        assert len(regions) > 0
+
+    @pytest.mark.parametrize("build", SUPPORTED_BUILDS)
+    def test_par_contains_x_chromosome(self, build):
+        regions = get_par_regions(build)
+        x_chroms = {k for k in regions if k.upper().replace("CHR", "") == "X"}
+        assert len(x_chroms) >= 1, f"No X chromosome PAR for {build}"
+
+    @pytest.mark.parametrize("build", SUPPORTED_BUILDS)
+    def test_par_contains_y_chromosome(self, build):
+        regions = get_par_regions(build)
+        y_chroms = {k for k in regions if k.upper().replace("CHR", "") == "Y"}
+        assert len(y_chroms) >= 1, f"No Y chromosome PAR for {build}"
+
+    def test_grch37_uses_bare_names_by_default(self):
+        """GRCh37 uses non-prefixed names (X, Y) in its definition."""
+        regions = get_par_regions("GRCh37", chromosomes=["X", "Y"])
+        assert "X" in regions
+        assert "Y" in regions
+
+    def test_grch38_uses_chr_prefix(self):
+        regions = get_par_regions("GRCh38", chromosomes=["chrX"])
+        assert "chrX" in regions
+
+    def test_t2t_par1_reasonable_size(self):
+        """T2T PAR1 on chrX should be ~2.78 Mb."""
+        regions = get_par_regions("T2T-CHM13")
+        chrx_regions = regions["chrX"]
+        # First region is PAR1
+        par1_start, par1_end = chrx_regions[0]
+        par1_size = par1_end - par1_start
+        assert 2_000_000 < par1_size < 4_000_000
+
+    def test_unknown_build_raises(self):
+        with pytest.raises(ValueError, match="Unknown genome build"):
+            get_par_regions("UnknownBuild")

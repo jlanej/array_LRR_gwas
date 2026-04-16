@@ -2502,19 +2502,6 @@ def _run_associate(args: argparse.Namespace) -> int:
             )
             return 1
 
-        # Warn about relatedness inflation when a GRM was computed for the
-        # autosomal scan.  Sex-chr scans use OLS (the autosomal GRM is not
-        # appropriate for X/Y), so cryptic relatedness is not corrected.
-        if grm is not None:
-            logger.warning(
-                "Sex-chromosome association scans use OLS (no GRM). "
-                "The autosomal GRM computed for the main scan is NOT applied "
-                "to sex-chromosome markers.  If your cohort contains related "
-                "individuals, type I error may be inflated for sex-chromosome "
-                "markers.  Consider pre-filtering close relatives (kinship > "
-                "0.125) before interpreting sex-chromosome results."
-            )
-
         from array_lrr_gwas.sample_sheet import read_sample_sheet as _read_ss
 
         _sx_ids, _sx_covs, _sx_names = _read_ss(
@@ -2613,6 +2600,147 @@ def _run_associate(args: argparse.Namespace) -> int:
             len(_x_vars), len(_y_vars),
         )
 
+        # ------------------------------------------------------------------
+        # Compute X-GRM for chrX LMM scans
+        # ------------------------------------------------------------------
+        # When the autosomal scan used LMM (grm is not None), compute a
+        # dedicated X-chromosome GRM (X-GRM) using the GCTA methodology.
+        # For sex-stratified modes we subset the GRM accordingly.
+        # For chrY, we use the autosomal GRM subsetted to males.
+        # ------------------------------------------------------------------
+        _x_grm = None
+        _use_lmm_for_x = (args.method == "lmm") and _need_x and len(_x_vars) > 0
+        if _use_lmm_for_x:
+            from array_lrr_gwas.genotypes import read_genotypes as _read_gt_x
+            from array_lrr_gwas.genome_build import (
+                detect_build as _detect_build_x,
+                get_par_regions as _get_par_x,
+            )
+            from array_lrr_gwas.grm import compute_x_grm as _compute_x_grm
+
+            # Resolve genome build for PAR exclusion
+            _build_x = args.build
+            if _build_x is None:
+                _build_x = _detect_build_x(input_path)
+            _par_regions = None
+            if _build_x is not None:
+                _par_regions = _get_par_x(
+                    _build_x,
+                    chromosomes=[_x_vars[0].get("chrom", "chrX")],
+                )
+                logger.info(
+                    "Using PAR regions for build %s in X-GRM computation",
+                    _build_x,
+                )
+
+            # Read chrX genotype dosages for X-GRM
+            gt_path_x = args.genotype_bcf or input_path
+            try:
+                _gt_dosage_x, _gt_samples_x, _gt_variants_x = _read_gt_x(
+                    gt_path_x, min_maf=0.0, min_call_rate=0.0,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not read genotypes for X-GRM from %s: %s. "
+                    "Falling back to OLS for chrX scans.",
+                    gt_path_x, exc,
+                )
+                _use_lmm_for_x = False
+
+        if _use_lmm_for_x:
+            # Filter to chrX non-PAR variants
+            _chrx_gt_mask = np.array(
+                [v.get("chrom", "") in _X_CHROMS for v in _gt_variants_x],
+                dtype=bool,
+            )
+            _chrx_dosage = _gt_dosage_x[_chrx_gt_mask]
+            _chrx_gt_vars = [v for v, k in zip(_gt_variants_x, _chrx_gt_mask) if k]
+
+            if _chrx_dosage.shape[0] == 0:
+                logger.warning(
+                    "No chrX genotype variants found for X-GRM; "
+                    "falling back to OLS for chrX scans."
+                )
+                _use_lmm_for_x = False
+            else:
+                # Apply upstream variant QC if available
+                variant_qc_path_x = (
+                    args.variant_qc
+                    or cfg.get("upstream_qc", {}).get("variant_qc_path")
+                )
+                if variant_qc_path_x is not None:
+                    from array_lrr_gwas.variant_qc import (
+                        read_collated_variant_qc as _read_vqc_x,
+                        variant_qc_mask_chrx as _vqc_chrx,
+                    )
+                    _qc_data_x = _read_vqc_x(variant_qc_path_x)
+                    _chrx_var_ids = [
+                        _variant_id(v) for v in _chrx_gt_vars
+                    ]
+                    _chrx_qc_mask = _vqc_chrx(_chrx_var_ids, _qc_data_x)
+                    _chrx_dosage = _chrx_dosage[_chrx_qc_mask]
+                    _chrx_gt_vars = [
+                        v for v, k in zip(_chrx_gt_vars, _chrx_qc_mask) if k
+                    ]
+                    logger.info(
+                        "chrX variant QC for X-GRM: %d → %d variants",
+                        int(_chrx_gt_mask.sum()),
+                        _chrx_dosage.shape[0],
+                    )
+
+                # Align genotype samples to analyzed samples
+                _gt_s_idx_x = {s: i for i, s in enumerate(_gt_samples_x)}
+                _reorder_x = [
+                    _gt_s_idx_x[s] for s in _analyzed_ids
+                    if s in _gt_s_idx_x
+                ]
+                if len(_reorder_x) != len(_analyzed_ids):
+                    logger.warning(
+                        "X-GRM: %d / %d analyzed samples found in genotype "
+                        "file; falling back to OLS for chrX scans.",
+                        len(_reorder_x), len(_analyzed_ids),
+                    )
+                    _use_lmm_for_x = False
+                else:
+                    _chrx_dosage = _chrx_dosage[:, _reorder_x]
+
+                    # Build variant positions for PAR exclusion
+                    _vpos_x = [
+                        (v.get("chrom", ""), v.get("pos", 0))
+                        for v in _chrx_gt_vars
+                    ]
+
+                    try:
+                        _x_grm = _compute_x_grm(
+                            _chrx_dosage,
+                            _male,
+                            variant_positions=_vpos_x,
+                            par_regions=_par_regions,
+                            min_maf=args.min_maf,
+                        )
+                        logger.info(
+                            "X-GRM computed: %d × %d",
+                            _x_grm.shape[0], _x_grm.shape[1],
+                        )
+                    except ValueError as exc:
+                        logger.warning(
+                            "X-GRM computation failed: %s. "
+                            "Falling back to OLS for chrX scans.",
+                            exc,
+                        )
+                        _use_lmm_for_x = False
+
+        # chrY: subset autosomal GRM to males if available
+        _y_grm = None
+        if grm is not None and "y_male_only" in sex_chr_modes:
+            _male_indices = np.where(_male)[0]
+            if len(_male_indices) >= 3:
+                _y_grm = grm[np.ix_(_male_indices, _male_indices)]
+                logger.info(
+                    "chrY: using autosomal GRM subsetted to %d males",
+                    _y_grm.shape[0],
+                )
+
         def _make_in_memory_stream(lrr_full, var_list, col_mask, chunk_size=5000):
             """Yield chunks from in-memory LRR matrix, applying column mask."""
             if lrr_full.shape[0] == 0:
@@ -2644,18 +2772,30 @@ def _run_associate(args: argparse.Namespace) -> int:
                     np.column_stack([covariates, _sex_cov])
                     if covariates is not None else _sex_cov
                 )
+                _mode_grm = _x_grm
             elif mode == "x_male_only":
                 _col_mask = _male
                 _sub_pheno = phenotype[_male]
                 _sub_cov = covariates[_male] if covariates is not None else None
+                # Subset X-GRM to male samples
+                _mode_grm = (
+                    _x_grm[np.ix_(np.where(_male)[0], np.where(_male)[0])]
+                    if _x_grm is not None else None
+                )
             elif mode == "x_female_only":
                 _col_mask = _female
                 _sub_pheno = phenotype[_female]
                 _sub_cov = covariates[_female] if covariates is not None else None
+                # Subset X-GRM to female samples
+                _mode_grm = (
+                    _x_grm[np.ix_(np.where(_female)[0], np.where(_female)[0])]
+                    if _x_grm is not None else None
+                )
             else:  # y_male_only
                 _col_mask = _male
                 _sub_pheno = phenotype[_male]
                 _sub_cov = covariates[_male] if covariates is not None else None
+                _mode_grm = _y_grm
 
             n_sub = int(_col_mask.sum())
             if n_sub < 3:
@@ -2665,9 +2805,19 @@ def _run_associate(args: argparse.Namespace) -> int:
                 )
                 return None
 
+            # Choose method: LMM when a GRM is available, else OLS
+            _mode_method = "lmm" if _mode_grm is not None else "ols"
+            if _mode_method == "ols" and mode != "y_male_only":
+                logger.warning(
+                    "Sex-chr mode %s: using OLS (no X-GRM available). "
+                    "If your cohort contains related individuals, type I "
+                    "error may be inflated.",
+                    mode,
+                )
+
             logger.info(
-                "Sex-chr mode %s: %d variants, %d samples",
-                mode, n_mv, n_sub,
+                "Sex-chr mode %s: %d variants, %d samples, method=%s",
+                mode, n_mv, n_sub, _mode_method,
             )
 
             _stream = _make_in_memory_stream(_lrr_full, _var_list, _col_mask)
@@ -2675,26 +2825,37 @@ def _run_associate(args: argparse.Namespace) -> int:
                 _stream,
                 _sub_pheno,
                 covariates=_sub_cov,
-                method="ols",
+                method=_mode_method,
+                grm=_mode_grm,
                 exclude_monomorphic=exclude_monomorphic,
                 exclude_intensity_only=False,
             )
             return mode, _res, _excl
 
-        # Run all modes in parallel threads (OLS releases GIL for most ops).
+        # Run all modes (sequential for LMM to avoid memory pressure).
         valid_modes = [
             m for m in sex_chr_modes
             if m in ("x_with_sex_covariate", "x_male_only", "x_female_only", "y_male_only")
         ]
         sex_chr_results: dict[str, tuple] = {}
 
-        with ThreadPoolExecutor(max_workers=len(valid_modes) or 1) as _pool:
-            _futures = {_pool.submit(_run_one_sex_chr_mode, m): m for m in valid_modes}
-            for _fut in as_completed(_futures):
-                _out = _fut.result()
+        _any_lmm = _use_lmm_for_x or _y_grm is not None
+        if _any_lmm:
+            # LMM modes are memory-intensive; run sequentially
+            for m in valid_modes:
+                _out = _run_one_sex_chr_mode(m)
                 if _out is not None:
                     _mode, _sx_res, _sx_excl = _out
                     sex_chr_results[_mode] = (_sx_res, _sx_excl)
+        else:
+            # Pure OLS — safe to parallelise
+            with ThreadPoolExecutor(max_workers=len(valid_modes) or 1) as _pool:
+                _futures = {_pool.submit(_run_one_sex_chr_mode, m): m for m in valid_modes}
+                for _fut in as_completed(_futures):
+                    _out = _fut.result()
+                    if _out is not None:
+                        _mode, _sx_res, _sx_excl = _out
+                        sex_chr_results[_mode] = (_sx_res, _sx_excl)
 
         # Write outputs and record audit for each completed mode.
         for mode, (_sx_res, _sx_excl) in sex_chr_results.items():

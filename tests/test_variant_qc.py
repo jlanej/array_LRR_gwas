@@ -12,6 +12,7 @@ from array_lrr_gwas.variant_qc import (
     VariantQCRecord,
     read_collated_variant_qc,
     variant_qc_mask,
+    variant_qc_mask_chrx,
 )
 
 
@@ -369,4 +370,87 @@ class TestVariantQCMaskRequireQcPass:
             require_call_rate=True, require_hwe=True, require_maf=True,
             require_qc_pass=True,
         )
+        np.testing.assert_array_equal(mask, [True, False])
+
+
+class TestVariantQcMaskChrx:
+    """Tests for ``variant_qc_mask_chrx``."""
+
+    def test_chrx_fields_parsed(self, tmp_path: Path) -> None:
+        """chrX QC columns are parsed when present."""
+        content = (
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass\t"
+            "all_ancestries_chrX_female_hwe_pass\t"
+            "all_ancestries_chrX_call_rate_pass\n"
+            "v1\tTrue\tTrue\tTrue\t1\t1\n"
+            "v2\tTrue\tTrue\tTrue\t0\t1\n"
+            "v3\tTrue\tTrue\tTrue\tNA\tNA\n"
+        )
+        tsv = _write_tsv(tmp_path, content, "chrx_qc.tsv")
+        qc = read_collated_variant_qc(tsv)
+
+        assert qc["v1"].chrx_female_hwe_pass is True
+        assert qc["v1"].chrx_call_rate_pass is True
+        assert qc["v2"].chrx_female_hwe_pass is False
+        assert qc["v2"].chrx_call_rate_pass is True
+        assert qc["v3"].chrx_female_hwe_pass is None
+        assert qc["v3"].chrx_call_rate_pass is None
+
+    def test_chrx_mask_uses_chrx_columns(self, tmp_path: Path) -> None:
+        """chrX mask should use chrX-specific QC columns."""
+        content = (
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass\t"
+            "all_ancestries_chrX_female_hwe_pass\t"
+            "all_ancestries_chrX_call_rate_pass\n"
+            "v1\tTrue\tTrue\tTrue\t1\t1\n"
+            "v2\tTrue\tTrue\tTrue\t0\t1\n"
+            "v3\tTrue\tTrue\tTrue\t1\t0\n"
+        )
+        tsv = _write_tsv(tmp_path, content, "chrx_qc.tsv")
+        qc = read_collated_variant_qc(tsv)
+
+        mask = variant_qc_mask_chrx(["v1", "v2", "v3"], qc)
+        np.testing.assert_array_equal(mask, [True, False, False])
+
+    def test_chrx_mask_fallback_to_autosomal(self, tmp_path: Path) -> None:
+        """When chrX columns are NA, falls back to autosomal QC."""
+        content = (
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass\t"
+            "all_ancestries_qc_pass\t"
+            "all_ancestries_chrX_female_hwe_pass\t"
+            "all_ancestries_chrX_call_rate_pass\n"
+            "v1\tTrue\tTrue\tTrue\tTrue\tNA\tNA\n"
+            "v2\tTrue\tFalse\tTrue\tFalse\tNA\tNA\n"
+        )
+        tsv = _write_tsv(tmp_path, content, "chrx_qc.tsv")
+        qc = read_collated_variant_qc(tsv)
+
+        mask = variant_qc_mask_chrx(["v1", "v2"], qc)
+        # v1 passes autosomal fallback; v2 fails qc_pass
+        np.testing.assert_array_equal(mask, [True, False])
+
+    def test_chrx_mask_no_qc_data(self) -> None:
+        """Returns all-True when no QC data is provided."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mask = variant_qc_mask_chrx(["v1", "v2", "v3"], None)
+        np.testing.assert_array_equal(mask, [True, True, True])
+
+    def test_chrx_mask_missing_variant(self, tmp_path: Path) -> None:
+        """Variants not in QC data should be excluded."""
+        content = (
+            "variant_id\tall_ancestries_call_rate_pass\t"
+            "all_ancestries_hwe_pass\tall_ancestries_maf_pass\t"
+            "all_ancestries_chrX_female_hwe_pass\t"
+            "all_ancestries_chrX_call_rate_pass\n"
+            "v1\tTrue\tTrue\tTrue\t1\t1\n"
+        )
+        tsv = _write_tsv(tmp_path, content, "chrx_qc.tsv")
+        qc = read_collated_variant_qc(tsv)
+
+        mask = variant_qc_mask_chrx(["v1", "v_missing"], qc)
         np.testing.assert_array_equal(mask, [True, False])
