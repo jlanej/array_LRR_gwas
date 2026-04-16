@@ -178,7 +178,35 @@ class TestComputeXGrm:
         # After rescaling, both should produce the same X-GRM
         np.testing.assert_allclose(grm_01, grm_02, atol=1e-10)
 
-    def test_handles_nan(self) -> None:
+    def test_noisy_02_not_rescaled(self) -> None:
+        """0/2-coded males with a noisy dosage near 1.0 must NOT be rescaled.
+
+        If input is already on the 0/2 scale but one variant has a
+        low-confidence imputed dosage near 1.0, the rescaling guard
+        (max-dosage check) should prevent the matrix from being doubled.
+        """
+        rng = np.random.default_rng(104)
+        n_variants, n_males, n_females = 200, 10, 10
+        n_samples = n_males + n_females
+
+        dosage = np.empty((n_variants, n_samples), dtype=np.float64)
+        for j in range(n_males):
+            dosage[:, j] = rng.choice([0.0, 2.0], size=n_variants, p=[0.7, 0.3])
+        for j in range(n_males, n_samples):
+            dosage[:, j] = rng.binomial(2, 0.3, size=n_variants).astype(float)
+
+        # Inject one noisy imputed male value near 1.0
+        dosage[0, 0] = 1.0
+
+        is_male = np.array([True] * n_males + [False] * n_females, dtype=bool)
+
+        # Without the max-dosage guard, all males would be doubled → 4.0
+        grm = compute_x_grm(dosage, is_male, min_maf=0.0)
+        # Male diagonal should still be ≈2 (not ≈8 from doubled 0/4 coding)
+        male_diag = np.diag(grm)[is_male]
+        assert np.all(male_diag < 4.0), (
+            f"Male diagonal values {male_diag} suggest incorrect rescaling"
+        )
         """Missing genotypes should be mean-imputed."""
         dosage, is_male = self._make_x_dosage()
         dosage[0, :5] = np.nan

@@ -195,8 +195,12 @@ def compute_x_grm(
     # --- Male dosage rescaling (0/1 → 0/2) ---
     # Males are hemizygous on chrX, so their genotype dosage should be
     # 0 or 2 (not 0/1).  If any male value is near 1.0 (heterozygous
-    # call), assume the input uses 0/1 coding and rescale to 0/2.
+    # call) *and* the maximum male dosage is ≤ 1, assume the input uses
+    # 0/1 coding and rescale to 0/2.  The max-dosage check prevents
+    # corrupting data that is already on the 0/2 scale but contains a
+    # noisy imputed value near 1.0.
     _MALE_HET_DETECT_TOL = 0.05
+    _MALE_MAX_DOSAGE_01_SCALE = 1.05
     male_cols = np.where(is_male)[0]
     if male_cols.size > 0:
         male_data = Z[:, male_cols]
@@ -204,10 +208,17 @@ def compute_x_grm(
         if finite_male.size > 0:
             has_het = np.any(np.abs(finite_male - 1.0) < _MALE_HET_DETECT_TOL)
             if has_het:
-                logger.info(
-                    "X-GRM: rescaling male dosages from 0/1 to 0/2 coding"
-                )
-                Z[:, male_cols] = male_data * 2.0
+                if np.max(finite_male) <= _MALE_MAX_DOSAGE_01_SCALE:
+                    logger.info(
+                        "X-GRM: rescaling male dosages from 0/1 to 0/2 coding"
+                    )
+                    Z[:, male_cols] = male_data * 2.0
+                else:
+                    logger.debug(
+                        "X-GRM: detected male dosages near 1.0, but max "
+                        "dosage (%.2f) suggests 0/2 coding; skipping rescale",
+                        np.max(finite_male),
+                    )
 
     # --- Mean-impute missing values per variant ---
     nan_mask = np.isnan(Z)
