@@ -766,13 +766,53 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     assoc.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help=(
+            "When provided, automatically generate a publication-quality "
+            "interactive HTML report at this path after the scan "
+            "completes.  The report aggregates the autosomal scan and "
+            "every sex-chromosome mode that was run, with Manhattan/QQ/"
+            "regional plots, λ_GC, top-hit tables, and UCSC gene "
+            "annotations.  Equivalent to invoking "
+            "`array-lrr-gwas report ...` on the resulting TSVs."
+        ),
+    )
+    assoc.add_argument(
+        "--report-gene-window-kb",
+        type=int,
+        default=500,
+        help=(
+            "Half-window (kb) for gene annotation around hits in the "
+            "auto-generated report (default: 500).  Only meaningful "
+            "when --report is set."
+        ),
+    )
+    assoc.add_argument(
+        "--report-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Cache directory for UCSC gene annotation downloads used "
+            "by the auto-generated report."
+        ),
+    )
+    assoc.add_argument(
+        "--no-report-gene-annotation",
+        action="store_true",
+        help=(
+            "Disable UCSC gene annotation for the auto-generated "
+            "report (no network access; report still includes plots "
+            "and top-hit tables)."
+        ),
+    )
+    assoc.add_argument(
         "-v",
         "--verbose",
         action="store_true",
         help="Enable verbose logging.",
     )
-
-    # ---- segment sub-command ----
     seg = sub.add_parser(
         "segment",
         help="Segment association results into CNV-associated intervals.",
@@ -868,6 +908,119 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Enable verbose logging.",
     )
 
+    # ---- report sub-command ----
+    rep = sub.add_parser(
+        "report",
+        help=(
+            "Generate a publication-quality interactive HTML summary "
+            "report (Manhattan/QQ/regional plots, lambda GC, top hits, "
+            "gene annotation) from association TSVs."
+        ),
+    )
+    rep.add_argument(
+        "--autosomal",
+        type=Path,
+        default=None,
+        help="Per-marker association TSV for the autosomal scan.",
+    )
+    rep.add_argument(
+        "--x-with-sex-covariate",
+        type=Path,
+        default=None,
+        help="Per-marker association TSV for x_with_sex_covariate mode.",
+    )
+    rep.add_argument(
+        "--x-male-only",
+        type=Path,
+        default=None,
+        help="Per-marker association TSV for x_male_only mode.",
+    )
+    rep.add_argument(
+        "--x-female-only",
+        type=Path,
+        default=None,
+        help="Per-marker association TSV for x_female_only mode.",
+    )
+    rep.add_argument(
+        "--y-male-only",
+        type=Path,
+        default=None,
+        help="Per-marker association TSV for y_male_only mode.",
+    )
+    rep.add_argument(
+        "-o", "--output",
+        type=Path,
+        required=True,
+        help="Output HTML file.",
+    )
+    rep.add_argument(
+        "--build",
+        type=str,
+        default=None,
+        help=(
+            "Genome build (GRCh37, GRCh38, T2T-CHM13, hg19, hg38, hs1). "
+            "Required for gene annotation.  Gene tracks are pulled from "
+            "UCSC (refGene for GRCh37/38, ncbiRefSeq for T2T-CHM13)."
+        ),
+    )
+    rep.add_argument(
+        "--gene-window-kb",
+        type=int,
+        default=500,
+        help=(
+            "Half-window (kb) used to collect nearby genes around each "
+            "hit and to define the regional-plot span (default: 500)."
+        ),
+    )
+    rep.add_argument(
+        "--top-n",
+        type=int,
+        default=10,
+        help="Number of top hits to include per mode (default: 10).",
+    )
+    rep.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for cached UCSC gene annotation downloads. "
+            "Defaults to $XDG_CACHE_HOME/array_lrr_gwas or "
+            "~/.cache/array_lrr_gwas.  Override with the environment "
+            "variable ARRAY_LRR_GWAS_CACHE."
+        ),
+    )
+    rep.add_argument(
+        "--title",
+        type=str,
+        default="Array-LRR GWAS — Summary Report",
+        help="Report title shown at the top of the HTML document.",
+    )
+    rep.add_argument(
+        "--no-gene-annotation",
+        action="store_true",
+        help=(
+            "Skip gene annotation (no UCSC download).  The report is "
+            "still generated but hits will not carry nearest-gene "
+            "columns and regional plots will lack a gene track."
+        ),
+    )
+    rep.add_argument(
+        "--top-hits-tsv-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional directory where per-mode top-hits TSV files "
+            "(top_hits.<mode>.tsv) are also written for convenient "
+            "downstream use (e.g. supplementary tables)."
+        ),
+    )
+    rep.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging.",
+    )
+
     return parser
 
 
@@ -897,6 +1050,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "segment":
         return _run_segment(args)
+
+    if args.command == "report":
+        return _run_report(args)
 
     parser.print_help()
     return 1
@@ -3025,6 +3181,43 @@ def _run_associate(args: argparse.Namespace) -> int:
         audit.write_json(audit_dir / "associate_audit.json")
         audit.write_summary_tsv(audit_dir / "associate_audit_summary.tsv")
 
+    # Auto-generate interactive HTML report if requested.
+    report_path = getattr(args, "report", None)
+    if report_path is not None:
+        from array_lrr_gwas.gwas_report import generate_gwas_report
+
+        _report_sources: dict[str, Path] = {"autosomal": args.output}
+        # Include sex-chr outputs that were actually written.
+        if 'sex_chr_results' in locals():
+            for _mode in sex_chr_results:
+                _p = out_dir / f"{out_stem}.{_mode}{out_sfx}"
+                if _p.exists():
+                    _report_sources[_mode] = _p
+
+        # Detect build if not explicitly provided, to drive gene annotation.
+        _report_build = getattr(args, "build", None)
+        if _report_build is None:
+            try:
+                from array_lrr_gwas.genome_build import detect_build as _db
+                _report_build = _db(input_path)
+            except Exception:  # pragma: no cover - best-effort detection
+                _report_build = None
+
+        try:
+            generate_gwas_report(
+                _report_sources,
+                output_path=report_path,
+                build=_report_build,
+                gene_window_kb=getattr(args, "report_gene_window_kb", 500),
+                cache_dir=getattr(args, "report_cache_dir", None),
+                annotate_genes=not getattr(
+                    args, "no_report_gene_annotation", False,
+                ),
+            )
+            logger.info("Interactive GWAS report written to %s", report_path)
+        except Exception as _exc:  # pragma: no cover - best-effort reporting
+            logger.warning("Could not generate GWAS report: %s", _exc)
+
     logger.info("Done.")
     pbar.set_description("done")
     pbar.close()
@@ -3064,6 +3257,54 @@ def _run_segment(args: argparse.Namespace) -> int:
     logger.info("Writing %d segments to %s", len(result.chrom), args.output)
     result.write_bed(args.output)
 
+    logger.info("Done.")
+    return 0
+
+
+def _run_report(args: argparse.Namespace) -> int:
+    """Execute the ``report`` sub-command."""
+    from array_lrr_gwas.gwas_report import generate_gwas_report
+
+    mode_sources: dict[str, Path] = {}
+    if args.autosomal is not None:
+        mode_sources["autosomal"] = args.autosomal
+    if args.x_with_sex_covariate is not None:
+        mode_sources["x_with_sex_covariate"] = args.x_with_sex_covariate
+    if args.x_male_only is not None:
+        mode_sources["x_male_only"] = args.x_male_only
+    if args.x_female_only is not None:
+        mode_sources["x_female_only"] = args.x_female_only
+    if args.y_male_only is not None:
+        mode_sources["y_male_only"] = args.y_male_only
+
+    if not mode_sources:
+        logger.error(
+            "No input association TSV provided.  Use at least one of "
+            "--autosomal / --x-with-sex-covariate / --x-male-only / "
+            "--x-female-only / --y-male-only."
+        )
+        return 1
+
+    for mode, path in mode_sources.items():
+        if not Path(path).exists():
+            logger.error("Input TSV for %s not found: %s", mode, path)
+            return 1
+
+    try:
+        generate_gwas_report(
+            mode_sources,
+            output_path=args.output,
+            build=args.build,
+            gene_window_kb=args.gene_window_kb,
+            top_n=args.top_n,
+            cache_dir=args.cache_dir,
+            title=args.title,
+            annotate_genes=not args.no_gene_annotation,
+            top_hits_tsv_dir=args.top_hits_tsv_dir,
+        )
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 1
     logger.info("Done.")
     return 0
 

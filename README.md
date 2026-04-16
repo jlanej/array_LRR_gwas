@@ -21,6 +21,7 @@
   - [correct](#correct)
   - [associate](#associate)
   - [segment](#segment)
+  - [report](#report)
 - [Sample Exclusion Strategies](#sample-exclusion-strategies)
   - [RSVD Correction Stage](#rsvd-correction-stage)
   - [Association Stage](#association-stage)
@@ -190,6 +191,23 @@ array-lrr-gwas associate corrected.bcf \
 
 # Step 3 — Segment into CNV regions
 array-lrr-gwas segment results.tsv -o regions.bed -v
+
+# Step 4 — Generate a publication-quality interactive HTML summary report
+# (Manhattan + QQ + regional plots, lambda_GC, top-hit tables, and UCSC
+# gene annotations) covering the autosomal scan and all sex-chromosome
+# modes.  Gene tracks are auto-downloaded from UCSC on first use and
+# cached locally.
+array-lrr-gwas report \
+    --autosomal results.tsv \
+    --x-with-sex-covariate results.x_with_sex_covariate.tsv \
+    --x-male-only results.x_male_only.tsv \
+    --x-female-only results.x_female_only.tsv \
+    --y-male-only results.y_male_only.tsv \
+    --build GRCh38 --gene-window-kb 500 \
+    -o gwas_report.html
+
+# (Alternatively, pass --report gwas_report.html to `associate` to have
+#  the report generated automatically after the scan completes.)
 ```
 
 **Best-practice workflow with upstream QC filtering:**
@@ -436,6 +454,61 @@ array-lrr-gwas segment INPUT -o OUTPUT [OPTIONS]
 | `--prior-assoc` | float | `0.001` | Prior probability of associated state (HMM only) |
 | `--transition-prob` | float | `0.0001` | Per-marker state transition probability (HMM only) |
 | `-v, --verbose` | flag | `False` | Enable debug logging |
+
+---
+
+### `report`
+
+Generate a single self-contained, interactive HTML summary report
+from one or more association TSVs (autosomal scan plus any of the
+four sex-chromosome modes).  The report collates, for each mode:
+
+* An interactive Manhattan plot (non-significant points downsampled
+  for file size; every variant with *p* < 10⁻⁵ is always kept) with
+  genome-wide (dashed red, *p* < 5×10⁻⁸) and suggestive (dotted
+  orange, *p* < 10⁻⁵) thresholds and gene labels annotating the
+  nearest gene at each genome-wide-significant locus.
+* A QQ plot with a 95 % confidence envelope under the null and the
+  genomic inflation factor λ<sub>GC</sub>.
+* Regional locus-zoom-style plots for the top loci, including a
+  gene track below the association panel (strand-aware).
+* A top-hits table with effect sizes, *p*-values, nearest gene,
+  distance to nearest gene, and all genes falling inside a
+  configurable window.
+* A methods narrative and figure legends appropriate for a
+  manuscript's supplementary materials.
+
+Gene annotations are pulled from the canonical UCSC gene tracks —
+`refGene` for GRCh37/GRCh38 and `ncbiRefSeq` for T2T-CHM13 (hs1) —
+and are auto-downloaded on first use and cached on disk.  The
+report is a single HTML file that uses Plotly from the CDN for
+interactive rendering.
+
+```
+array-lrr-gwas report [INPUTS] -o OUTPUT.html [OPTIONS]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--autosomal` | path | — | Autosomal association TSV |
+| `--x-with-sex-covariate` | path | — | chrX full-cohort TSV |
+| `--x-male-only` | path | — | chrX males-only TSV |
+| `--x-female-only` | path | — | chrX females-only TSV |
+| `--y-male-only` | path | — | chrY males-only TSV |
+| `-o, --output` | path | *required* | Output HTML file |
+| `--build` | str | — | Genome build (`GRCh37`/`GRCh38`/`T2T-CHM13` or aliases `hg19`/`hg38`/`hs1`).  Required for gene annotation. |
+| `--gene-window-kb` | int | `500` | Half-window (kb) for nearby-gene annotation and regional plots |
+| `--top-n` | int | `10` | Number of top hits to list per mode |
+| `--cache-dir` | path | `~/.cache/array_lrr_gwas` | UCSC download cache (also honours `$ARRAY_LRR_GWAS_CACHE`) |
+| `--title` | str | *see default* | Report title |
+| `--no-gene-annotation` | flag | `False` | Skip all UCSC downloads |
+| `--top-hits-tsv-dir` | path | — | Also write `top_hits.<mode>.tsv` files here |
+| `-v, --verbose` | flag | `False` | Enable debug logging |
+
+The `associate` subcommand additionally accepts `--report
+PATH.html` (plus `--report-gene-window-kb`, `--report-cache-dir`,
+and `--no-report-gene-annotation`) to auto-generate the report
+over the autosomal scan and every sex-chromosome mode that ran.
 
 ---
 

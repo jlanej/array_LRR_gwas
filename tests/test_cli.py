@@ -2070,6 +2070,70 @@ class TestCli:
         assert "n_genome_wide_sig=" in caplog.text
         assert "Effect size summary:" in caplog.text
 
+    def test_associate_auto_report_generated(
+        self, tmp_path, monkeypatch,
+    ):
+        """--report produces an interactive HTML file after the scan."""
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        out = tmp_path / "results.tsv"
+        report_html = tmp_path / "report.html"
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        lrr = np.array([[0.1, 0.2, 0.3], [0.0, 0.1, 0.2]], dtype=float)
+        samples_list = ["S1", "S2", "S3"]
+        assoc_variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples_list, assoc_variants)
+
+        class _FakeResult:
+            variant_id = ['a1', 'a2']
+            chrom = ["chr1", "chr1"]
+            p_value = np.array([1e-10, 0.3])
+            stat = np.array([5.0, 1.0])
+            beta = np.array([0.5, 0.1])
+            se = np.array([0.1, 0.1])
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                     "beta": 0.5, "se": 0.1, "stat": 5.0, "p_value": 1e-10,
+                     "n_samples": 3, "method": "ols"},
+                    {"chrom": "chr1", "pos": 200, "variant_id": "a2",
+                     "beta": 0.1, "se": 0.1, "stat": 1.0, "p_value": 0.3,
+                     "n_samples": 3, "method": "ols"},
+                ]
+
+        monkeypatch.setattr(
+            association, "run_association_streaming",
+            lambda *_a, **_k: (_FakeResult(), {
+                "n_total": 2, "n_tested": 2, "n_intensity_only": 0,
+                "n_monomorphic": 0, "excluded_markers": {},
+                "tested_mono_flags": [False, False],
+            }),
+        )
+
+        rc = main([
+            "associate", str(fake_bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "--no-exclude-monomorphic-lrr",
+            "--report", str(report_html),
+            "--no-report-gene-annotation",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert report_html.exists()
+        body = report_html.read_text()
+        assert "Manhattan" in body and "QQ" in body
+        assert "a1" in body  # the significant hit
+
     def test_associate_scan_config_logged(
         self, tmp_path, monkeypatch, caplog
     ):
