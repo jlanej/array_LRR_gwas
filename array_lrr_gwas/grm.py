@@ -193,14 +193,16 @@ def compute_x_grm(
         )
 
     # --- Male dosage rescaling (0/1 → 0/2) ---
+    # Males are hemizygous on chrX, so their genotype dosage should be
+    # 0 or 2 (not 0/1).  If any male value is near 1.0 (heterozygous
+    # call), assume the input uses 0/1 coding and rescale to 0/2.
+    _MALE_HET_DETECT_TOL = 0.05
     male_cols = np.where(is_male)[0]
     if male_cols.size > 0:
         male_data = Z[:, male_cols]
-        # Detect 0/1 coding: if any male has dosage near 1.0 (het),
-        # rescale all male dosages by 2x.
         finite_male = male_data[np.isfinite(male_data)]
         if finite_male.size > 0:
-            has_het = np.any(np.abs(finite_male - 1.0) < 0.05)
+            has_het = np.any(np.abs(finite_male - 1.0) < _MALE_HET_DETECT_TOL)
             if has_het:
                 logger.info(
                     "X-GRM: rescaling male dosages from 0/1 to 0/2 coding"

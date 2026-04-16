@@ -2624,9 +2624,11 @@ def _run_associate(args: argparse.Namespace) -> int:
                 _build_x = _detect_build_x(input_path)
             _par_regions = None
             if _build_x is not None:
+                # Determine chromosome naming convention from loaded variants
+                _x_chrom_name = _x_vars[0].get("chrom", "chrX") if _x_vars else "chrX"
                 _par_regions = _get_par_x(
                     _build_x,
-                    chromosomes=[_x_vars[0].get("chrom", "chrX")],
+                    chromosomes=[_x_chrom_name],
                 )
                 logger.info(
                     "Using PAR regions for build %s in X-GRM computation",
