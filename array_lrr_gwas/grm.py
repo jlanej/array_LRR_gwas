@@ -200,7 +200,7 @@ def compute_x_grm(
     # corrupting data that is already on the 0/2 scale but contains a
     # noisy imputed value near 1.0.
     _MALE_HET_DETECT_TOL = 0.05
-    _MALE_MAX_DOSAGE_01_SCALE = 1.05
+    _MALE_MAX_DOSAGE_01_THRESHOLD = 1.05
     male_cols = np.where(is_male)[0]
     if male_cols.size > 0:
         male_data = Z[:, male_cols]
@@ -208,7 +208,7 @@ def compute_x_grm(
         if finite_male.size > 0:
             has_het = np.any(np.abs(finite_male - 1.0) < _MALE_HET_DETECT_TOL)
             if has_het:
-                if np.max(finite_male) <= _MALE_MAX_DOSAGE_01_SCALE:
+                if np.max(finite_male) <= _MALE_MAX_DOSAGE_01_THRESHOLD:
                     logger.info(
                         "X-GRM: rescaling male dosages from 0/1 to 0/2 coding"
                     )
