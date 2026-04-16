@@ -1097,7 +1097,7 @@ of these issues is essential for responsible use.
   In sex-stratified modes (`x_male_only`, `x_female_only`, `y_male_only`)
   all analysed samples are of the same sex, so any sex covariate in the
   phenotype file would be constant (zero variance) and uninformative.
-  The pipeline scans covariates for each mode before fitting, silently
+  The pipeline scans covariates for each mode before fitting, automatically
   drops constant columns, and emits a `WARNING` log line listing the
   dropped names.  The `x_with_sex_covariate` mode adds sex explicitly as
   a covariate after this scan, so it is never dropped in that mode.

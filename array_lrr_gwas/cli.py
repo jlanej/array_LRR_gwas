@@ -97,7 +97,9 @@ def _drop_constant_covariates(
         return covariates, names
 
     filtered = covariates[:, keep]
-    filtered_names = [names[i] for i in keep if i < len(names)]
+    # names is always aligned with covariate columns at every call site;
+    # use direct indexing so a length mismatch raises immediately.
+    filtered_names = [names[i] for i in keep]
     return filtered, filtered_names
 
 

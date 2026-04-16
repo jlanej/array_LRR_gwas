@@ -484,7 +484,7 @@ class TestSexChrMode:
         assert rc == 0
         # Should warn about dropping the constant 'sex' covariate in each
         # sex-stratified mode.
-        assert "constant covariate" in caplog.text.lower() or "Dropping" in caplog.text
+        assert "dropping" in caplog.text.lower() and "constant covariate" in caplog.text.lower()
 
     def test_sex_chr_default_modes_with_sample_sheet(self, tmp_path, monkeypatch):
         """All sex-chr modes run by default when --sample-sheet is provided."""
