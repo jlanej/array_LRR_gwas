@@ -246,7 +246,8 @@ class TestFigures:
         p = rng.uniform(0, 1, 5000)
         fig = build_qq_figure(p, title="q")
         title = fig["layout"]["title"]["text"]
-        assert "λ" in title or "&lambda;" in title or "lambda" in title.lower() or "&#955;" in title
+        # Title must reference lambda_GC in some representation.
+        assert re.search(r"(λ|&lambda;|&#955;|lambda)", title, re.IGNORECASE)
         # At least one scatter trace of observed points.
         assert any(t.get("mode") == "markers" for t in fig["data"])
 

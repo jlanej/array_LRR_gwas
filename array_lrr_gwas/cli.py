@@ -2750,6 +2750,8 @@ def _run_associate(args: argparse.Namespace) -> int:
         "x_female_only",
         "y_male_only",
     ]
+    # Initialise here so downstream report-generation can always reference it.
+    sex_chr_results: dict[str, tuple] = {}
     sex_chr_modes = getattr(args, "sex_chr_mode", None)
     if sex_chr_modes is None:
         if args.sample_sheet is not None:
@@ -3131,7 +3133,6 @@ def _run_associate(args: argparse.Namespace) -> int:
             m for m in sex_chr_modes
             if m in ("x_with_sex_covariate", "x_male_only", "x_female_only", "y_male_only")
         ]
-        sex_chr_results: dict[str, tuple] = {}
 
         _any_lmm = _use_lmm_for_x or _y_grm is not None
         if _any_lmm:
@@ -3188,11 +3189,13 @@ def _run_associate(args: argparse.Namespace) -> int:
 
         _report_sources: dict[str, Path] = {"autosomal": args.output}
         # Include sex-chr outputs that were actually written.
-        if 'sex_chr_results' in locals():
-            for _mode in sex_chr_results:
-                _p = out_dir / f"{out_stem}.{_mode}{out_sfx}"
-                if _p.exists():
-                    _report_sources[_mode] = _p
+        _out_dir = args.output.parent
+        _out_stem = args.output.stem
+        _out_sfx = args.output.suffix
+        for _mode in sex_chr_results:
+            _p = _out_dir / f"{_out_stem}.{_mode}{_out_sfx}"
+            if _p.exists():
+                _report_sources[_mode] = _p
 
         # Detect build if not explicitly provided, to drive gene annotation.
         _report_build = getattr(args, "build", None)
