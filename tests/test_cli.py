@@ -581,7 +581,6 @@ class TestCli:
         """LMM with a BCF that has GT data should succeed."""
         from array_lrr_gwas.io_vcf import read_lrr
 
-
         _, samples, _ = read_lrr(test_bcf_path)
 
         import numpy as np
