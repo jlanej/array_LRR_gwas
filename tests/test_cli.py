@@ -486,8 +486,8 @@ class TestCli:
 
         lrr = np.array([[0.1, 0.2, 0.3]], dtype=float)
         samples = ["S1", "S2", "S3"]
-        assoc_variants = [{"chrom": "chr1", "pos": 100, "id": "a1"}]
-        mock_associate_io(monkeypatch, lrr, samples, assoc_variants)
+        mock_variants = [{"chrom": "chr1", "pos": 100, "id": "a1"}]
+        mock_associate_io(monkeypatch, lrr, samples, mock_variants)
 
         # If the scan ran, it would call run_association_streaming; patch it to
         # fail so the test catches any unexpected execution.
@@ -514,9 +514,73 @@ class TestCli:
         # Original stub content must be preserved (not overwritten)
         assert "chrom" in out.read_text()
 
+    def test_associate_force_flag_reruns_scan(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """--force overrides the idempotency skip and re-runs the scan."""
+        import logging
+
+        from array_lrr_gwas import association
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t0.1\nS2\t0.2\nS3\t0.3\n")
+        fake_bcf = tmp_path / "in.bcf"
+        fake_bcf.write_text("stub")
+
+        # Pre-populate the output file — without --force it would be skipped.
+        out = tmp_path / "results.tsv"
+        out.write_text("old content\n")
+
+        lrr = np.array([[0.1, 0.2, 0.3]], dtype=float)
+        samples = ["S1", "S2", "S3"]
+        mock_variants = [{"chrom": "chr1", "pos": 100, "id": "a1"}]
+        mock_associate_io(monkeypatch, lrr, samples, mock_variants)
+
+        _scan_called = []
+
+        class _FakeResult:
+            variant_id = ["a1"]
+            chrom = ["chr1"]
+            p_value = np.array([1.0])
+            stat = np.array([0.0])
+            beta = np.array([0.0])
+            se = np.array([1.0])
+
+            @staticmethod
+            def to_records():
+                return [{"chrom": "chr1", "pos": 100, "variant_id": "a1",
+                         "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                         "n_samples": 3, "method": "ols"}]
+
+        def _fake_scan(*_a, **_k):
+            _scan_called.append(True)
+            return (_FakeResult(), {
+                "n_total": 1, "n_tested": 1, "n_intensity_only": 0,
+                "n_monomorphic": 0, "excluded_markers": {},
+                "tested_mono_flags": [False],
+            })
+
+        monkeypatch.setattr(association, "run_association_streaming", _fake_scan)
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate",
+                str(fake_bcf),
+                "--phenotype", str(pheno),
+                "--method", "ols",
+                "--force",
+                "-o", str(out),
+            ])
+
+        assert rc == 0
+        assert _scan_called, "association scan should have run with --force"
+        # Output file should be overwritten (new content, not "old content")
+        assert "old content" not in out.read_text()
+
     def test_associate_lmm_succeeds_with_gt(self, test_bcf_path, tmp_path):
         """LMM with a BCF that has GT data should succeed."""
         from array_lrr_gwas.io_vcf import read_lrr
+
 
         _, samples, _ = read_lrr(test_bcf_path)
 

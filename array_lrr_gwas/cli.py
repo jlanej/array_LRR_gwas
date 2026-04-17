@@ -447,6 +447,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output TSV file for association results.",
     )
     assoc.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help=(
+            "Overwrite an existing output file and re-run the full autosomal "
+            "scan even if -o already exists.  By default, if -o exists the "
+            "autosomal scan is skipped and the command proceeds directly to "
+            "sex-chromosome analyses (idempotent re-run)."
+        ),
+    )
+    assoc.add_argument(
         "--method",
         type=str,
         default="lmm",
@@ -2025,13 +2036,21 @@ def _run_associate(args: argparse.Namespace) -> int:
     # Idempotency: skip autosomal scan if output file already exists.
     # This allows re-running only the sex-chromosome analyses (e.g. after
     # adding a sample sheet) without repeating the slow autosomal pipeline.
+    # Pass --force to override this behaviour and re-run the full pipeline.
     # ------------------------------------------------------------------
-    _skip_autosomal_scan = args.output.exists()
+    _force = getattr(args, "force", False)
+    _skip_autosomal_scan = (not _force) and args.output.exists()
     if _skip_autosomal_scan:
         logger.info(
             "Output file already exists: %s — skipping autosomal GRM "
             "computation and association scan; proceeding directly to "
-            "sex-chromosome analyses.",
+            "sex-chromosome analyses.  Pass --force to re-run the full "
+            "pipeline.",
+            args.output,
+        )
+    elif _force and args.output.exists():
+        logger.info(
+            "--force specified; output file %s will be overwritten.",
             args.output,
         )
 
