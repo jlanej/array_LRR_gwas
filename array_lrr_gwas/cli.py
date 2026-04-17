@@ -447,6 +447,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output TSV file for association results.",
     )
     assoc.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help=(
+            "Overwrite an existing output file and re-run the full autosomal "
+            "scan even if -o already exists.  By default, if -o exists the "
+            "autosomal scan is skipped and the command proceeds directly to "
+            "sex-chromosome analyses (idempotent re-run)."
+        ),
+    )
+    assoc.add_argument(
         "--method",
         type=str,
         default="lmm",
@@ -2022,11 +2033,33 @@ def _run_associate(args: argparse.Namespace) -> int:
     variants_meta_pass = [v for v, k in zip(variants, variant_mask) if k]
 
     # ------------------------------------------------------------------
+    # Idempotency: skip autosomal scan if output file already exists.
+    # This allows re-running only the sex-chromosome analyses (e.g. after
+    # adding a sample sheet) without repeating the slow autosomal pipeline.
+    # Pass --force to override this behaviour and re-run the full pipeline.
+    # ------------------------------------------------------------------
+    _force = getattr(args, "force", False)
+    _skip_autosomal_scan = (not _force) and args.output.exists()
+    if _skip_autosomal_scan:
+        logger.info(
+            "Output file already exists: %s — skipping autosomal GRM "
+            "computation and association scan; proceeding directly to "
+            "sex-chromosome analyses.  Pass --force to re-run the full "
+            "pipeline.",
+            args.output,
+        )
+    elif _force and args.output.exists():
+        logger.info(
+            "--force specified; output file %s will be overwritten.",
+            args.output,
+        )
+
+    # ------------------------------------------------------------------
     # GRM for LMM: full plink2-native pipeline (plink2 backend) or
     # Python dosage-matrix fallback (--ld-backend numpy).
     # ------------------------------------------------------------------
     grm = None
-    if args.method == "lmm":
+    if not _skip_autosomal_scan and args.method == "lmm":
         from array_lrr_gwas.variant_qc import read_collated_variant_qc, variant_qc_mask
 
         gt_path = args.genotype_bcf or input_path
@@ -2543,7 +2576,7 @@ def _run_associate(args: argparse.Namespace) -> int:
             pbar.update(1)
 
 
-    if args.method == "logistic":
+    if not _skip_autosomal_scan and args.method == "logistic":
         logger.warning(
             "Logistic regression does not use the GRM random effect. "
             "Only fixed-effect covariates (e.g. PCs) are applied. "
@@ -2552,190 +2585,191 @@ def _run_associate(args: argparse.Namespace) -> int:
             "pre-filtering highly related individuals."
         )
 
-    # ------------------------------------------------------------------
-    # Streaming association scan
-    # ------------------------------------------------------------------
-    # Stream LRR values from the BCF in chunks, applying per-chunk
-    # marker filtering (monomorphic LRR) inline.  The full LRR matrix
-    # is never held in memory.
-    n_cov = covariates.shape[1] if covariates is not None else 0
-    _grm_info = f", grm_size={grm.shape[0]}" if grm is not None else ""
-    logger.info(
-        "Running streaming %s association scan: n_markers_eligible=%d, "
-        "n_samples=%d, n_covariates=%d%s",
-        args.method, n_metadata_keep, int(analyzed_mask.sum()),
-        n_cov, _grm_info,
-    )
-    pbar.set_description("association scan")
-    pbar.set_postfix(
-        method=args.method, eligible=n_metadata_keep, refresh=False,
-    )
-
-    lrr_stream = stream_lrr_chunks(
-        input_path,
-        chunk_size=5000,
-        sample_mask=analyzed_mask,
-        variant_mask=variant_mask,
-    )
-    result, exclusion_info = run_association_streaming(
-        lrr_stream,
-        phenotype,
-        covariates=covariates,
-        method=args.method,
-        grm=grm,
-        exclude_monomorphic=exclude_monomorphic,
-        exclude_intensity_only=False,  # already excluded via variant_mask
-        n_markers_total=n_metadata_keep,
-    )
-    n_tested = exclusion_info["n_tested"]
-    n_mono_excluded = exclusion_info["n_monomorphic"]
-    logger.info(
-        "Streaming association complete: %d markers tested, "
-        "%d monomorphic LRR excluded during scan (%s)",
-        n_tested, n_mono_excluded,
-        _fmt_pct(n_mono_excluded, exclusion_info["n_total"]),
-    )
-    pbar.set_postfix(
-        tested=n_tested, mono_excl=n_mono_excluded, refresh=False,
-    )
-    pbar.update(1)
-
-    # Record association marker exclusion in audit trail.
-    # Combine metadata-based (INTENSITY_ONLY) and streaming (monomorphic)
-    # exclusions into a single audit record.
-    _all_marker_excluded: dict[str, str] = {}
-    if exclude_intensity_only:
-        for v, k in zip(variants, variant_mask):
-            if not k:
-                vid = _variant_id(v)
-                if v.get("intensity_only", False):
-                    _all_marker_excluded[vid] = "intensity_only"
-    _all_marker_excluded.update(exclusion_info["excluded_markers"])
-    _all_marker_included = list(result.variant_id)
-
-    audit.record(
-        stage="association_marker_exclusion",
-        id_type="marker",
-        included=_all_marker_included,
-        excluded=_all_marker_excluded,
-    )
-
-    if n_tested == 0:
-        logger.error(
-            "No markers remain after association-stage filtering. "
-            "Consider relaxing marker exclusion criteria."
+    if not _skip_autosomal_scan:
+        # ------------------------------------------------------------------
+        # Streaming association scan
+        # ------------------------------------------------------------------
+        # Stream LRR values from the BCF in chunks, applying per-chunk
+        # marker filtering (monomorphic LRR) inline.  The full LRR matrix
+        # is never held in memory.
+        n_cov = covariates.shape[1] if covariates is not None else 0
+        _grm_info = f", grm_size={grm.shape[0]}" if grm is not None else ""
+        logger.info(
+            "Running streaming %s association scan: n_markers_eligible=%d, "
+            "n_samples=%d, n_covariates=%d%s",
+            args.method, n_metadata_keep, int(analyzed_mask.sum()),
+            n_cov, _grm_info,
         )
-        return 1
+        pbar.set_description("association scan")
+        pbar.set_postfix(
+            method=args.method, eligible=n_metadata_keep, refresh=False,
+        )
 
-    logger.info("Association complete for %d variants", len(result.chrom))
+        lrr_stream = stream_lrr_chunks(
+            input_path,
+            chunk_size=5000,
+            sample_mask=analyzed_mask,
+            variant_mask=variant_mask,
+        )
+        result, exclusion_info = run_association_streaming(
+            lrr_stream,
+            phenotype,
+            covariates=covariates,
+            method=args.method,
+            grm=grm,
+            exclude_monomorphic=exclude_monomorphic,
+            exclude_intensity_only=False,  # already excluded via variant_mask
+            n_markers_total=n_metadata_keep,
+        )
+        n_tested = exclusion_info["n_tested"]
+        n_mono_excluded = exclusion_info["n_monomorphic"]
+        logger.info(
+            "Streaming association complete: %d markers tested, "
+            "%d monomorphic LRR excluded during scan (%s)",
+            n_tested, n_mono_excluded,
+            _fmt_pct(n_mono_excluded, exclusion_info["n_total"]),
+        )
+        pbar.set_postfix(
+            tested=n_tested, mono_excl=n_mono_excluded, refresh=False,
+        )
+        pbar.update(1)
 
-    # Log result summary statistics for auditing.
-    if len(result.chrom) > 0:
-        _valid_p_mask = ~np.isnan(result.p_value) & (result.p_value > 0)
-        _valid_p = result.p_value[_valid_p_mask]
-        _valid_stat = result.stat[~np.isnan(result.stat)]
-        _valid_beta = result.beta[~np.isnan(result.beta)]
-        _valid_se = result.se[~np.isnan(result.se)]
-        if len(_valid_p) > 0:
-            _n_gws = int(np.sum(_valid_p < 5e-8))
-            _n_sug = int(np.sum(_valid_p < 1e-5))
-            # Lambda GC: median(chi2) / 0.4549 using t-stat² as chi2(1) proxy.
-            _lambda_gc = (
-                float(np.median(_valid_stat ** 2) / 0.4549)
-                if len(_valid_stat) > 0 else float("nan")
+        # Record association marker exclusion in audit trail.
+        # Combine metadata-based (INTENSITY_ONLY) and streaming (monomorphic)
+        # exclusions into a single audit record.
+        _all_marker_excluded: dict[str, str] = {}
+        if exclude_intensity_only:
+            for v, k in zip(variants, variant_mask):
+                if not k:
+                    vid = _variant_id(v)
+                    if v.get("intensity_only", False):
+                        _all_marker_excluded[vid] = "intensity_only"
+        _all_marker_excluded.update(exclusion_info["excluded_markers"])
+        _all_marker_included = list(result.variant_id)
+
+        audit.record(
+            stage="association_marker_exclusion",
+            id_type="marker",
+            included=_all_marker_included,
+            excluded=_all_marker_excluded,
+        )
+
+        if n_tested == 0:
+            logger.error(
+                "No markers remain after association-stage filtering. "
+                "Consider relaxing marker exclusion criteria."
             )
-            logger.info(
-                "Result summary: n_tested=%d, min_p=%.3g, "
-                "lambda_gc=%.4f, n_genome_wide_sig=%d (p<5e-8), "
-                "n_suggestive=%d (p<1e-5)",
-                len(result.chrom),
-                float(np.min(_valid_p)),
-                _lambda_gc,
-                _n_gws,
-                _n_sug,
-            )
-        if len(_valid_beta) > 0 and len(_valid_se) > 0:
-            logger.info(
-                "Effect size summary: beta [%.4g, %.4g] (mean_abs=%.4g), "
-                "se [%.4g, %.4g]",
-                float(np.min(_valid_beta)),
-                float(np.max(_valid_beta)),
-                float(np.mean(np.abs(_valid_beta))),
-                float(np.min(_valid_se)),
-                float(np.max(_valid_se)),
-            )
+            return 1
 
-    # Optionally load upstream variant QC flags for output provenance
-    variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
-    qc_provenance = None
-    if variant_qc_path is not None:
-        from array_lrr_gwas.variant_qc import read_collated_variant_qc as _read_vqc
+        logger.info("Association complete for %d variants", len(result.chrom))
 
-        try:
-            qc_provenance = _read_vqc(variant_qc_path)
-            logger.info(
-                "Propagating upstream QC flags to output TSV "
-                "(%d QC records loaded)",
-                len(qc_provenance),
-            )
-        except (FileNotFoundError, ValueError) as exc:
-            logger.warning(
-                "Could not load variant QC for output provenance: %s", exc,
-            )
-
-    # Write output
-    logger.info("Writing results to %s", args.output)
-    records = result.to_records()
-
-    # Append QC provenance columns when upstream data is available
-    _QC_COLS = (
-        "all_ancestries_call_rate_pass",
-        "all_ancestries_hwe_pass",
-        "all_ancestries_maf_pass",
-        "all_ancestries_qc_pass",
-    )
-    if qc_provenance is not None:
-        lrr_variant_ids = list(result.variant_id)
-        for rec, vid in zip(records, lrr_variant_ids):
-            qc_rec = qc_provenance.get(vid)
-            if qc_rec is not None:
-                rec["in_variant_qc"] = True
-                rec["all_ancestries_call_rate_pass"] = qc_rec.call_rate_pass
-                rec["all_ancestries_hwe_pass"] = qc_rec.hwe_pass
-                rec["all_ancestries_maf_pass"] = qc_rec.maf_pass
-                rec["all_ancestries_qc_pass"] = (
-                    ""
-                    if qc_rec.qc_pass is None
-                    else qc_rec.qc_pass
+        # Log result summary statistics for auditing.
+        if len(result.chrom) > 0:
+            _valid_p_mask = ~np.isnan(result.p_value) & (result.p_value > 0)
+            _valid_p = result.p_value[_valid_p_mask]
+            _valid_stat = result.stat[~np.isnan(result.stat)]
+            _valid_beta = result.beta[~np.isnan(result.beta)]
+            _valid_se = result.se[~np.isnan(result.se)]
+            if len(_valid_p) > 0:
+                _n_gws = int(np.sum(_valid_p < 5e-8))
+                _n_sug = int(np.sum(_valid_p < 1e-5))
+                # Lambda GC: median(chi2) / 0.4549 using t-stat² as chi2(1) proxy.
+                _lambda_gc = (
+                    float(np.median(_valid_stat ** 2) / 0.4549)
+                    if len(_valid_stat) > 0 else float("nan")
                 )
-            else:
-                rec["in_variant_qc"] = False
-                rec["all_ancestries_call_rate_pass"] = ""
-                rec["all_ancestries_hwe_pass"] = ""
-                rec["all_ancestries_maf_pass"] = ""
-                rec["all_ancestries_qc_pass"] = ""
+                logger.info(
+                    "Result summary: n_tested=%d, min_p=%.3g, "
+                    "lambda_gc=%.4f, n_genome_wide_sig=%d (p<5e-8), "
+                    "n_suggestive=%d (p<1e-5)",
+                    len(result.chrom),
+                    float(np.min(_valid_p)),
+                    _lambda_gc,
+                    _n_gws,
+                    _n_sug,
+                )
+            if len(_valid_beta) > 0 and len(_valid_se) > 0:
+                logger.info(
+                    "Effect size summary: beta [%.4g, %.4g] (mean_abs=%.4g), "
+                    "se [%.4g, %.4g]",
+                    float(np.min(_valid_beta)),
+                    float(np.max(_valid_beta)),
+                    float(np.mean(np.abs(_valid_beta))),
+                    float(np.min(_valid_se)),
+                    float(np.max(_valid_se)),
+                )
 
-    # Append marker-exclusion provenance columns so users know which
-    # markers were excluded (and why) without re-running.  For surviving
-    # markers these will be False when default exclusions are on; when
-    # --no-exclude-intensity-only or --no-exclude-monomorphic-lrr is
-    # used, some True values may appear.
-    # intensity_only is always False for tested markers (filtered upstream).
-    for rec in records:
-        rec["intensity_only"] = False
-    # Use the monomorphic flags collected during streaming scan.
-    _tested_mono = exclusion_info["tested_mono_flags"]
-    for i, rec in enumerate(records):
-        rec["lrr_monomorphic"] = bool(_tested_mono[i]) if i < len(_tested_mono) else False
+        # Optionally load upstream variant QC flags for output provenance
+        variant_qc_path = args.variant_qc or cfg.get("upstream_qc", {}).get("variant_qc_path")
+        qc_provenance = None
+        if variant_qc_path is not None:
+            from array_lrr_gwas.variant_qc import read_collated_variant_qc as _read_vqc
 
-    header = list(records[0].keys()) if records else []
-    pbar.set_description("writing output")
-    with open(args.output, "w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
-        writer.writeheader()
-        writer.writerows(records)
-    pbar.set_postfix(output=args.output.name, n_records=len(records), refresh=False)
-    pbar.update(1)
+            try:
+                qc_provenance = _read_vqc(variant_qc_path)
+                logger.info(
+                    "Propagating upstream QC flags to output TSV "
+                    "(%d QC records loaded)",
+                    len(qc_provenance),
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                logger.warning(
+                    "Could not load variant QC for output provenance: %s", exc,
+                )
+
+        # Write output
+        logger.info("Writing results to %s", args.output)
+        records = result.to_records()
+
+        # Append QC provenance columns when upstream data is available
+        _QC_COLS = (
+            "all_ancestries_call_rate_pass",
+            "all_ancestries_hwe_pass",
+            "all_ancestries_maf_pass",
+            "all_ancestries_qc_pass",
+        )
+        if qc_provenance is not None:
+            lrr_variant_ids = list(result.variant_id)
+            for rec, vid in zip(records, lrr_variant_ids):
+                qc_rec = qc_provenance.get(vid)
+                if qc_rec is not None:
+                    rec["in_variant_qc"] = True
+                    rec["all_ancestries_call_rate_pass"] = qc_rec.call_rate_pass
+                    rec["all_ancestries_hwe_pass"] = qc_rec.hwe_pass
+                    rec["all_ancestries_maf_pass"] = qc_rec.maf_pass
+                    rec["all_ancestries_qc_pass"] = (
+                        ""
+                        if qc_rec.qc_pass is None
+                        else qc_rec.qc_pass
+                    )
+                else:
+                    rec["in_variant_qc"] = False
+                    rec["all_ancestries_call_rate_pass"] = ""
+                    rec["all_ancestries_hwe_pass"] = ""
+                    rec["all_ancestries_maf_pass"] = ""
+                    rec["all_ancestries_qc_pass"] = ""
+
+        # Append marker-exclusion provenance columns so users know which
+        # markers were excluded (and why) without re-running.  For surviving
+        # markers these will be False when default exclusions are on; when
+        # --no-exclude-intensity-only or --no-exclude-monomorphic-lrr is
+        # used, some True values may appear.
+        # intensity_only is always False for tested markers (filtered upstream).
+        for rec in records:
+            rec["intensity_only"] = False
+        # Use the monomorphic flags collected during streaming scan.
+        _tested_mono = exclusion_info["tested_mono_flags"]
+        for i, rec in enumerate(records):
+            rec["lrr_monomorphic"] = bool(_tested_mono[i]) if i < len(_tested_mono) else False
+
+        header = list(records[0].keys()) if records else []
+        pbar.set_description("writing output")
+        with open(args.output, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=header, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(records)
+        pbar.set_postfix(output=args.output.name, n_records=len(records), refresh=False)
+        pbar.update(1)
 
     # ------------------------------------------------------------------
     # Sex-chromosome analysis modes
