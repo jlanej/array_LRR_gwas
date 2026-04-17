@@ -727,10 +727,22 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Directory for structured audit trail files.  When provided, "
-            "a detailed per-stage TSV and JSON summary of included/excluded "
+            "Directory for structured audit trail files.  Defaults to the "
+            "parent directory of the output file when not provided.  A "
+            "detailed per-stage TSV and JSON summary of included/excluded "
             "markers and samples (with reasons) are written to this "
-            "directory.  Enables full provenance tracking."
+            "directory.  Enables full provenance tracking.  "
+            "Pass --no-audit to suppress audit output entirely."
+        ),
+    )
+    assoc.add_argument(
+        "--no-audit",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable audit trail output.  By default the audit trail is "
+            "written to the output file's parent directory (or --audit-dir "
+            "when specified).  Pass this flag to suppress all audit files."
         ),
     )
     assoc.add_argument(
@@ -1604,6 +1616,18 @@ def _run_associate(args: argparse.Namespace) -> int:
         logger.error("Sample sheet not found: %s", args.sample_sheet)
         return 1
 
+    # Resolve effective audit directory.
+    # --no-audit disables all audit output.
+    # --audit-dir overrides the default.
+    # Default: parent directory of the output file.
+    _no_audit = getattr(args, "no_audit", False)
+    if _no_audit:
+        effective_audit_dir: Path | None = None
+    elif getattr(args, "audit_dir", None) is not None:
+        effective_audit_dir = Path(args.audit_dir)
+    else:
+        effective_audit_dir = args.output.parent
+
     # Initialize audit logger
     audit = AuditLogger()
 
@@ -2236,11 +2260,11 @@ def _run_associate(args: argparse.Namespace) -> int:
                 pbar.update(1)
 
             # Step 3 — convert QC-passing variants to plink2 BED.
-            # BED persists in --audit-dir when provided; otherwise temp.
-            _audit_dir_val = getattr(args, "audit_dir", None)
+            # BED is placed in the effective audit directory (output dir by
+            # default) so that intermediate files are co-located with results.
             _tmp_bed_dir: object | None = None
-            if _audit_dir_val is not None:
-                bed_dir = Path(_audit_dir_val)
+            if effective_audit_dir is not None:
+                bed_dir = effective_audit_dir
                 bed_dir.mkdir(parents=True, exist_ok=True)
             else:
                 import tempfile as _tf
@@ -3224,14 +3248,12 @@ def _run_associate(args: argparse.Namespace) -> int:
                 excluded=_sx_excl["excluded_markers"],
             )
 
-    # Write audit trail if requested
-    audit_dir = getattr(args, "audit_dir", None)
-    if audit_dir is not None:
-        audit_dir = Path(audit_dir)
-        audit_dir.mkdir(parents=True, exist_ok=True)
-        audit.write_tsv(audit_dir / "associate_audit.tsv")
-        audit.write_json(audit_dir / "associate_audit.json")
-        audit.write_summary_tsv(audit_dir / "associate_audit_summary.tsv")
+    # Write audit trail (uses effective_audit_dir resolved at function start)
+    if effective_audit_dir is not None:
+        effective_audit_dir.mkdir(parents=True, exist_ok=True)
+        audit.write_tsv(effective_audit_dir / "associate_audit.tsv")
+        audit.write_json(effective_audit_dir / "associate_audit.json")
+        audit.write_summary_tsv(effective_audit_dir / "associate_audit_summary.tsv")
 
     # Auto-generate interactive HTML report if requested.
     report_path = getattr(args, "report", None)

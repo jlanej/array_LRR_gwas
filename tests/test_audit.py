@@ -689,6 +689,108 @@ class TestAuditDirCli:
         assert (audit_dir / "associate_audit.json").exists()
         assert (audit_dir / "associate_audit_summary.tsv").exists()
 
+    def _make_fake_result_and_mock(self, monkeypatch, lrr, samples, variants):
+        """Helper to set up IO and association mocks."""
+
+        class _FakeResult:
+            chrom = np.array(["chr1"] * len(variants))
+            variant_id = [v["id"] for v in variants]
+            p_value = np.ones(len(variants))
+            stat = np.zeros(len(variants))
+            beta = np.zeros(len(variants))
+            se = np.ones(len(variants))
+
+            @staticmethod
+            def to_records():
+                return [
+                    {"chrom": v["chrom"], "pos": v["pos"], "variant_id": v["id"],
+                     "beta": 0.0, "se": 1.0, "stat": 0.0, "p_value": 1.0,
+                     "n_samples": len(samples), "method": "ols"}
+                    for v in variants
+                ]
+
+        mock_associate_io(monkeypatch, lrr, samples, variants)
+        monkeypatch.setattr(
+            "array_lrr_gwas.association.run_association_streaming",
+            lambda *a, **kw: (_FakeResult(), {
+                "n_total": len(variants),
+                "n_tested": len(variants),
+                "n_intensity_only": 0,
+                "n_monomorphic": 0,
+                "excluded_markers": {},
+                "tested_mono_flags": [False] * len(variants),
+            }),
+        )
+        return _FakeResult
+
+    def test_audit_defaults_to_output_dir(self, tmp_path, monkeypatch):
+        """Without --audit-dir, audit files appear in the output file's directory."""
+        from array_lrr_gwas.cli import main
+
+        n_markers, n_samples = 3, 3
+        lrr = np.random.default_rng(0).standard_normal((n_markers, n_samples))
+        samples = ["S1", "S2", "S3"]
+        variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1", "ref": "A", "alts": ("T",)},
+            {"chrom": "chr1", "pos": 200, "id": "a2", "ref": "G", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 300, "id": "a3", "ref": "T", "alts": ("A",)},
+        ]
+
+        self._make_fake_result_and_mock(monkeypatch, lrr, samples, variants)
+
+        out_subdir = tmp_path / "results"
+        out_subdir.mkdir()
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t1.0\nS2\t2.0\nS3\t3.0\n")
+        bcf = tmp_path / "fake.bcf"
+        bcf.write_bytes(b"")
+        out = out_subdir / "results.tsv"
+
+        rc = main([
+            "associate", str(bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        # Audit files should appear in the output file's directory
+        assert (out_subdir / "associate_audit.tsv").exists()
+        assert (out_subdir / "associate_audit.json").exists()
+        assert (out_subdir / "associate_audit_summary.tsv").exists()
+
+    def test_no_audit_suppresses_audit_files(self, tmp_path, monkeypatch):
+        """--no-audit prevents any audit files from being written."""
+        from array_lrr_gwas.cli import main
+
+        n_markers, n_samples = 3, 3
+        lrr = np.random.default_rng(1).standard_normal((n_markers, n_samples))
+        samples = ["S1", "S2", "S3"]
+        variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1", "ref": "A", "alts": ("T",)},
+            {"chrom": "chr1", "pos": 200, "id": "a2", "ref": "G", "alts": ("C",)},
+            {"chrom": "chr1", "pos": 300, "id": "a3", "ref": "T", "alts": ("A",)},
+        ]
+
+        self._make_fake_result_and_mock(monkeypatch, lrr, samples, variants)
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text("sample_id\tphenotype\nS1\t1.0\nS2\t2.0\nS3\t3.0\n")
+        bcf = tmp_path / "fake.bcf"
+        bcf.write_bytes(b"")
+        out = tmp_path / "results.tsv"
+
+        rc = main([
+            "associate", str(bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "--no-audit",
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert not (tmp_path / "associate_audit.tsv").exists()
+        assert not (tmp_path / "associate_audit.json").exists()
+        assert not (tmp_path / "associate_audit_summary.tsv").exists()
+
 
 # ---------------------------------------------------------------------------
 # CLI --audit-dir argument parsing
@@ -721,6 +823,8 @@ class TestAuditDirArgParsing:
         assert args.audit_dir == Path("/tmp/audit")
 
     def test_audit_dir_defaults_none(self):
+        # At parse time audit_dir is None; the runtime default (output dir) is
+        # resolved inside _run_associate.
         from array_lrr_gwas.cli import _build_parser
 
         parser = _build_parser()
@@ -729,6 +833,26 @@ class TestAuditDirArgParsing:
             "-o", "out.tsv",
         ])
         assert args.audit_dir is None
+
+    def test_no_audit_flag_parsed(self):
+        from array_lrr_gwas.cli import _build_parser
+
+        parser = _build_parser()
+        args = parser.parse_args([
+            "associate", "input.bcf", "--phenotype", "pheno.tsv",
+            "-o", "out.tsv", "--no-audit",
+        ])
+        assert args.no_audit is True
+
+    def test_no_audit_flag_defaults_false(self):
+        from array_lrr_gwas.cli import _build_parser
+
+        parser = _build_parser()
+        args = parser.parse_args([
+            "associate", "input.bcf", "--phenotype", "pheno.tsv",
+            "-o", "out.tsv",
+        ])
+        assert args.no_audit is False
 
 
 # ---------------------------------------------------------------------------
