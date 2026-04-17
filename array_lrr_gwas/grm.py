@@ -40,6 +40,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -166,6 +167,15 @@ def compute_x_grm(
             f"is_male must have shape ({n_samples},), got {is_male.shape}"
         )
 
+    _t0 = time.monotonic()
+    n_males = int(is_male.sum())
+    n_females = n_samples - n_males
+    logger.info(
+        "X-GRM: starting computation — %d variants × %d samples "
+        "(%d males, %d females)",
+        n_variants, n_samples, n_males, n_females,
+    )
+
     Z = dosage.copy()
 
     # --- PAR/XTR exclusion ---
@@ -231,6 +241,7 @@ def compute_x_grm(
     maf = np.minimum(freq, 1.0 - freq)
 
     # --- MAF filter ---
+    n_before_maf = n_variants
     keep = maf >= min_maf
     Z = Z[keep]
     freq = freq[keep]
@@ -242,6 +253,10 @@ def compute_x_grm(
         )
 
     m = Z.shape[0]
+    logger.info(
+        "X-GRM MAF filter (min_maf=%.4f): %d → %d variants",
+        min_maf, n_before_maf, m,
+    )
 
     # --- Standardise: z_ij = (x_ij - 2p_j) / sqrt(2 p_j (1 - p_j)) ---
     denom = np.sqrt(2.0 * freq * (1.0 - freq))
@@ -250,13 +265,21 @@ def compute_x_grm(
     Z[~safe] = 0.0
 
     # --- X-GRM = (1/M) Z Z^T ---
+    logger.info(
+        "X-GRM: computing %d × %d matrix product (%d variants × %d samples) …",
+        n_samples, n_samples, m, n_samples,
+    )
+    _t_matmul = time.monotonic()
     grm = (Z.T @ Z) / m
+    _elapsed_matmul = time.monotonic() - _t_matmul
+    _elapsed_total = time.monotonic() - _t0
 
     logger.info(
         "X-GRM computed: %d × %d from %d non-PAR X-chromosome variants "
-        "(%d males, %d females)",
+        "(%d males, %d females) — matmul %.1f s, total %.1f s",
         grm.shape[0], grm.shape[1], m,
         int(is_male.sum()), int((~is_male).sum()),
+        _elapsed_matmul, _elapsed_total,
     )
 
     return grm
