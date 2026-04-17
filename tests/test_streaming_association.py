@@ -573,6 +573,59 @@ class TestSexChrMode:
         assert not (tmp_path / "results.x_male_only.tsv").exists()
         assert not (tmp_path / "results.y_male_only.tsv").exists()
 
+    def test_primary_results_exclude_sex_chromosomes(self, tmp_path, monkeypatch):
+        """Primary results.tsv must contain only autosomal variants.
+
+        chrX and chrY variants in the BCF must be absent from the primary
+        output file regardless of whether sex-chr modes are enabled.
+        """
+        from array_lrr_gwas.cli import main
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t1.0\nS2\t2.0\nS3\t3.0\nS4\t4.0\n"
+        )
+        bcf = tmp_path / "in.bcf"
+        bcf.write_text("stub")
+        out = tmp_path / "results.tsv"
+
+        rng = np.random.default_rng(77)
+        lrr = rng.standard_normal((6, 4))
+        samples = ["S1", "S2", "S3", "S4"]
+        variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr2", "pos": 200, "id": "a2"},
+            {"chrom": "chrX", "pos": 100, "id": "x1"},
+            {"chrom": "chrX", "pos": 200, "id": "x2"},
+            {"chrom": "chrY", "pos": 100, "id": "y1"},
+            {"chrom": "chrM", "pos": 100, "id": "m1"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, variants)
+
+        rc = main([
+            "associate", str(bcf),
+            "--phenotype", str(pheno),
+            "--method", "ols",
+            "-o", str(out),
+            "--sex-chr-mode",  # empty → no sex-chr modes
+        ])
+        assert rc == 0
+        assert out.exists()
+
+        with open(out) as fh:
+            rows = list(csv.DictReader(fh, delimiter="\t"))
+        ids = [r["variant_id"] for r in rows]
+
+        # Only autosomal markers in primary output
+        assert "a1" in ids
+        assert "a2" in ids
+        # Sex and mitochondrial chromosomes must be absent
+        assert "x1" not in ids
+        assert "x2" not in ids
+        assert "y1" not in ids
+        assert "m1" not in ids
+
 
 class TestAuditFractions:
     """Test that audit summary includes fraction columns."""
