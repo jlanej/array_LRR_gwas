@@ -2003,9 +2003,9 @@ def _run_associate(args: argparse.Namespace) -> int:
     # Sex chromosomes (chrX, chrY) and mitochondrial markers are excluded
     # here so they never appear in the primary results.tsv; they are
     # handled separately by the sex-chromosome analysis modes.
-    from array_lrr_gwas.subsetting import autosome_mask as _autosome_mask
+    from array_lrr_gwas.subsetting import autosome_mask as _auto_mask
     _chroms = np.array([v.get("chrom", "") for v in variants], dtype=str)
-    _auto_mask = _autosome_mask(_chroms)
+    _auto_mask = _auto_mask(_chroms)
     n_non_autosomal = int((~_auto_mask).sum())
     if n_non_autosomal > 0:
         variant_mask &= _auto_mask

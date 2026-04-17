@@ -608,7 +608,7 @@ class TestSexChrMode:
             "--phenotype", str(pheno),
             "--method", "ols",
             "-o", str(out),
-            "--sex-chr-mode",  # empty → no sex-chr modes
+            "--sex-chr-mode",  # nargs="*" with no value → empty list → no sex-chr modes
         ])
         assert rc == 0
         assert out.exists()
