@@ -26,7 +26,7 @@ import csv
 import logging
 import warnings
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, TextIO
 
 import numpy as np
 from numpy.typing import NDArray
@@ -58,8 +58,19 @@ def _parse_bool(value: str) -> bool:
     return value.strip().lower() in _TRUE_LITERALS
 
 
-def _iter_tsv_data_lines(handle: object):
-    """Yield non-empty, non-comment TSV lines."""
+def _iter_tsv_data_lines(handle: TextIO):
+    """Yield TSV content lines, excluding blank and comment lines.
+
+    Parameters
+    ----------
+    handle : TextIO
+        Open text stream for a TSV file.
+
+    Yields
+    ------
+    str
+        Non-empty lines that do not begin with ``#`` after stripping.
+    """
     for line in handle:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
