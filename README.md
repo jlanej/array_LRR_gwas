@@ -194,15 +194,18 @@ array-lrr-gwas segment results.tsv -o regions.bed -v
 
 # Step 4 — Generate a publication-quality interactive HTML summary report
 # (Manhattan + QQ + regional plots, lambda_GC, top-hit tables, and UCSC
-# gene annotations) covering the autosomal scan and all sex-chromosome
-# modes.  Gene tracks are auto-downloaded from UCSC on first use and
-# cached locally.
+# gene annotations) covering the autosomal scan and all non-autosomal
+# modes (chrX/chrY/chrM/MT). Gene tracks are auto-downloaded from UCSC
+# on first use and cached locally.
 array-lrr-gwas report \
     --autosomal results.tsv \
     --x-with-sex-covariate results.x_with_sex_covariate.tsv \
     --x-male-only results.x_male_only.tsv \
     --x-female-only results.x_female_only.tsv \
     --y-male-only results.y_male_only.tsv \
+    --mt-with-sex-covariate results.mt_with_sex_covariate.tsv \
+    --mt-male-only results.mt_male_only.tsv \
+    --mt-female-only results.mt_female_only.tsv \
     --build GRCh38 --gene-window-kb 500 \
     -o gwas_report.html
 
@@ -257,7 +260,8 @@ mkdir -p "${OUTDIR}"
 
 # Step 1 — Batch-effect correction (build is auto-detected from BCF contigs)
 # HQ/LQ sample classification here is derived directly from BCF LRR values.
-# --sample-sheet is only needed at association stage for covariates/exclusions.
+# --sample-sheet is only needed at association stage for sample exclusions
+# and non-autosomal (sex chromosome + mitochondrial) analyses.
 array-lrr-gwas correct "${INPUT_BCF}" \
     -o "${OUTDIR}/corrected.bcf" \
     --variant-qc "${VARIANT_QC}" \
@@ -418,7 +422,7 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--no-exclude-extreme-inbreeding` | flag | `False` | Disable extreme inbreeding coefficient exclusion (\|F\| > threshold excluded by default) |
 | `--max-abs-inbreeding-f` | float | `0.15` | Inbreeding coefficient threshold. Samples with \|F\| above this are excluded (Anderson et al. 2010) |
 | `--genotype-bcf` | path | `INPUT` | **Optional.** BCF/VCF for GRM computation. Defaults to the input file when omitted (requires `FORMAT/GT`). Only needed when genotypes live in a separate file from the LRR input. |
-| `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; markers failing call rate/HWE/MAF are excluded from GRM. Per-marker QC flags are propagated to the output TSV for post-hoc filtering. LRR markers are NOT pre-filtered by these flags. |
+| `--variant-qc` | path | `None` | Path to upstream `collated_variant_qc.tsv`; markers failing call rate/HWE/MAF are excluded from autosomal GRM construction. For X-GRM, chrX-specific upstream columns (`all_ancestries_chrX_female_hwe_pass`, `all_ancestries_chrX_call_rate_pass`) are used when present (with autosomal fallback). Per-marker QC flags are propagated to the output TSV for post-hoc filtering; LRR association markers are not pre-filtered by these flags. |
 | `--min-maf` | float | `0.01` | Min MAF for genotypes used in GRM |
 | `--min-gt-call-rate` | float | `0.90` | Min call rate for genotypes used in GRM |
 | `--no-ld-prune` | flag | `False` | Disable LD pruning of GRM markers |
@@ -1183,10 +1187,11 @@ of these issues is essential for responsible use.
   drops constant columns, and emits a `WARNING` log line listing the
   dropped names.  The `x_with_sex_covariate` mode adds sex explicitly as
   a covariate after this scan, so it is never dropped in that mode.
-- **Sex-chromosome analyses default to all four modes.**  When
-  `--sample-sheet` is provided with a `predicted_sex` column, all four
-  sex-chromosome modes (`x_with_sex_covariate`, `x_male_only`,
-  `x_female_only`, `y_male_only`) run automatically.  Pass
+- **Non-autosomal analyses default to all seven modes.**  When
+  `--sample-sheet` is provided with a `predicted_sex` column, all seven
+  non-autosomal modes (`x_with_sex_covariate`, `x_male_only`,
+  `x_female_only`, `y_male_only`, `mt_with_sex_covariate`,
+  `mt_male_only`, `mt_female_only`) run automatically.  Pass
   `--sex-chr-mode` with no arguments to opt out entirely.
 - **X-GRM requires genotype dosages.**  The X-chromosome GRM is
   computed from `FORMAT/GT` dosages, not from LRR.  If no chrX genotype

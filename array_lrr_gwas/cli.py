@@ -2846,7 +2846,7 @@ def _run_associate(args: argparse.Namespace) -> int:
     # Sex-chromosome analysis modes
     # ------------------------------------------------------------------
     # When --sex-chr-mode is not specified (None) and a --sample-sheet is
-    # provided, run all four sex-chromosome modes by default.  Users who
+    # provided, run all seven non-autosomal modes by default.  Users who
     # want to skip sex-chromosome analyses can pass --sex-chr-mode with no
     # arguments (which produces an empty list and is treated as "none").
     _ALL_SEX_CHR_MODES = [
