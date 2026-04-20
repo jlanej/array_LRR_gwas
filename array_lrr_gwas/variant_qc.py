@@ -26,7 +26,7 @@ import csv
 import logging
 import warnings
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence, TextIO
 
 import numpy as np
 from numpy.typing import NDArray
@@ -56,6 +56,26 @@ _TRUE_LITERALS = frozenset({"true", "1", "yes"})
 def _parse_bool(value: str) -> bool:
     """Parse a string as a boolean flag."""
     return value.strip().lower() in _TRUE_LITERALS
+
+
+def _iter_tsv_data_lines(handle: TextIO) -> Iterator[str]:
+    """Yield TSV content lines, excluding blank and comment lines.
+
+    Parameters
+    ----------
+    handle : TextIO
+        Open text stream for a TSV file.
+
+    Yields
+    ------
+    str
+        Non-empty lines that do not begin with ``#`` after stripping.
+    """
+    for line in handle:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        yield line
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +140,7 @@ def read_collated_variant_qc(
     duplicates: list[str] = []
 
     with open(path, newline="") as fh:
-        reader = csv.DictReader(fh, delimiter="\t")
+        reader = csv.DictReader(_iter_tsv_data_lines(fh), delimiter="\t")
 
         if reader.fieldnames is None:
             raise ValueError(f"Variant QC file is empty or has no header: {path}")

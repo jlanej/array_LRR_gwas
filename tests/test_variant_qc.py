@@ -129,6 +129,23 @@ class TestReadCollatedVariantQC:
         data = read_collated_variant_qc(p)
         assert data["v1"].qc_pass is False
 
+    def test_comment_line_before_header_is_skipped(self, tmp_path: Path) -> None:
+        """Leading comment lines should be skipped before TSV header parsing."""
+        p = _write_tsv(
+            tmp_path,
+            "#sex_chr_qc_note=chrX HWE computed on females only\n"
+            + _HEADER
+            + "v1\tTrue\tTrue\tTrue\n",
+        )
+        data = read_collated_variant_qc(p)
+        assert len(data) == 1
+        assert data["v1"].call_rate_pass is True
+
+    def test_comment_only_file_raises_empty_header_error(self, tmp_path: Path) -> None:
+        p = _write_tsv(tmp_path, "#note=only comment\n#another=still comment\n")
+        with pytest.raises(ValueError, match="empty or has no header"):
+            read_collated_variant_qc(p)
+
 
 # ---------------------------------------------------------------------------
 # variant_qc_mask — exact match
