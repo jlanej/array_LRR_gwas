@@ -142,9 +142,9 @@ class ModeReport:
 
 
 def lambda_gc(p_values: Iterable[float]) -> float:
-    """Compute the genomic inflation factor (λ\ :sub:`GC`).
+    """Compute the genomic inflation factor (λ\\ :sub:`GC`).
 
-    λ\ :sub:`GC` is the ratio of the median observed χ²(1) statistic to
+    λ\\ :sub:`GC` is the ratio of the median observed χ²(1) statistic to
     the expected median (``0.4549364 ≈ qchisq(0.5, 1)``).  Well-controlled
     scans have ``λ ≈ 1``; values substantially above 1 indicate
     inflation from population stratification or cryptic relatedness.
