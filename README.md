@@ -427,7 +427,7 @@ array-lrr-gwas associate INPUT --phenotype PHENO -o OUTPUT [OPTIONS]
 | `--ld-backend` | str | `plink2` | LD-pruning backend: `plink2` (default, **required** — install from [cog-genomics.org](https://www.cog-genomics.org/plink/2.0/)) or `numpy` (explicit fallback). If plink2 is not on PATH and `plink2` is selected, the pipeline exits with an error. |
 | `--no-exclude-intensity-only` | flag | `False` | Retain INTENSITY_ONLY markers in association (excluded by default because they lack GT) |
 | `--no-exclude-monomorphic-lrr` | flag | `False` | Retain markers with zero LRR variance in association |
-| `--sex-chr-mode` | str(s) | all modes when `--sample-sheet` provided | Sex-chromosome scans. When `--sample-sheet` is provided, all four modes run by default: `x_with_sex_covariate`, `x_male_only`, `x_female_only`, `y_male_only`. Pass `--sex-chr-mode` with no arguments to skip all sex-chromosome analyses. Requires `--sample-sheet` with `predicted_sex` column (1=male, 2=female). Modes: `x_with_sex_covariate` — chrX full cohort with sex as a binary covariate; `x_male_only` — chrX males only; `x_female_only` — chrX females only; `y_male_only` — chrY males only. Each mode writes a separate TSV (e.g. `results.x_male_only.tsv`). **Constant covariates** (zero variance among the analysed stratum, e.g. a sex covariate in `x_male_only`) are automatically dropped with a warning. When `--method lmm` is used, chrX modes compute a dedicated X-chromosome GRM (X-GRM) with male 0/2 dosage coding, PAR exclusion, and sex-aware standardisation; chrY modes use the autosomal GRM subsetted to males. Falls back to OLS with a warning when X-GRM computation fails. |
+| `--sex-chr-mode` | str(s) | all modes when `--sample-sheet` provided | Non-autosomal scans (sex chromosomes + chrM/MT). When `--sample-sheet` is provided, all seven modes run by default: `x_with_sex_covariate`, `x_male_only`, `x_female_only`, `y_male_only`, `mt_with_sex_covariate`, `mt_male_only`, `mt_female_only`. Pass `--sex-chr-mode` with no arguments to skip all non-autosomal analyses. Requires `--sample-sheet` with `predicted_sex` column (1=male, 2=female). Each mode writes a separate TSV (e.g. `results.x_male_only.tsv`, `results.mt_with_sex_covariate.tsv`). **Constant covariates** (zero variance among the analysed stratum, e.g. a sex covariate in `x_male_only`) are automatically dropped with a warning. When `--method lmm` is used, chrX modes compute a dedicated X-chromosome GRM (X-GRM) with male 0/2 dosage coding, PAR exclusion, and sex-aware standardisation; chrY and chrM/MT modes reuse the autosomal GRM subsetted to the relevant stratum (mtDNA is maternally inherited and does not recombine, so the nuclear GRM is used only as a practical adjuster for cohort structure and batch effects). Falls back to OLS with a warning when X-GRM computation fails. |
 | `--build` | str | auto-detect | Genome build: `GRCh37`, `GRCh38`, `T2T-CHM13` (aliases: `hg19`, `hg38`, `hs1`). Auto-detected from the input file when possible. Used for PAR region exclusion in X-GRM computation when `--sex-chr-mode` is enabled. |
 | `--config` | path | `None` | YAML config file; reads `upstream_qc.variant_qc_path`, `sample_qc`, `association_qc`, and `association_marker_qc` settings |
 | `--audit-dir` | path | `None` | Directory for structured audit trail (per-stage TSV, JSON summary with included/excluded fractions). Enables full provenance tracking. |
@@ -461,7 +461,8 @@ array-lrr-gwas segment INPUT -o OUTPUT [OPTIONS]
 
 Generate a single self-contained, interactive HTML summary report
 from one or more association TSVs (autosomal scan plus any of the
-four sex-chromosome modes).  The report collates, for each mode:
+seven non-autosomal modes: four sex-chromosome modes and three
+chrM/MT modes).  The report collates, for each mode:
 
 * An interactive Manhattan plot (non-significant points downsampled
   for file size; every variant with *p* < 10⁻⁵ is always kept) with
@@ -495,6 +496,9 @@ array-lrr-gwas report [INPUTS] -o OUTPUT.html [OPTIONS]
 | `--x-male-only` | path | — | chrX males-only TSV |
 | `--x-female-only` | path | — | chrX females-only TSV |
 | `--y-male-only` | path | — | chrY males-only TSV |
+| `--mt-with-sex-covariate` | path | — | chrM/MT full-cohort TSV (sex as covariate) |
+| `--mt-male-only` | path | — | chrM/MT males-only TSV |
+| `--mt-female-only` | path | — | chrM/MT females-only (maternal-lineage) TSV |
 | `-o, --output` | path | *required* | Output HTML file |
 | `--build` | str | — | Genome build (`GRCh37`/`GRCh38`/`T2T-CHM13` or aliases `hg19`/`hg38`/`hs1`).  Required for gene annotation. |
 | `--gene-window-kb` | int | `500` | Half-window (kb) for nearby-gene annotation and regional plots |
@@ -508,7 +512,12 @@ array-lrr-gwas report [INPUTS] -o OUTPUT.html [OPTIONS]
 The `associate` subcommand additionally accepts `--report
 PATH.html` (plus `--report-gene-window-kb`, `--report-cache-dir`,
 and `--no-report-gene-annotation`) to auto-generate the report
-over the autosomal scan and every sex-chromosome mode that ran.
+over the autosomal scan and every non-autosomal (chrX/Y/M) mode
+that ran.  The report now opens with a **combined genome-wide
+summary Manhattan plot** that overlays the autosomal scan, chrX
+(`x_with_sex_covariate`), chrY (`y_male_only`), and chrM/MT
+(`mt_with_sex_covariate`) results on a single axis for a
+one-glance view across the whole genome.
 
 ---
 

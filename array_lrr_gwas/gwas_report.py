@@ -1255,8 +1255,15 @@ def _methods_html(
         dedicated X-chromosome GRM (X-GRM) with GCTA-style male 0/2
         dosage coding and pseudoautosomal region (PAR) exclusion;
         sex-stratified modes (<code>x_male_only</code>,
-        <code>x_female_only</code>, <code>y_male_only</code>)
+        <code>x_female_only</code>, <code>y_male_only</code>,
+        <code>mt_male_only</code>, <code>mt_female_only</code>)
         additionally drop the sex covariate to avoid singularity.
+        chrM/MT scans reuse the autosomal GRM as a practical adjuster
+        for cohort structure and shared technical batch effects; this
+        is not a strict mitochondrial kinship matrix (mtDNA is
+        maternally inherited and does not recombine), and the
+        <code>mt_female_only</code> mode is the most biologically
+        direct, representing the maternal transmission lineage.
       </p>
       <p>
         <strong>Genomic inflation.</strong> The genomic inflation
@@ -1301,6 +1308,9 @@ def _mode_html(mode_key: str, report: ModeReport, fig_counter: list[int]) -> str
         "x_male_only": "chrX — males only",
         "x_female_only": "chrX — females only",
         "y_male_only": "chrY — males only",
+        "mt_with_sex_covariate": "chrM/MT — full cohort (sex as covariate)",
+        "mt_male_only": "chrM/MT — males only",
+        "mt_female_only": "chrM/MT — females only (maternal lineage)",
     }.get(mode_key, mode_key)
 
     # Headline summary
@@ -1394,6 +1404,8 @@ def _render_html(
     build: str | None,
     gene_window_kb: int,
     gene_source: str | None,
+    combined_manhattan_fig: dict | None = None,
+    summary_modes: Sequence[str] | None = None,
 ) -> str:
     fig_counter = [0]
     mode_blocks = "\n".join(
@@ -1407,6 +1419,31 @@ def _render_html(
         genome_wide_p=GENOME_WIDE_P,
         suggestive_p=SUGGESTIVE_P,
     )
+
+    # Optional combined summary Manhattan block (shown above the
+    # per-mode sections) overlaying autosomal + headline sex/MT scans.
+    summary_block = ""
+    if combined_manhattan_fig is not None:
+        fid = f"fig-summary-{fig_counter[0]}"; fig_counter[0] += 1
+        modes_txt = (
+            html.escape(", ".join(summary_modes))
+            if summary_modes else ""
+        )
+        summary_block = textwrap.dedent(f"""\
+        <section class="mode-section" id="mode-summary">
+          <h2>Genome-wide summary</h2>
+          <div class="info">
+            Combined Manhattan plot overlaying the autosomal scan with the
+            headline non-autosomal scans ({modes_txt}).  chrX uses the
+            sex-as-covariate mode, chrY uses the male-only mode, and
+            chrM/MT uses the sex-as-covariate mode.  Per-mode Manhattan,
+            QQ, regional, and top-hit views are available in the sections
+            below.
+          </div>
+          <div class="plot-container" id="{fid}"></div>
+          <script type="application/json" data-figure-id="{fid}">{_fig_to_json(combined_manhattan_fig)}</script>
+        </section>
+        """)
 
     title_e = html.escape(title)
     build_e = html.escape(build or "unknown")
@@ -1493,6 +1530,7 @@ def _render_html(
       </div>
       <h2>Contents</h2>
       {toc}
+      {summary_block}
       {mode_blocks}
       {methods}
       <footer>
@@ -1572,8 +1610,17 @@ def generate_gwas_report(
             )
             gene_table = None
 
-    # Build per-mode reports.
+    # Build per-mode reports.  Also accumulate records for the combined
+    # genome-wide summary Manhattan plot (autosomal + headline non-autosomal
+    # modes: chrX sex-as-covariate, chrY males, chrM/MT sex-as-covariate).
     report_by_mode: dict[str, ModeReport] = {}
+    _SUMMARY_MODES = (
+        "autosomal",
+        "x_with_sex_covariate",
+        "y_male_only",
+        "mt_with_sex_covariate",
+    )
+    _summary_records: list[dict] = []
     for mode, src in mode_sources.items():
         if isinstance(src, (str, Path)):
             path = Path(src)
@@ -1588,6 +1635,8 @@ def generate_gwas_report(
         if not records:
             logger.warning("Skipping %s — no records.", mode)
             continue
+        if mode in _SUMMARY_MODES:
+            _summary_records.extend(records)
         report_by_mode[mode] = summarize_mode(
             mode,
             records,
@@ -1602,6 +1651,22 @@ def generate_gwas_report(
     if not report_by_mode:
         raise ValueError(
             "generate_gwas_report: no input modes produced any records."
+        )
+
+    # Build a genome-wide combined Manhattan figure that overlays the
+    # autosomal scan with the headline non-autosomal scans (chrX full
+    # cohort with sex as covariate, chrY males, chrM/MT full cohort with
+    # sex as covariate).  Only built when more than one summary mode is
+    # present; otherwise the per-mode plot already covers the full genome.
+    combined_manhattan_fig: dict | None = None
+    _summary_modes_present = [m for m in _SUMMARY_MODES if m in report_by_mode]
+    if _summary_records and len(_summary_modes_present) >= 2:
+        combined_manhattan_fig = build_manhattan_figure(
+            _summary_records,
+            title=(
+                "Combined genome-wide summary "
+                f"({', '.join(_summary_modes_present)})"
+            ),
         )
 
     # Optional top-hits TSVs.
@@ -1626,6 +1691,8 @@ def generate_gwas_report(
         build=build,
         gene_window_kb=gene_window_kb,
         gene_source=gene_source_name,
+        combined_manhattan_fig=combined_manhattan_fig,
+        summary_modes=_summary_modes_present,
     )
     output_path.write_text(html_doc, encoding="utf-8")
     logger.info("GWAS report written: %s (%.1f KB)", output_path,

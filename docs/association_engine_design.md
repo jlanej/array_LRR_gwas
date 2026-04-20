@@ -169,10 +169,11 @@ Peak RAM is bounded by `chunk_size × n_samples` floats (plus the GRM
 when using LMM).  For the default chunk size of 5 000 and 10 000 samples,
 this is about 400 MB — well within typical workstation limits.
 
-## Sex-Chromosome Analysis
+## Sex-Chromosome and Mitochondrial Analysis
 
-The `--sex-chr-mode` CLI option runs additional association scans on sex
-chromosomes.  Four modes are supported:
+The `--sex-chr-mode` CLI option runs additional association scans on the
+sex chromosomes and the mitochondrial chromosome.  Seven modes are
+supported:
 
 | Mode | Chromosome | Sample subset | Extra covariates |
 |------|-----------|--------------|-----------------|
@@ -180,9 +181,12 @@ chromosomes.  Four modes are supported:
 | `x_male_only` | chrX | Males only | — |
 | `x_female_only` | chrX | Females only | — |
 | `y_male_only` | chrY | Males only | — |
+| `mt_with_sex_covariate` | chrM/MT | All | Sex (binary) |
+| `mt_male_only` | chrM/MT | Males only | — |
+| `mt_female_only` | chrM/MT | Females only (maternal lineage) | — |
 
 Each mode writes a separate TSV file alongside the main output
-(e.g. `results.x_male_only.tsv`).
+(e.g. `results.x_male_only.tsv`, `results.mt_with_sex_covariate.tsv`).
 
 ### X-Chromosome GRM (X-GRM)
 
@@ -223,6 +227,29 @@ paternally inherited and does not recombine, so true Y-IBD is a step
 function.  As GCTA does not implement `--make-grm-y`, reusing the
 autosomal GRM to control for baseline population structure and cryptic
 relatedness is the standard pragmatic approach (GCTA, fastGWA).
+
+### chrM/MT (Mitochondrial) Handling
+
+The `mt_with_sex_covariate`, `mt_male_only`, and `mt_female_only` modes
+scan mitochondrial markers (chromosome labels `chrM`, `chrMT`, `M`, or
+`MT`).  mtDNA is strictly maternally inherited and does not recombine,
+so a nuclear GRM is not a mitochondrial kinship matrix.  However, for
+an LRR/copy-number signal the autosomal GRM is still an effective
+practical adjuster for cohort structure and shared technical batch
+effects, and it is what these modes use (subsetted to the analysed
+stratum for sex-stratified runs).  All three modes are provided so
+users can choose between:
+
+* `mt_with_sex_covariate` — largest sample size, treats sex as a
+  fixed-effect nuisance covariate (useful when the trait of interest
+  is not sex-specific).
+* `mt_male_only` — males only (useful as a replication/robustness
+  check since offspring inherit mtDNA only from the mother).
+* `mt_female_only` — females only; most biologically direct because it
+  represents the maternal transmission lineage.
+
+When no autosomal GRM is available (e.g. `--method ols`), the mt modes
+fall back to OLS with a warning.
 
 ### Fallback Behaviour
 
