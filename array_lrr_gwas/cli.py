@@ -3037,9 +3037,19 @@ def _run_associate(args: argparse.Namespace) -> int:
 
             # Read chrX genotype dosages for X-GRM
             gt_path_x = args.genotype_bcf or input_path
+            logger.info(
+                "X-GRM: loading genotypes from %s (this may take a while)",
+                gt_path_x,
+            )
             try:
                 _gt_dosage_x, _gt_samples_x, _gt_variants_x = _read_gt_x(
                     gt_path_x, min_maf=0.0, min_call_rate=0.0,
+                )
+                logger.info(
+                    "X-GRM: genotype load complete from %s: %d variants across %d samples",
+                    gt_path_x,
+                    _gt_dosage_x.shape[0],
+                    len(_gt_samples_x),
                 )
             except Exception as exc:
                 logger.warning(
