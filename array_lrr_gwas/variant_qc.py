@@ -26,7 +26,7 @@ import csv
 import logging
 import warnings
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import Iterator, Sequence, TextIO
 
 import numpy as np
 from numpy.typing import NDArray
@@ -58,7 +58,7 @@ def _parse_bool(value: str) -> bool:
     return value.strip().lower() in _TRUE_LITERALS
 
 
-def _iter_tsv_data_lines(handle: TextIO):
+def _iter_tsv_data_lines(handle: TextIO) -> Iterator[str]:
     """Yield TSV content lines, excluding blank and comment lines.
 
     Parameters
