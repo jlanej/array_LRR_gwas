@@ -486,6 +486,105 @@ class TestSexChrMode:
         # sex-stratified mode.
         assert "dropping" in caplog.text.lower() and "constant covariate" in caplog.text.lower()
 
+    def test_sex_chr_mt_with_sex_covariate(self, tmp_path, monkeypatch, caplog):
+        """mt_with_sex_covariate mode writes a dedicated chrM output."""
+        from array_lrr_gwas.cli import main
+
+        pheno = tmp_path / "pheno.tsv"
+        pheno.write_text(
+            "sample_id\tphenotype\n"
+            "S1\t1.0\nS2\t2.0\nS3\t3.0\nS4\t4.0\n"
+        )
+        sheet = tmp_path / "sheet.tsv"
+        sheet.write_text(
+            "Sample_ID\tcall_rate\tlrr_sd\tpredicted_sex\n"
+            "S1\t0.99\t0.10\t1\nS2\t0.99\t0.10\t2\n"
+            "S3\t0.99\t0.10\t1\nS4\t0.99\t0.10\t2\n"
+        )
+        bcf = tmp_path / "in.bcf"
+        bcf.write_text("stub")
+        out = tmp_path / "results.tsv"
+
+        rng = np.random.default_rng(42)
+        lrr = rng.standard_normal((5, 4))
+        samples = ["S1", "S2", "S3", "S4"]
+        variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+            {"chrom": "chrM", "pos": 100, "id": "m1"},
+            {"chrom": "chrM", "pos": 200, "id": "m2"},
+            {"chrom": "chrM", "pos": 300, "id": "m3"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, variants)
+
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas.cli"):
+            rc = main([
+                "associate", str(bcf),
+                "--phenotype", str(pheno),
+                "--sample-sheet", str(sheet),
+                "--method", "ols",
+                "-o", str(out),
+                "--sex-chr-mode", "mt_with_sex_covariate",
+            ])
+        assert rc == 0
+        mt_out = tmp_path / "results.mt_with_sex_covariate.tsv"
+        assert mt_out.exists()
+        with open(mt_out) as fh:
+            rows = list(csv.DictReader(fh, delimiter="\t"))
+        ids = [r["variant_id"] for r in rows]
+        # All three chrM markers are present; no autosomal ones.
+        assert "m1" in ids and "m2" in ids and "m3" in ids
+        assert "a1" not in ids and "a2" not in ids
+        assert "Sex-chr mode mt_with_sex_covariate" in caplog.text
+
+    def test_sex_chr_mt_female_only(self, tmp_path, monkeypatch):
+        """mt_female_only runs on the maternal-lineage stratum."""
+        from array_lrr_gwas.cli import main
+
+        pheno = tmp_path / "pheno.tsv"
+        lines = ["sample_id\tphenotype"]
+        for i in range(1, 9):
+            lines.append(f"S{i}\t{float(i)}")
+        pheno.write_text("\n".join(lines) + "\n")
+
+        sheet = tmp_path / "sheet.tsv"
+        slines = ["Sample_ID\tcall_rate\tlrr_sd\tpredicted_sex"]
+        for i in range(1, 9):
+            # First four males, last four females
+            slines.append(f"S{i}\t0.99\t0.10\t{1 if i <= 4 else 2}")
+        sheet.write_text("\n".join(slines) + "\n")
+
+        bcf = tmp_path / "in.bcf"
+        bcf.write_text("stub")
+        out = tmp_path / "results.tsv"
+
+        rng = np.random.default_rng(7)
+        lrr = rng.standard_normal((4, 8))
+        samples = [f"S{i}" for i in range(1, 9)]
+        variants = [
+            {"chrom": "chr1", "pos": 100, "id": "a1"},
+            {"chrom": "chr1", "pos": 200, "id": "a2"},
+            {"chrom": "MT", "pos": 100, "id": "m1"},  # bare "MT" accepted
+            {"chrom": "MT", "pos": 200, "id": "m2"},
+        ]
+        mock_associate_io(monkeypatch, lrr, samples, variants)
+
+        rc = main([
+            "associate", str(bcf),
+            "--phenotype", str(pheno),
+            "--sample-sheet", str(sheet),
+            "--method", "ols",
+            "-o", str(out),
+            "--sex-chr-mode", "mt_female_only",
+        ])
+        assert rc == 0
+        mt_out = tmp_path / "results.mt_female_only.tsv"
+        assert mt_out.exists()
+        with open(mt_out) as fh:
+            rows = list(csv.DictReader(fh, delimiter="\t"))
+        ids = [r["variant_id"] for r in rows]
+        assert "m1" in ids and "m2" in ids
+
     def test_sex_chr_default_modes_with_sample_sheet(self, tmp_path, monkeypatch):
         """All sex-chr modes run by default when --sample-sheet is provided."""
         from array_lrr_gwas.cli import main
@@ -507,7 +606,7 @@ class TestSexChrMode:
         out = tmp_path / "results.tsv"
 
         rng = np.random.default_rng(1)
-        lrr = rng.standard_normal((7, 8))
+        lrr = rng.standard_normal((10, 8))
         samples = [f"S{i}" for i in range(1, 9)]
         variants = [
             {"chrom": "chr1", "pos": 100, "id": "a1"},
@@ -517,6 +616,9 @@ class TestSexChrMode:
             {"chrom": "chrX", "pos": 200, "id": "x2"},
             {"chrom": "chrY", "pos": 100, "id": "y1"},
             {"chrom": "chrY", "pos": 200, "id": "y2"},
+            {"chrom": "chrM", "pos": 100, "id": "m1"},
+            {"chrom": "chrM", "pos": 200, "id": "m2"},
+            {"chrom": "chrM", "pos": 300, "id": "m3"},
         ]
         mock_associate_io(monkeypatch, lrr, samples, variants)
 
@@ -529,11 +631,14 @@ class TestSexChrMode:
             "-o", str(out),
         ])
         assert rc == 0
-        # All four output files should be present
+        # All seven output files should be present (4 sex-chr + 3 mt).
         assert (tmp_path / "results.x_with_sex_covariate.tsv").exists()
         assert (tmp_path / "results.x_male_only.tsv").exists()
         assert (tmp_path / "results.x_female_only.tsv").exists()
         assert (tmp_path / "results.y_male_only.tsv").exists()
+        assert (tmp_path / "results.mt_with_sex_covariate.tsv").exists()
+        assert (tmp_path / "results.mt_male_only.tsv").exists()
+        assert (tmp_path / "results.mt_female_only.tsv").exists()
 
     def test_sex_chr_default_modes_skipped_without_sample_sheet(
         self, tmp_path, monkeypatch

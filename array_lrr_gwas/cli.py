@@ -755,26 +755,38 @@ def _build_parser() -> argparse.ArgumentParser:
             "x_male_only",
             "x_female_only",
             "y_male_only",
+            "mt_with_sex_covariate",
+            "mt_male_only",
+            "mt_female_only",
         ],
         help=(
-            "Sex-chromosome association scans to run.  When --sample-sheet "
-            "is provided (with a 'predicted_sex' column, 1=male, 2=female), "
-            "all four modes are run by default: x_with_sex_covariate, "
-            "x_male_only, x_female_only, y_male_only.  To skip all "
-            "sex-chromosome analyses pass --sex-chr-mode with no arguments.  "
-            "Modes: x_with_sex_covariate — chrX full cohort with sex as a "
-            "binary covariate; x_male_only — chrX males only (sex covariate "
-            "dropped automatically); x_female_only — chrX females only (sex "
-            "covariate dropped automatically); y_male_only — chrY males only "
-            "(sex covariate dropped automatically).  Each mode writes a "
-            "separate TSV alongside the main output (e.g. results.x_male_only.tsv).  "
+            "Non-autosomal (sex chromosome + mitochondrial) association "
+            "scans to run.  When --sample-sheet is provided (with a "
+            "'predicted_sex' column, 1=male, 2=female), all seven modes "
+            "are run by default: x_with_sex_covariate, x_male_only, "
+            "x_female_only, y_male_only, mt_with_sex_covariate, "
+            "mt_male_only, mt_female_only.  To skip all non-autosomal "
+            "analyses pass --sex-chr-mode with no arguments.  "
+            "chrX modes: x_with_sex_covariate — full cohort with sex as a "
+            "binary covariate; x_male_only / x_female_only — sex-stratified "
+            "(sex covariate dropped automatically).  chrY mode: y_male_only "
+            "— chrY males only.  chrM/MT modes: mt_with_sex_covariate — "
+            "full cohort with sex as covariate; mt_male_only / mt_female_only "
+            "— sex-stratified (mtDNA is maternally inherited, so female-only "
+            "results represent the direct transmission lineage).  Each mode "
+            "writes a separate TSV alongside the main output (e.g. "
+            "results.x_male_only.tsv, results.mt_with_sex_covariate.tsv).  "
             "Constant covariates (zero variance among the analysed stratum) "
             "are dropped with a warning before each mode runs.  "
             "When --method lmm is used, chrX modes compute a dedicated "
             "X-chromosome GRM (X-GRM) with male 0/2 dosage coding, PAR "
-            "exclusion, and sex-aware standardisation.  chrY modes use "
-            "the autosomal GRM subsetted to males.  If the X-GRM cannot "
-            "be computed, falls back to OLS with a warning."
+            "exclusion, and sex-aware standardisation.  chrY and chrM "
+            "modes reuse the autosomal GRM subsetted to the relevant "
+            "stratum; because mtDNA does not recombine and is maternally "
+            "inherited, the nuclear GRM is used as a practical adjuster "
+            "for cohort structure and technical batch effects rather than "
+            "as a strict mitochondrial kinship matrix.  If the X-GRM "
+            "cannot be computed, falls back to OLS with a warning."
         ),
     )
     assoc.add_argument(
@@ -969,6 +981,24 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Per-marker association TSV for y_male_only mode.",
+    )
+    rep.add_argument(
+        "--mt-with-sex-covariate",
+        type=Path,
+        default=None,
+        help="Per-marker association TSV for mt_with_sex_covariate mode.",
+    )
+    rep.add_argument(
+        "--mt-male-only",
+        type=Path,
+        default=None,
+        help="Per-marker association TSV for mt_male_only mode.",
+    )
+    rep.add_argument(
+        "--mt-female-only",
+        type=Path,
+        default=None,
+        help="Per-marker association TSV for mt_female_only mode.",
     )
     rep.add_argument(
         "-o", "--output",
@@ -2824,6 +2854,9 @@ def _run_associate(args: argparse.Namespace) -> int:
         "x_male_only",
         "x_female_only",
         "y_male_only",
+        "mt_with_sex_covariate",
+        "mt_male_only",
+        "mt_female_only",
     ]
     # Initialise here so downstream report-generation can always reference it.
     sex_chr_results: dict[str, tuple] = {}
@@ -2841,6 +2874,7 @@ def _run_associate(args: argparse.Namespace) -> int:
     if sex_chr_modes:
         _X_CHROMS = {"chrX", "X"}
         _Y_CHROMS = {"chrY", "Y"}
+        _MT_CHROMS = {"chrM", "chrMT", "M", "MT"}
 
         if args.sample_sheet is None:
             logger.error(
@@ -2904,18 +2938,31 @@ def _run_associate(args: argparse.Namespace) -> int:
             for m in sex_chr_modes
         )
         _need_y = "y_male_only" in sex_chr_modes
+        _need_mt = any(
+            m in ("mt_with_sex_covariate", "mt_male_only", "mt_female_only")
+            for m in sex_chr_modes
+        )
+        # Contig names passed to stream_lrr_contig_chunks.  Both chr-prefixed
+        # and bare names are supplied so that pysam's indexed ``fetch(contig)``
+        # can jump directly to whichever naming convention the BCF uses; names
+        # absent from the index are silently skipped by the helper.  For
+        # unindexed inputs the helper falls back to a sequential scan.
         _needed_contigs: list[str] = []
         if _need_x:
             _needed_contigs.extend(["chrX", "X"])
         if _need_y:
             _needed_contigs.extend(["chrY", "Y"])
+        if _need_mt:
+            _needed_contigs.extend(["chrM", "chrMT", "M", "MT"])
 
-        # Collect X and Y LRR rows (full analyzed_mask, all samples).
+        # Collect X, Y, and MT LRR rows (full analyzed_mask, all samples).
         # Each entry: (lrr_row[n_analyzed_samples], var_meta)
         _x_rows: list[np.ndarray] = []
         _x_vars: list[dict] = []
         _y_rows: list[np.ndarray] = []
         _y_vars: list[dict] = []
+        _mt_rows: list[np.ndarray] = []
+        _mt_vars: list[dict] = []
 
         if _needed_contigs:
             logger.info(
@@ -2931,20 +2978,26 @@ def _run_associate(args: argparse.Namespace) -> int:
                 for _row, _v in zip(_c_lrr, _c_vars):
                     if exclude_intensity_only and _v.get("intensity_only", False):
                         continue
-                    if _v.get("chrom", "") in _X_CHROMS:
+                    _chrom_v = _v.get("chrom", "")
+                    if _chrom_v in _X_CHROMS:
                         _x_rows.append(_row)
                         _x_vars.append(_v)
-                    elif _v.get("chrom", "") in _Y_CHROMS:
+                    elif _chrom_v in _Y_CHROMS:
                         _y_rows.append(_row)
                         _y_vars.append(_v)
+                    elif _chrom_v in _MT_CHROMS:
+                        _mt_rows.append(_row)
+                        _mt_vars.append(_v)
 
         _n_analyzed = int(analyzed_mask.sum())
         _x_lrr = np.vstack(_x_rows) if _x_rows else np.empty((0, _n_analyzed))
         _y_lrr = np.vstack(_y_rows) if _y_rows else np.empty((0, _n_analyzed))
+        _mt_lrr = np.vstack(_mt_rows) if _mt_rows else np.empty((0, _n_analyzed))
 
         logger.info(
-            "Sex-chromosome data loaded: %d chrX variants, %d chrY variants",
-            len(_x_vars), len(_y_vars),
+            "Sex-chromosome data loaded: %d chrX variants, %d chrY variants, "
+            "%d chrM/MT variants",
+            len(_x_vars), len(_y_vars), len(_mt_vars),
         )
 
         # ------------------------------------------------------------------
@@ -3090,6 +3143,31 @@ def _run_associate(args: argparse.Namespace) -> int:
                     _y_grm.shape[0],
                 )
 
+        # chrM/MT: reuse the autosomal GRM as a practical adjuster for cohort
+        # structure and shared technical batch effects.  mtDNA is maternally
+        # inherited and does not recombine, so the nuclear GRM is not a strict
+        # mitochondrial kinship matrix — it is used here only to control for
+        # the same population/family structure that is adjusted for in the
+        # autosomal scan.  Sex-stratified mt modes subset the GRM accordingly;
+        # the mt_with_sex_covariate mode uses the full GRM unchanged.
+        _mt_grm_full = None
+        _mt_grm_male = None
+        _mt_grm_female = None
+        if grm is not None and _need_mt:
+            _mt_grm_full = grm
+            _mi = np.where(_male)[0]
+            if len(_mi) >= 3 and "mt_male_only" in sex_chr_modes:
+                _mt_grm_male = grm[np.ix_(_mi, _mi)]
+            _fi = np.where(_female)[0]
+            if len(_fi) >= 3 and "mt_female_only" in sex_chr_modes:
+                _mt_grm_female = grm[np.ix_(_fi, _fi)]
+            logger.info(
+                "chrM/MT: using autosomal GRM (full=%s, males=%s, females=%s)",
+                _mt_grm_full.shape if _mt_grm_full is not None else None,
+                _mt_grm_male.shape if _mt_grm_male is not None else None,
+                _mt_grm_female.shape if _mt_grm_female is not None else None,
+            )
+
         def _make_in_memory_stream(lrr_full, var_list, col_mask, chunk_size=5000):
             """Yield chunks from in-memory LRR matrix, applying column mask."""
             if lrr_full.shape[0] == 0:
@@ -3104,6 +3182,10 @@ def _run_associate(args: argparse.Namespace) -> int:
                 _lrr_full = _x_lrr
                 _var_list = _x_vars
                 n_mv = len(_x_vars)
+            elif mode in ("mt_with_sex_covariate", "mt_male_only", "mt_female_only"):
+                _lrr_full = _mt_lrr
+                _var_list = _mt_vars
+                n_mv = len(_mt_vars)
             else:  # y_male_only
                 _lrr_full = _y_lrr
                 _var_list = _y_vars
@@ -3157,6 +3239,40 @@ def _run_associate(args: argparse.Namespace) -> int:
                     _x_grm[np.ix_(np.where(_female)[0], np.where(_female)[0])]
                     if _x_grm is not None else None
                 )
+            elif mode == "mt_with_sex_covariate":
+                # Full cohort with sex as covariate — same covariate layout
+                # as x_with_sex_covariate.  Uses the autosomal GRM as a
+                # practical adjuster for cohort structure (see note above).
+                _col_mask = np.ones(int(analyzed_mask.sum()), dtype=bool)
+                _sub_pheno = phenotype
+                _sex_cov = _male.astype(float)[:, np.newaxis]
+                _sub_cov = (
+                    np.column_stack([covariates, _sex_cov])
+                    if covariates is not None else _sex_cov
+                )
+                _sub_cov_names = list(pheno_cov_names) + ["sex"]
+                _sub_cov, _ = _drop_constant_covariates(
+                    _sub_cov, _sub_cov_names, context=mode,
+                )
+                _mode_grm = _mt_grm_full
+            elif mode == "mt_male_only":
+                _col_mask = _male
+                _sub_pheno = phenotype[_male]
+                _sub_cov = covariates[_male] if covariates is not None else None
+                _sub_cov, _ = _drop_constant_covariates(
+                    _sub_cov, list(pheno_cov_names), context=mode,
+                )
+                _mode_grm = _mt_grm_male
+            elif mode == "mt_female_only":
+                # mtDNA is maternally inherited: female-only association
+                # represents the direct transmission lineage.
+                _col_mask = _female
+                _sub_pheno = phenotype[_female]
+                _sub_cov = covariates[_female] if covariates is not None else None
+                _sub_cov, _ = _drop_constant_covariates(
+                    _sub_cov, list(pheno_cov_names), context=mode,
+                )
+                _mode_grm = _mt_grm_female
             else:  # y_male_only
                 _col_mask = _male
                 _sub_pheno = phenotype[_male]
@@ -3180,7 +3296,7 @@ def _run_associate(args: argparse.Namespace) -> int:
             _mode_method = "lmm" if _mode_grm is not None else "ols"
             if _mode_method == "ols" and mode != "y_male_only":
                 logger.warning(
-                    "Sex-chr mode %s: using OLS (no X-GRM available). "
+                    "Sex-chr mode %s: using OLS (no GRM available). "
                     "If your cohort contains related individuals, type I "
                     "error may be inflated.",
                     mode,
@@ -3206,10 +3322,19 @@ def _run_associate(args: argparse.Namespace) -> int:
         # Run all modes (sequential for LMM to avoid memory pressure).
         valid_modes = [
             m for m in sex_chr_modes
-            if m in ("x_with_sex_covariate", "x_male_only", "x_female_only", "y_male_only")
+            if m in (
+                "x_with_sex_covariate", "x_male_only", "x_female_only",
+                "y_male_only",
+                "mt_with_sex_covariate", "mt_male_only", "mt_female_only",
+            )
         ]
 
-        _any_lmm = _use_lmm_for_x or _y_grm is not None
+        _any_mt_grm = (
+            _mt_grm_full is not None
+            or _mt_grm_male is not None
+            or _mt_grm_female is not None
+        )
+        _any_lmm = _use_lmm_for_x or _y_grm is not None or _any_mt_grm
         if _any_lmm:
             # LMM modes are memory-intensive; run sequentially
             for m in valid_modes:
@@ -3352,12 +3477,19 @@ def _run_report(args: argparse.Namespace) -> int:
         mode_sources["x_female_only"] = args.x_female_only
     if args.y_male_only is not None:
         mode_sources["y_male_only"] = args.y_male_only
+    if args.mt_with_sex_covariate is not None:
+        mode_sources["mt_with_sex_covariate"] = args.mt_with_sex_covariate
+    if args.mt_male_only is not None:
+        mode_sources["mt_male_only"] = args.mt_male_only
+    if args.mt_female_only is not None:
+        mode_sources["mt_female_only"] = args.mt_female_only
 
     if not mode_sources:
         logger.error(
             "No input association TSV provided.  Use at least one of "
             "--autosomal / --x-with-sex-covariate / --x-male-only / "
-            "--x-female-only / --y-male-only."
+            "--x-female-only / --y-male-only / --mt-with-sex-covariate / "
+            "--mt-male-only / --mt-female-only."
         )
         return 1
 
