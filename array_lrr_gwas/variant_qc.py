@@ -58,6 +58,15 @@ def _parse_bool(value: str) -> bool:
     return value.strip().lower() in _TRUE_LITERALS
 
 
+def _iter_tsv_data_lines(handle: object):
+    """Yield non-empty, non-comment TSV lines."""
+    for line in handle:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        yield line
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -120,7 +129,7 @@ def read_collated_variant_qc(
     duplicates: list[str] = []
 
     with open(path, newline="") as fh:
-        reader = csv.DictReader(fh, delimiter="\t")
+        reader = csv.DictReader(_iter_tsv_data_lines(fh), delimiter="\t")
 
         if reader.fieldnames is None:
             raise ValueError(f"Variant QC file is empty or has no header: {path}")
