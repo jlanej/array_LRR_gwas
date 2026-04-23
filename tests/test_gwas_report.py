@@ -82,8 +82,8 @@ def _write_fake_ncbirefseq_gtf(cache: Path, build: str = "T2T-CHM13") -> Path:
         '# this is a comment',
     ]
     with gzip.open(path, "wt") as fh:
-        for l in lines:
-            fh.write(l + "\n")
+        for line in lines:
+            fh.write(line + "\n")
     return path
 
 
