@@ -716,7 +716,7 @@ def build_manhattan_figure(
         if not sel.any():
             continue
         traces.append({
-            "type": "scattergl",
+            "type": "scatter",
             "x": cum_x[sel].tolist(),
             "y": log_p[sel].round(3).tolist(),
             "mode": "markers",
@@ -730,7 +730,7 @@ def build_manhattan_figure(
     # Suggestive points (all kept).
     if sug_mask.any():
         traces.append({
-            "type": "scattergl",
+            "type": "scatter",
             "x": cum_x[sug_mask].tolist(),
             "y": log_p[sug_mask].round(4).tolist(),
             "mode": "markers",
@@ -925,7 +925,7 @@ def build_qq_figure(
 
     # Observed QQ points
     traces.append({
-        "type": "scattergl",
+        "type": "scatter",
         "x": exp_log[keep].round(3).tolist(),
         "y": obs_log[keep].round(4).tolist(),
         "mode": "markers",
@@ -1104,7 +1104,7 @@ def summarize_mode(
     gene_window_kb: int = DEFAULT_GENE_WINDOW_KB,
     top_n: int = DEFAULT_TOP_N,
     regional_half_window_kb: int = 500,
-    max_regional_loci: int = 5,
+    max_regional_loci: int = 10,
 ) -> ModeReport:
     """Produce a :class:`ModeReport` from per-marker association records."""
     valid_p = [
@@ -1640,7 +1640,7 @@ def generate_gwas_report(
     title: str = "Array-LRR GWAS — Summary Report",
     annotate_genes: bool = True,
     regional_half_window_kb: int = 500,
-    max_regional_loci: int = 5,
+    max_regional_loci: int = 10,
     top_hits_tsv_dir: str | Path | None = None,
 ) -> Path:
     """Build and write a single-file interactive HTML GWAS report.
