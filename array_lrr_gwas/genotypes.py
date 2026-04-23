@@ -21,7 +21,9 @@ except ImportError as _exc:
 
 try:
     from tqdm import tqdm
-except ImportError:  # pragma: no cover - tqdm is a required dependency
+except ImportError:  # pragma: no cover - tqdm is an optional runtime dep
+    # tqdm is listed in pyproject.toml, but fall back gracefully if it
+    # is missing so that a failed import doesn't break genotype parsing.
     def tqdm(x, **_kwargs):  # type: ignore[no-redef]
         return x
 
