@@ -3067,7 +3067,60 @@ def _run_associate(args: argparse.Namespace) -> int:
                 _use_lmm_for_x = False
 
         if _use_lmm_for_x:
-            # Filter to chrX non-PAR variants
+            # ------------------------------------------------------------------
+            # X-GRM QC pipeline — sample and variant quality control
+            #
+            # SAMPLE QC (already applied via analyzed_mask / _analyzed_ids):
+            #   The autosomal association pipeline applies a comprehensive set
+            #   of hard sample-exclusion criteria before we reach this point.
+            #   _analyzed_ids is derived from analyzed_mask, which excludes:
+            #     • Low call rate  (< min_call_rate threshold)
+            #     • High LRR SD   (> max_lrr_sd threshold — noisy intensity)
+            #     • High BAF SD   (> max_baf_sd threshold — mosaic anomalies)
+            #     • Heterozygosity outliers
+            #     • Sex-discordant samples  (predicted vs. genotype sex mismatch;
+            #       can be suppressed with --no-exclude-sex-discordant)
+            #     • Extreme inbreeding coefficient |F| (> max_abs_inbreeding_f)
+            #     • PCA outliers  (flagged via pre_pca_excluded in sample sheet)
+            #     • Related samples excluded from LD pruning but re-included in
+            #       the GRM set (grm_ids); relatedness is modelled by the LMM
+            #       random effect rather than hard-excluded.
+            #   The genotype dosage matrix is reindexed to _analyzed_ids
+            #   (see "_Align genotype samples" below), so the X-GRM is built
+            #   on exactly the same sample set as every other analysis mode.
+            #   No additional per-sex sample filtering is applied at this stage
+            #   because sex stratification is handled downstream by the LMM
+            #   itself (x_male_only / x_female_only modes subset _male/_female).
+            #
+            # VARIANT QC (applied in this block):
+            #   1. Contig guard: ensure all loaded variants are on the target
+            #      X chromosome (redundant when region= was passed, but kept
+            #      as a defensive check).
+            #   2. variant_qc_mask_chrx() — sex-chromosome-specific upstream QC:
+            #        • all_ancestries_chrX_female_hwe_pass: HWE tested in females
+            #          only.  Males are hemizygous and do not conform to diploid
+            #          HWE expectations; including them would bias the test.
+            #        • all_ancestries_chrX_call_rate_pass: joint call rate across
+            #          both sexes for the X chromosome.
+            #        • Fallback: when chrX-specific columns are absent from the
+            #          QC file, uses all_ancestries_qc_pass composite (call rate
+            #          + HWE + MAF) as a conservative substitute.
+            #      Only applied when --variant-qc / upstream_qc.variant_qc_path
+            #      is provided; a warning is logged otherwise.
+            #   3. MAF filter: intentionally deferred to compute_x_grm() where
+            #      allele frequencies are computed after male dosage rescaling
+            #      (0→0, 1→2 for hemizygous males), so the joint frequency
+            #      p = mean(dosage)/2 is correct for the X chromosome.  Applying
+            #      an MAF filter before rescaling would use incorrect female-only
+            #      frequencies and remove valid variants.
+            #   4. PAR/XTR exclusion: performed inside compute_x_grm() so that
+            #      the same variant positions are used for both PAR masking and
+            #      frequency computation.
+            # ------------------------------------------------------------------
+
+            # Step 1 — confirm all loaded variants are on the X chromosome.
+            # (With region=_x_chrom_name this is guaranteed, but the explicit
+            # mask catches any unexpected stray records.)
             _chrx_gt_mask = np.array(
                 [v.get("chrom", "") in _X_CHROMS for v in _gt_variants_x],
                 dtype=bool,
@@ -3082,7 +3135,7 @@ def _run_associate(args: argparse.Namespace) -> int:
                 )
                 _use_lmm_for_x = False
             else:
-                # Apply upstream variant QC if available
+                # Step 2 — apply upstream chrX-specific variant QC.
                 variant_qc_path_x = (
                     args.variant_qc
                     or cfg.get("upstream_qc", {}).get("variant_qc_path")
@@ -3102,9 +3155,17 @@ def _run_associate(args: argparse.Namespace) -> int:
                         v for v, k in zip(_chrx_gt_vars, _chrx_qc_mask) if k
                     ]
                     logger.info(
-                        "chrX variant QC for X-GRM: %d → %d variants",
+                        "chrX variant QC for X-GRM: %d → %d variants "
+                        "(female-only HWE + call rate; MAF deferred to X-GRM)",
                         int(_chrx_gt_mask.sum()),
                         _chrx_dosage.shape[0],
+                    )
+                else:
+                    logger.warning(
+                        "No --variant-qc file provided; chrX variant QC "
+                        "for X-GRM skipped (upstream QC strongly recommended). "
+                        "Proceeding with %d unfiltered chrX variants.",
+                        int(_chrx_gt_mask.sum()),
                     )
 
                 # Align genotype samples to analyzed samples
