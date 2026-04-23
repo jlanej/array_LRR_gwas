@@ -1265,9 +1265,109 @@ class TestStage2AssociatePipeline:
         assert len(lines) > 1
 
 
-# ===================================================================
-# 17. Stage2 subsample BCF: full correct → associate → segment pipeline
-# ===================================================================
+class TestStage2AssociateSexChrBundled:
+    """Regression guard for the sex-chromosome sex-resolution bug.
+
+    Prior to the fix, running ``associate`` with the bundled
+    ``tests/data/compiled_sample_sheet.tsv`` and
+    ``tests/data/test_phenotype.tsv`` silently classified every sample
+    as female — because the compiled sheet carries
+    ``computed_gender`` / ``peddy_sex`` / ``f_sex`` rather than a
+    numeric ``predicted_sex`` column, and the CLI only consulted the
+    latter.  The fix wires up ``read_sample_sex_map``, which walks
+    those columns with per-row fallback.  This integration test calls
+    the CLI end-to-end against the bundled stage2 BCF, the compiled
+    sample sheet, and the matching phenotype TSV, and asserts that
+    both male and female strata are actually analysed.
+    """
+
+    def test_sex_chr_modes_use_bundled_compiled_sample_sheet(
+        self, stage2_bcf_path, tmp_path, caplog,
+    ) -> None:
+        import logging
+        from array_lrr_gwas.cli import main
+
+        sheet = Path(__file__).parent / "data" / "compiled_sample_sheet.tsv"
+        pheno = Path(__file__).parent / "data" / "test_phenotype.tsv"
+        assert sheet.exists() and pheno.exists()
+
+        out = tmp_path / "results.tsv"
+        with caplog.at_level(logging.INFO, logger="array_lrr_gwas"):
+            rc = main([
+                "associate",
+                str(stage2_bcf_path),
+                "--phenotype", str(pheno),
+                "--sample-sheet", str(sheet),
+                "--method", "ols",
+                "--sex-chr-mode",
+                "x_with_sex_covariate",
+                "x_male_only",
+                "x_female_only",
+                "y_male_only",
+                "-o", str(out),
+            ])
+        assert rc == 0
+
+        # The autosomal results file must be produced.
+        assert out.exists()
+
+        # Both male-only and female-only sidecar outputs must exist —
+        # this is the specific regression we are guarding against.
+        x_male_out = out.with_suffix("").with_name(
+            out.stem + ".x_male_only" + out.suffix
+        )
+        x_female_out = out.with_suffix("").with_name(
+            out.stem + ".x_female_only" + out.suffix
+        )
+        assert x_male_out.exists(), (
+            "x_male_only sidecar not written — sex resolution likely "
+            "still broken; log was:\n" + caplog.text
+        )
+        assert x_female_out.exists(), (
+            "x_female_only sidecar not written — sex resolution likely "
+            "still broken; log was:\n" + caplog.text
+        )
+
+        # The INFO log must report a non-zero count for BOTH sexes.
+        # This asserts the underlying fix rather than just that the
+        # sidecars happened to be created.
+        breakdown_lines = [
+            r.getMessage() for r in caplog.records
+            if "sex breakdown" in r.getMessage()
+        ]
+        assert breakdown_lines, (
+            "Expected a 'Sex-chr: analysed-cohort sex breakdown' log "
+            "line; full log was:\n" + caplog.text
+        )
+        msg = breakdown_lines[0]
+        # Expect "N male, M female" where both N and M > 0.
+        import re
+        m = re.search(r"(\d+) male, (\d+) female", msg)
+        assert m, f"Unexpected breakdown format: {msg}"
+        n_male, n_female = int(m.group(1)), int(m.group(2))
+        assert n_male > 0, (
+            f"Expected >0 males from bundled compiled sample sheet, got "
+            f"{n_male}; log line: {msg}"
+        )
+        assert n_female > 0, (
+            f"Expected >0 females from bundled compiled sample sheet, got "
+            f"{n_female}; log line: {msg}"
+        )
+
+        # Neither the male-only nor the female-only mode should report
+        # "Fewer than 3 samples" when both sexes are actually present.
+        too_few_warnings = [
+            r.getMessage() for r in caplog.records
+            if "Fewer than 3 samples" in r.getMessage()
+            and ("x_male_only" in r.getMessage()
+                 or "x_female_only" in r.getMessage())
+        ]
+        assert not too_few_warnings, (
+            "Unexpected 'Fewer than 3 samples' warnings for chrX "
+            f"stratified modes: {too_few_warnings}"
+        )
+
+
 
 
 class TestStage2FullPipeline:

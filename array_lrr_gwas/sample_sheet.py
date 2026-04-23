@@ -153,6 +153,163 @@ def read_sample_sheet(
     return sample_ids, covariates, cov_names
 
 
+#: Missing-value sentinels recognised across sex-related string columns.
+_SEX_MISSING = {
+    "", "NA", "na", "NaN", "nan", "NULL", "null", "None", ".", "N/A",
+    "U", "u", "UNKNOWN", "unknown", "AMBIGUOUS", "ambiguous",
+}
+
+#: Priority order of sample-sheet columns consulted when deriving a
+#: per-sample numeric sex code (1=male, 2=female).  The first column
+#: that is present in the header AND has a decodable value for a given
+#: sample is used for that sample.  Ordering mirrors
+#: ``tests/make_test_phenotype.py`` so the pipeline and the bundled
+#: phenotype generator stay in agreement.
+_SEX_COLUMN_PRIORITY: tuple[str, ...] = (
+    "predicted_sex",            # already 1/2 numeric (or M/F/male/female)
+    "computed_gender",          # Illumina BeadArray M/F
+    "peddy_sex_predicted_sex",  # peddy "male"/"female"
+    "peddy_sex",                # peddy M/F or male/female
+    "f_sex",                    # continuous X-heterozygosity f-statistic
+)
+
+#: Threshold on ``f_sex`` (continuous X-heterozygosity F statistic)
+#: above which a sample is coded male and below which female.  Values in
+#: the ambiguous zone are treated as missing.  These match the defaults
+#: used by PLINK ``--check-sex`` and by ``tests/make_test_phenotype.py``.
+_F_SEX_MALE_THRESHOLD = 0.6
+_F_SEX_FEMALE_THRESHOLD = 0.4
+
+
+def _decode_sex_string(val: str | None) -> int | None:
+    """Decode a string sex code to ``1`` (male), ``2`` (female), or ``None``.
+
+    Accepts single-letter codes (``M``/``F``), full words
+    (``male``/``female``, case-insensitive), and numeric strings
+    ``1``/``2``.  ``0`` is accepted as an alias for female to be
+    tolerant of phenotype-file conventions, but callers should prefer
+    sex columns from the sample sheet.
+    """
+    if val is None:
+        return None
+    s = str(val).strip()
+    if s in _SEX_MISSING:
+        return None
+    up = s.upper()
+    if up in ("M", "MALE", "1"):
+        return 1
+    if up in ("F", "FEMALE", "2"):
+        return 2
+    # Numeric-looking values — treat 0 as female, 1 as male, 2 as female.
+    try:
+        f = float(s)
+    except ValueError:
+        return None
+    if f == 1.0:
+        return 1
+    if f == 2.0:
+        return 2
+    # 0 is a common phenotype-file encoding for female.
+    if f == 0.0:
+        return 2
+    return None
+
+
+def _decode_f_sex(val: str | None) -> int | None:
+    """Decode a continuous f-statistic to 1 (male), 2 (female), or ``None``."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if s in _SEX_MISSING:
+        return None
+    try:
+        f = float(s)
+    except ValueError:
+        return None
+    if f >= _F_SEX_MALE_THRESHOLD:
+        return 1
+    if f <= _F_SEX_FEMALE_THRESHOLD:
+        return 2
+    return None
+
+
+def read_sample_sex_map(
+    path: str | Path,
+    *,
+    sample_id_col: str = "Sample_ID",
+) -> tuple[dict[str, int], str | None, dict[str, int]]:
+    """Build a ``{sample_id: sex_code}`` map from a compiled sample sheet.
+
+    Sex is derived from the first available column in the following
+    priority order (per-row fallback is applied — i.e. a sample missing
+    a value in the highest-priority column falls through to the next
+    column for that sample only):
+
+    1. ``predicted_sex``           — already 1/2 numeric or M/F/male/female
+    2. ``computed_gender``         — Illumina BeadArray M/F
+    3. ``peddy_sex_predicted_sex`` — peddy "male"/"female"
+    4. ``peddy_sex``               — peddy M/F or male/female
+    5. ``f_sex``                   — continuous X-heterozygosity F statistic
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a tab-separated compiled sample sheet.
+    sample_id_col : str
+        Name of the column containing sample identifiers (case-insensitive).
+
+    Returns
+    -------
+    sex_map : dict mapping ``sample_id`` → ``1`` (male) or ``2`` (female)
+        Samples with no decodable value in any of the priority columns
+        are omitted from the returned map.
+    primary_source : str or None
+        Name of the highest-priority column actually found in the
+        header (``None`` if none of the expected columns are present).
+    source_counts : dict mapping column name → number of samples resolved
+        Useful for logging which columns contributed how many assignments.
+    """
+    path = str(path)
+    source_counts: dict[str, int] = {}
+    sex_map: dict[str, int] = {}
+    with open(path, newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        if reader.fieldnames is None:
+            return sex_map, None, source_counts
+
+        resolved_sid_col = _resolve_column(reader.fieldnames, sample_id_col)
+        if resolved_sid_col is None:
+            return sex_map, None, source_counts
+
+        # Resolve priority columns in header order (case-insensitive match).
+        resolved_cols: list[tuple[str, str]] = []
+        for canonical in _SEX_COLUMN_PRIORITY:
+            actual = _resolve_column(reader.fieldnames, canonical)
+            if actual is not None:
+                resolved_cols.append((canonical, actual))
+        if not resolved_cols:
+            return sex_map, None, source_counts
+
+        primary_source = resolved_cols[0][0]
+
+        for row in reader:
+            sid = row.get(resolved_sid_col)
+            if not sid:
+                continue
+            for canonical, actual in resolved_cols:
+                raw = row.get(actual)
+                if canonical == "f_sex":
+                    code = _decode_f_sex(raw)
+                else:
+                    code = _decode_sex_string(raw)
+                if code is not None:
+                    sex_map[sid] = code
+                    source_counts[canonical] = source_counts.get(canonical, 0) + 1
+                    break
+
+    return sex_map, primary_source, source_counts
+
+
 def align_samples(
     target_samples: list[str],
     sheet_samples: list[str],

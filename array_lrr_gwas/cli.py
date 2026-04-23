@@ -761,8 +761,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ],
         help=(
             "Non-autosomal (sex chromosome + mitochondrial) association "
-            "scans to run.  When --sample-sheet is provided (with a "
-            "'predicted_sex' column, 1=male, 2=female), all seven modes "
+            "scans to run.  When --sample-sheet is provided (sex is "
+            "auto-detected from columns 'predicted_sex', "
+            "'computed_gender', 'peddy_sex_predicted_sex', 'peddy_sex', "
+            "or 'f_sex', in that priority order), all seven modes "
             "are run by default: x_with_sex_covariate, x_male_only, "
             "x_female_only, y_male_only, mt_with_sex_covariate, "
             "mt_male_only, mt_female_only.  To skip all non-autosomal "
@@ -2878,35 +2880,37 @@ def _run_associate(args: argparse.Namespace) -> int:
 
         if args.sample_sheet is None:
             logger.error(
-                "Sex-chromosome modes require --sample-sheet with a "
-                "'predicted_sex' column (1=male, 2=female)."
+                "Sex-chromosome modes require --sample-sheet.  Sex is "
+                "auto-detected from 'predicted_sex', 'computed_gender', "
+                "'peddy_sex_predicted_sex', 'peddy_sex', or 'f_sex' "
+                "(first available column, with per-row fallback)."
             )
             return 1
 
-        from array_lrr_gwas.sample_sheet import read_sample_sheet as _read_ss
+        from array_lrr_gwas.sample_sheet import (
+            read_sample_sex_map as _read_sex_map,
+        )
 
-        _sx_ids, _sx_covs, _sx_names = _read_ss(
-            args.sample_sheet, n_pcs=0,
-            extra_covariates=["predicted_sex"],
+        _sex_map, _sex_primary, _sex_source_counts = _read_sex_map(
+            args.sample_sheet,
+            sample_id_col="sample_id",
         )
-        _sex_idx = (
-            _sx_names.index("predicted_sex")
-            if "predicted_sex" in _sx_names else None
-        )
-        if _sex_idx is None:
-            logger.error(
-                "'predicted_sex' column not found in sample sheet %s. "
-                "Required for sex-chromosome analysis.",
+        if not _sex_map:
+            logger.warning(
+                "Could not derive per-sample sex from %s: none of the "
+                "expected sex columns were present or decodable "
+                "(looked for 'predicted_sex', 'computed_gender', "
+                "'peddy_sex_predicted_sex', 'peddy_sex', 'f_sex').  "
+                "Skipping all sex-chromosome analyses.",
                 args.sample_sheet,
             )
-            return 1
-
-        # Build per-sample sex lookup (1=male, 2=female).
-        _sex_map: dict[str, int] = {}
-        for _sid, _row in zip(_sx_ids, _sx_covs):
-            v = _row[_sex_idx]
-            if np.isfinite(v):
-                _sex_map[_sid] = int(v)
+            sex_chr_modes = []
+    if sex_chr_modes:
+        logger.info(
+            "Sex-chr: resolved sex for %d samples from sample sheet "
+            "(primary column=%s, per-source counts=%s)",
+            len(_sex_map), _sex_primary, _sex_source_counts,
+        )
 
         _analyzed_ids = [
             samples[i] for i in range(len(samples)) if analyzed_mask[i]
@@ -2916,6 +2920,21 @@ def _run_associate(args: argparse.Namespace) -> int:
         )
         _male = _sample_sex == 1
         _female = _sample_sex == 2
+        _n_unknown = int((_sample_sex == 0).sum())
+        logger.info(
+            "Sex-chr: analysed-cohort sex breakdown — %d male, %d female, "
+            "%d unknown (out of %d analysed samples)",
+            int(_male.sum()), int(_female.sum()), _n_unknown,
+            len(_analyzed_ids),
+        )
+        if _male.sum() == 0 and _female.sum() == 0:
+            logger.warning(
+                "Sex-chr: no samples in the analysed cohort could be "
+                "assigned a sex from the sample sheet %s; skipping all "
+                "sex-chromosome analyses.",
+                args.sample_sheet,
+            )
+            sex_chr_modes = []
 
         out_stem = args.output.stem
         out_sfx = args.output.suffix
@@ -3273,8 +3292,27 @@ def _run_associate(args: argparse.Namespace) -> int:
                 logger.warning("No sex-chr variants for mode %s; skipping.", mode)
                 return None
 
+            # Determine which samples belong to this stratum first, so we
+            # can bail out early on empty/too-small strata without emitting
+            # misleading "Dropping N constant covariate(s)" warnings (every
+            # covariate is trivially constant when the stratum is empty).
+            _n_all = int(analyzed_mask.sum())
+            if mode in ("x_with_sex_covariate", "mt_with_sex_covariate"):
+                _col_mask = np.ones(_n_all, dtype=bool)
+            elif mode in ("x_male_only", "mt_male_only", "y_male_only"):
+                _col_mask = _male
+            else:  # x_female_only, mt_female_only
+                _col_mask = _female
+
+            n_sub = int(_col_mask.sum())
+            if n_sub < 3:
+                logger.warning(
+                    "Fewer than 3 samples for mode %s (%d); skipping.",
+                    mode, n_sub,
+                )
+                return None
+
             if mode == "x_with_sex_covariate":
-                _col_mask = np.ones(int(analyzed_mask.sum()), dtype=bool)
                 _sub_pheno = phenotype
                 _sex_cov = _male.astype(float)[:, np.newaxis]
                 _sub_cov = (
@@ -3290,7 +3328,6 @@ def _run_associate(args: argparse.Namespace) -> int:
                 )
                 _mode_grm = _x_grm
             elif mode == "x_male_only":
-                _col_mask = _male
                 _sub_pheno = phenotype[_male]
                 _sub_cov = covariates[_male] if covariates is not None else None
                 # Drop covariates that are constant among males (e.g. a sex
@@ -3304,7 +3341,6 @@ def _run_associate(args: argparse.Namespace) -> int:
                     if _x_grm is not None else None
                 )
             elif mode == "x_female_only":
-                _col_mask = _female
                 _sub_pheno = phenotype[_female]
                 _sub_cov = covariates[_female] if covariates is not None else None
                 # Drop covariates that are constant among females (e.g. a sex
@@ -3321,7 +3357,6 @@ def _run_associate(args: argparse.Namespace) -> int:
                 # Full cohort with sex as covariate — same covariate layout
                 # as x_with_sex_covariate.  Uses the autosomal GRM as a
                 # practical adjuster for cohort structure (see note above).
-                _col_mask = np.ones(int(analyzed_mask.sum()), dtype=bool)
                 _sub_pheno = phenotype
                 _sex_cov = _male.astype(float)[:, np.newaxis]
                 _sub_cov = (
@@ -3334,7 +3369,6 @@ def _run_associate(args: argparse.Namespace) -> int:
                 )
                 _mode_grm = _mt_grm_full
             elif mode == "mt_male_only":
-                _col_mask = _male
                 _sub_pheno = phenotype[_male]
                 _sub_cov = covariates[_male] if covariates is not None else None
                 _sub_cov, _ = _drop_constant_covariates(
@@ -3344,7 +3378,6 @@ def _run_associate(args: argparse.Namespace) -> int:
             elif mode == "mt_female_only":
                 # mtDNA is maternally inherited: female-only association
                 # represents the direct transmission lineage.
-                _col_mask = _female
                 _sub_pheno = phenotype[_female]
                 _sub_cov = covariates[_female] if covariates is not None else None
                 _sub_cov, _ = _drop_constant_covariates(
@@ -3352,7 +3385,6 @@ def _run_associate(args: argparse.Namespace) -> int:
                 )
                 _mode_grm = _mt_grm_female
             else:  # y_male_only
-                _col_mask = _male
                 _sub_pheno = phenotype[_male]
                 _sub_cov = covariates[_male] if covariates is not None else None
                 # Drop covariates that are constant among males (e.g. a sex
@@ -3361,14 +3393,6 @@ def _run_associate(args: argparse.Namespace) -> int:
                     _sub_cov, list(pheno_cov_names), context=mode,
                 )
                 _mode_grm = _y_grm
-
-            n_sub = int(_col_mask.sum())
-            if n_sub < 3:
-                logger.warning(
-                    "Fewer than 3 samples for mode %s (%d); skipping.",
-                    mode, n_sub,
-                )
-                return None
 
             # Choose method: LMM when a GRM is available, else OLS
             _mode_method = "lmm" if _mode_grm is not None else "ols"
