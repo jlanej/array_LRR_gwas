@@ -15,8 +15,12 @@ reviewer-friendly document.  Content includes:
 
 Gene annotations are sourced from UCSC's canonical ``refGene`` /
 ``ncbiRefSeq`` tracks for the appropriate genome build (GRCh37 → hg19,
-GRCh38 → hg38, T2T-CHM13 → hs1).  Files are auto-downloaded on first
-use and cached on disk; subsequent invocations reuse the cache.
+GRCh38 → hg38, T2T-CHM13 → hs1).  For GRCh37/38 the ``refGene.txt.gz``
+flat-table format is used; for T2T-CHM13 the
+``hs1.ncbiRefSeq.gtf.gz`` GTF file from the bigZips/genes directory is
+used (``ncbiRefSeq.txt.gz`` is not available for hs1).  Files are
+auto-downloaded on first use and cached on disk; subsequent invocations
+reuse the cache.
 
 Usage
 -----
@@ -82,22 +86,27 @@ _MAX_NONSIG_POINTS: int = 30_000
 # Plotly CDN version pinned for reproducibility.
 _PLOTLY_CDN: str = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 
-# UCSC refGene track URLs per build.  ncbiRefSeq for T2T-CHM13 (refGene is
-# not populated for hs1; ncbiRefSeq is the canonical gene track).  These
-# are the stable canonical public URLs and are hosted by UCSC.
-_UCSC_GENE_URLS: dict[str, tuple[str, str]] = {
-    # (url, table_name)
+# UCSC gene track URLs per build.  For GRCh37/38 the refGene flat-table
+# (.txt.gz) is used.  For T2T-CHM13 (hs1), refGene is not available so the
+# ncbiRefSeq GTF from the bigZips/genes directory is used instead.
+# Tuple layout: (url, table_name, file_format)  where file_format is
+# "txt" (UCSC flat-table) or "gtf".
+_UCSC_GENE_URLS: dict[str, tuple[str, str, str]] = {
+    # (url, table_name, file_format)
     "GRCh37": (
         "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/refGene.txt.gz",
         "refGene",
+        "txt",
     ),
     "GRCh38": (
         "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/refGene.txt.gz",
         "refGene",
+        "txt",
     ),
     "T2T-CHM13": (
-        "https://hgdownload.soe.ucsc.edu/goldenPath/hs1/database/ncbiRefSeq.txt.gz",
+        "https://hgdownload.soe.ucsc.edu/goldenPath/hs1/bigZips/genes/hs1.ncbiRefSeq.gtf.gz",
         "ncbiRefSeq",
+        "gtf",
     ),
 }
 
@@ -286,10 +295,10 @@ def download_ucsc_refgene(
 ) -> Path:
     """Download the UCSC gene table for *build* to a local cache.
 
-    Uses ``refGene.txt.gz`` for GRCh37/38 and ``ncbiRefSeq.txt.gz`` for
-    T2T-CHM13 (hs1), which is the canonical gene track for that
-    assembly at UCSC.  The file is kept as ``<build>_<table>.txt.gz``
-    in the cache directory.
+    Uses ``refGene.txt.gz`` (flat-table format) for GRCh37/38 and
+    ``hs1.ncbiRefSeq.gtf.gz`` (GTF format) for T2T-CHM13 (hs1).
+    The local cache file is named ``<build>_<table>.<fmt>.gz``
+    (e.g. ``T2T-CHM13_ncbiRefSeq.gtf.gz``).
 
     Parameters
     ----------
@@ -303,7 +312,7 @@ def download_ucsc_refgene(
     Returns
     -------
     Path
-        Local path to the cached ``.txt.gz`` file.
+        Local path to the cached file.
     """
     canon = _normalise_build(build)
     if canon not in _UCSC_GENE_URLS:
@@ -311,10 +320,10 @@ def download_ucsc_refgene(
             f"Unsupported genome build for gene annotation: {build!r}. "
             f"Supported: {list(_UCSC_GENE_URLS)}"
         )
-    url, table = _UCSC_GENE_URLS[canon]
+    url, table, fmt = _UCSC_GENE_URLS[canon]
     cdir = Path(cache_dir) if cache_dir else _default_cache_dir()
     cdir.mkdir(parents=True, exist_ok=True)
-    target = cdir / f"{canon}_{table}.txt.gz"
+    target = cdir / f"{canon}_{table}.{fmt}.gz"
 
     if target.exists() and not force and target.stat().st_size > 0:
         logger.info("UCSC %s cache hit: %s", table, target)
@@ -366,9 +375,9 @@ def load_gene_table(
         raise ValueError(
             f"Unsupported genome build for gene annotation: {build!r}."
         )
-    _, table = _UCSC_GENE_URLS[canon]
+    _, table, fmt = _UCSC_GENE_URLS[canon]
     cdir = Path(cache_dir) if cache_dir else _default_cache_dir()
-    path = cdir / f"{canon}_{table}.txt.gz"
+    path = cdir / f"{canon}_{table}.{fmt}.gz"
     if not path.exists() or path.stat().st_size == 0:
         if not auto_download:
             raise FileNotFoundError(
@@ -377,10 +386,32 @@ def load_gene_table(
             )
         path = download_ucsc_refgene(canon, cache_dir=cdir)
 
-    # refGene/ncbiRefSeq schema:
-    # bin name chrom strand txStart txEnd cdsStart cdsEnd exonCount
-    # exonStarts exonEnds score name2 cdsStartStat cdsEndStat exonFrames
-    # UCSC txStart is 0-based, txEnd is 1-based exclusive => inclusive = txEnd.
+    if fmt == "gtf":
+        result, n_rows = _parse_gtf_genes(path)
+    else:
+        result, n_rows = _parse_refgene_txt_genes(path)
+
+    logger.info(
+        "Loaded %d gene records / %d unique genes for %s from %s",
+        n_rows,
+        sum(len(v) for v in result.values()),
+        canon,
+        path,
+    )
+    return result
+
+
+def _parse_refgene_txt_genes(
+    path: Path,
+) -> tuple[dict[str, list[tuple[int, int, str, str]]], int]:
+    """Parse a UCSC refGene/ncbiRefSeq flat-table (.txt.gz) file.
+
+    The flat-table schema is:
+      bin name chrom strand txStart txEnd cdsStart cdsEnd exonCount
+      exonStarts exonEnds score name2 cdsStartStat cdsEndStat exonFrames
+
+    UCSC txStart is 0-based, txEnd is 1-based exclusive.
+    """
     by_chrom: dict[str, dict[str, tuple[int, int, str]]] = {}
     n_rows = 0
     with gzip.open(path, "rt") as fh:
@@ -400,32 +431,80 @@ def load_gene_table(
             symbol = fields[12] or fields[1]  # name2, fallback to name
             if not symbol:
                 continue
-            # Aggregate by (chrom, symbol): take the widest span so that
-            # a single gene with multiple transcripts is represented once.
-            bucket = by_chrom.setdefault(chrom, {})
-            cur = bucket.get(symbol)
-            if cur is None:
-                bucket[symbol] = (tx_start, tx_end, strand)
-            else:
-                bucket[symbol] = (
-                    min(cur[0], tx_start),
-                    max(cur[1], tx_end),
-                    cur[2],
-                )
+            _merge_gene_span(by_chrom, chrom, symbol, tx_start, tx_end, strand)
             n_rows += 1
+    return _finalise_gene_table(by_chrom), n_rows
 
+
+def _parse_gtf_genes(
+    path: Path,
+) -> tuple[dict[str, list[tuple[int, int, str, str]]], int]:
+    """Parse a GTF gene annotation file (e.g. hs1.ncbiRefSeq.gtf.gz).
+
+    Only ``transcript`` feature lines are used so that each transcript
+    contributes exactly one span (exon lines are skipped).  Coordinates
+    are already 1-based inclusive in GTF.  The ``gene_name`` attribute is
+    preferred as the gene symbol; ``gene_id`` is used as a fallback.
+    """
+    _attr_re = re.compile(r'(\w+)\s+"([^"]*)"')
+    by_chrom: dict[str, dict[str, tuple[int, int, str]]] = {}
+    n_rows = 0
+    with gzip.open(path, "rt") as fh:
+        for line in fh:
+            if not line or line.startswith("#"):
+                continue
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 9:
+                continue
+            feature = fields[2]
+            if feature != "transcript":
+                continue
+            chrom = fields[0]
+            strand = fields[6]
+            try:
+                tx_start = int(fields[3])  # GTF: 1-based inclusive
+                tx_end = int(fields[4])    # GTF: 1-based inclusive
+            except ValueError:
+                continue
+            attrs = dict(_attr_re.findall(fields[8]))
+            symbol = attrs.get("gene_name") or attrs.get("gene_id")
+            if not symbol:
+                continue
+            _merge_gene_span(by_chrom, chrom, symbol, tx_start, tx_end, strand)
+            n_rows += 1
+    return _finalise_gene_table(by_chrom), n_rows
+
+
+def _merge_gene_span(
+    by_chrom: dict[str, dict[str, tuple[int, int, str]]],
+    chrom: str,
+    symbol: str,
+    tx_start: int,
+    tx_end: int,
+    strand: str,
+) -> None:
+    """Aggregate a transcript span into *by_chrom* taking the widest extent."""
+    bucket = by_chrom.setdefault(chrom, {})
+    cur = bucket.get(symbol)
+    if cur is None:
+        bucket[symbol] = (tx_start, tx_end, strand)
+    else:
+        bucket[symbol] = (
+            min(cur[0], tx_start),
+            max(cur[1], tx_end),
+            cur[2],
+        )
+
+
+def _finalise_gene_table(
+    by_chrom: dict[str, dict[str, tuple[int, int, str]]],
+) -> dict[str, list[tuple[int, int, str, str]]]:
+    """Convert the aggregation dict to sorted per-chrom lists."""
     result: dict[str, list[tuple[int, int, str, str]]] = {}
     for chrom, bucket in by_chrom.items():
         result[chrom] = sorted(
             (s, e, sym, strand) for sym, (s, e, strand) in bucket.items()
         )
-    logger.info(
-        "Loaded %d gene transcripts / %d unique genes for %s from %s",
-        n_rows,
-        sum(len(v) for v in result.values()),
-        canon,
-        path,
-    )
     return result
 
 

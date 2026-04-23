@@ -25,6 +25,8 @@ from array_lrr_gwas.gwas_report import (
     read_association_records,
     summarize_mode,
     top_hits,
+    _parse_gtf_genes,
+    _parse_refgene_txt_genes,
 )
 
 
@@ -34,7 +36,7 @@ from array_lrr_gwas.gwas_report import (
 
 
 def _write_fake_refgene(cache: Path, build: str = "GRCh38") -> Path:
-    """Write a minimal UCSC refGene-format file into cache."""
+    """Write a minimal UCSC refGene-format (.txt.gz) file into cache."""
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / f"{build}_refGene.txt.gz"
     rows = [
@@ -52,6 +54,36 @@ def _write_fake_refgene(cache: Path, build: str = "GRCh38") -> Path:
     with gzip.open(path, "wt") as fh:
         for r in rows:
             fh.write("\t".join(r) + "\n")
+    return path
+
+
+def _write_fake_ncbirefseq_gtf(cache: Path, build: str = "T2T-CHM13") -> Path:
+    """Write a minimal ncbiRefSeq GTF file (as produced by UCSC hs1) into cache."""
+    cache.mkdir(parents=True, exist_ok=True)
+    path = cache / f"{build}_ncbiRefSeq.gtf.gz"
+    # GTF columns: seqname source feature start end score strand frame attributes
+    # Coordinates are 1-based inclusive.
+    lines = [
+        # Two transcripts for GENEA on chrY (tests span merge)
+        'chrY\tncbiRefSeq\ttranscript\t100\t200\t.\t+\t.\t'
+        'gene_id "GENEA"; transcript_id "NR_001.1"; gene_name "GENEA";',
+        'chrY\tncbiRefSeq\texon\t100\t200\t.\t+\t.\t'
+        'gene_id "GENEA"; transcript_id "NR_001.1"; exon_number "1";'
+        ' exon_id "NR_001.1.1"; gene_name "GENEA";',
+        'chrY\tncbiRefSeq\ttranscript\t150\t300\t.\t+\t.\t'
+        'gene_id "GENEA"; transcript_id "NR_001.2"; gene_name "GENEA";',
+        # One transcript for GENEB on chrY
+        'chrY\tncbiRefSeq\ttranscript\t500\t800\t.\t-\t.\t'
+        'gene_id "GENEB"; transcript_id "NR_002.1"; gene_name "GENEB";',
+        # Gene with only gene_id (no gene_name) → fallback to gene_id
+        'chrX\tncbiRefSeq\ttranscript\t1000\t2000\t.\t+\t.\t'
+        'gene_id "LOC999"; transcript_id "XM_999.1";',
+        # Comment line that must be skipped
+        '# this is a comment',
+    ]
+    with gzip.open(path, "wt") as fh:
+        for line in lines:
+            fh.write(line + "\n")
     return path
 
 
@@ -200,8 +232,83 @@ class TestGeneAnnotation:
 
 
 # ---------------------------------------------------------------------------
-# Figure builders
+# GTF gene annotation (T2T-CHM13 / hs1)
 # ---------------------------------------------------------------------------
+
+
+class TestGTFGeneAnnotation:
+    def test_parse_gtf_genes_merges_transcripts(self, tmp_path):
+        """transcript lines are merged; exon lines are ignored."""
+        path = _write_fake_ncbirefseq_gtf(tmp_path)
+        result, n_rows = _parse_gtf_genes(path)
+        # 4 transcript lines (2 GENEA + 1 GENEB + 1 LOC999); exon and comment excluded.
+        assert n_rows == 4
+        # GENEA: two transcripts on chrY; spans should be merged to 100–300.
+        assert (100, 300, "GENEA", "+") in result["chrY"]
+        # GENEB: single transcript on chrY.
+        assert (500, 800, "GENEB", "-") in result["chrY"]
+        # LOC999: no gene_name attribute → falls back to gene_id.
+        assert (1000, 2000, "LOC999", "+") in result["chrX"]
+
+    def test_parse_gtf_genes_skips_non_transcript(self, tmp_path):
+        """Exon and other non-transcript features are ignored."""
+        path = _write_fake_ncbirefseq_gtf(tmp_path)
+        result, n_rows = _parse_gtf_genes(path)
+        # Exon lines and comment lines must not inflate n_rows.
+        assert n_rows == 4
+        # Only 2 unique genes on chrY.
+        assert len(result["chrY"]) == 2
+
+    def test_load_gene_table_t2t_uses_gtf(self, tmp_path):
+        """load_gene_table dispatches to the GTF parser for T2T-CHM13."""
+        _write_fake_ncbirefseq_gtf(tmp_path)
+        gt = load_gene_table("T2T-CHM13", cache_dir=tmp_path, auto_download=False)
+        assert "chrY" in gt
+        symbols = {entry[2] for entry in gt["chrY"]}
+        assert "GENEA" in symbols
+        assert "GENEB" in symbols
+
+    def test_load_gene_table_t2t_missing_raises(self, tmp_path):
+        """FileNotFoundError raised when no cache and auto_download=False."""
+        with pytest.raises(FileNotFoundError):
+            load_gene_table("T2T-CHM13", cache_dir=tmp_path, auto_download=False)
+
+    def test_annotate_hits_with_gtf_genes(self, tmp_path):
+        """Gene annotation works end-to-end with GTF-derived gene table."""
+        _write_fake_ncbirefseq_gtf(tmp_path)
+        gt = load_gene_table("T2T-CHM13", cache_dir=tmp_path, auto_download=False)
+        hits = [
+            {"chrom": "chrY", "pos": 150},   # inside merged GENEA (100–300)
+            {"chrom": "chrY", "pos": 600},   # inside GENEB (500–800)
+            {"chrom": "chrY", "pos": 10000}, # far from all genes
+        ]
+        anns = annotate_hits_with_genes(hits, gt, window_kb=1)
+        assert anns[0].nearest_gene == "GENEA"
+        assert anns[0].nearest_gene_distance_bp == 0
+        assert anns[1].nearest_gene == "GENEB"
+        assert anns[1].nearest_gene_distance_bp == 0
+        assert anns[2].nearest_gene_distance_bp > 0
+
+    def test_gtf_report_with_gene_annotation(self, tmp_path):
+        """generate_gwas_report uses GTF gene table for T2T-CHM13."""
+        _write_fake_ncbirefseq_gtf(tmp_path / "cache")
+        p = tmp_path / "auto.tsv"
+        _write_results_tsv(p, _synthetic_records(
+            n_per_chrom=10,
+            chroms=("chrY",),
+            planted=((("chrY", 150), 1e-10),),
+        ))
+        out = tmp_path / "rpt.html"
+        generate_gwas_report(
+            {"autosomal": p}, out,
+            build="T2T-CHM13", cache_dir=tmp_path / "cache",
+            gene_window_kb=1,
+        )
+        txt = out.read_text()
+        assert out.exists() and out.stat().st_size > 1000
+        assert "GENEA" in txt
+
+
 
 
 class TestFigures:
