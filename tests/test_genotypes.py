@@ -45,3 +45,31 @@ class TestReadGenotypes:
         )
         valid = dosage[~np.isnan(dosage)]
         assert np.all(np.isin(valid, [0.0, 1.0, 2.0]))
+
+    def test_region_restricts_to_contig(self, test_bcf_path) -> None:
+        """``region`` should restrict parsing to the requested contig via the index."""
+        _, _, variants_all = read_genotypes(
+            test_bcf_path, min_maf=0.0, min_call_rate=0.0, progress=False,
+        )
+        _, _, variants_x = read_genotypes(
+            test_bcf_path,
+            min_maf=0.0,
+            min_call_rate=0.0,
+            region="chrX",
+            progress=False,
+        )
+        # chrX-only fetch must contain only chrX variants.
+        assert len(variants_x) > 0
+        assert all(v["chrom"] == "chrX" for v in variants_x)
+        # And match the count from a full-file parse filtered to chrX.
+        n_chrx_all = sum(1 for v in variants_all if v["chrom"] == "chrX")
+        assert len(variants_x) == n_chrx_all
+
+    def test_region_invalid_raises(self, test_bcf_path) -> None:
+        """An unknown contig name should raise ValueError."""
+        with pytest.raises(ValueError):
+            read_genotypes(
+                test_bcf_path,
+                region="not_a_real_contig",
+                progress=False,
+            )

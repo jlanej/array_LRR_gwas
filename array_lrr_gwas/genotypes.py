@@ -19,12 +19,23 @@ except ImportError as _exc:
         "pysam is required for BCF/VCF I/O. Install with: pip install pysam"
     ) from _exc
 
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - tqdm is an optional runtime dep
+    # tqdm is listed in pyproject.toml, but fall back gracefully if it
+    # is missing so that a failed import doesn't break genotype parsing.
+    def tqdm(x, **_kwargs):  # type: ignore[no-redef]
+        return x
+
 
 def read_genotypes(
     path: str | Path,
     *,
     min_maf: float = 0.01,
     min_call_rate: float = 0.90,
+    region: str | None = None,
+    total_variants: int | None = None,
+    progress: bool = True,
 ) -> tuple[NDArray[np.floating], list[str], list[dict]]:
     """Read genotype dosages from a BCF/VCF file.
 
@@ -42,6 +53,19 @@ def read_genotypes(
     min_call_rate : float
         Minimum genotype call rate.  Variants below this threshold
         are excluded.
+    region : str, optional
+        If provided, restrict parsing to this region (e.g. ``"chrX"``
+        or ``"chrX:1-155270560"``) using the BCF/VCF index. This avoids
+        sequentially scanning autosomes when only a single contig is
+        needed (e.g. for X-GRM computation), which can reduce runtime
+        from hours to seconds on whole-genome BCFs.
+    total_variants : int, optional
+        Expected number of records iterated. Used only to display an
+        accurate percentage in the progress bar.
+    progress : bool
+        If True (default), show a ``tqdm`` progress bar while parsing
+        records. Set to False to suppress (e.g. in non-interactive
+        logs or tests).
 
     Returns
     -------
@@ -61,7 +85,32 @@ def read_genotypes(
     dosage_rows: list[NDArray] = []
     variants: list[dict] = []
 
-    for rec in vcf_in:
+    # Use the BCF/VCF index to jump directly to ``region`` when given,
+    # avoiding a full-genome sequential scan. Falls back to iterating
+    # the whole file when ``region`` is None.
+    if region is not None:
+        try:
+            record_iterator = vcf_in.fetch(region)
+        except (ValueError, OSError) as exc:
+            vcf_in.close()
+            raise ValueError(
+                f"Could not fetch region {region!r} from {path!r}. "
+                "Ensure the file is indexed (.csi or .tbi) and the "
+                "contig name matches the file's header."
+            ) from exc
+    else:
+        record_iterator = vcf_in
+
+    if progress:
+        desc = f"Parsing genotypes ({region})" if region else "Parsing genotypes"
+        record_iterator = tqdm(
+            record_iterator,
+            desc=desc,
+            total=total_variants,
+            unit=" vars",
+        )
+
+    for rec in record_iterator:
         row = np.full(n_samples, np.nan, dtype=np.float64)
         for i, sname in enumerate(samples):
             gt = rec.samples[sname].get("GT")
