@@ -3022,10 +3022,12 @@ def _run_associate(args: argparse.Namespace) -> int:
             _build_x = args.build
             if _build_x is None:
                 _build_x = _detect_build_x(input_path)
+            # Determine chromosome naming convention from loaded variants.
+            # Also used to restrict genotype parsing to chrX via the
+            # BCF/VCF index (avoids sequentially scanning autosomes).
+            _x_chrom_name = _x_vars[0].get("chrom", "chrX") if _x_vars else "chrX"
             _par_regions = None
             if _build_x is not None:
-                # Determine chromosome naming convention from loaded variants
-                _x_chrom_name = _x_vars[0].get("chrom", "chrX") if _x_vars else "chrX"
                 _par_regions = _get_par_x(
                     _build_x,
                     chromosomes=[_x_chrom_name],
@@ -3038,12 +3040,17 @@ def _run_associate(args: argparse.Namespace) -> int:
             # Read chrX genotype dosages for X-GRM
             gt_path_x = args.genotype_bcf or input_path
             logger.info(
-                "X-GRM: loading genotypes from %s (this may take a while)",
-                gt_path_x,
+                "X-GRM: loading genotypes from %s region=%s "
+                "(indexed fetch; this may take a while)",
+                gt_path_x, _x_chrom_name,
             )
             try:
                 _gt_dosage_x, _gt_samples_x, _gt_variants_x = _read_gt_x(
-                    gt_path_x, min_maf=0.0, min_call_rate=0.0,
+                    gt_path_x,
+                    min_maf=0.0,
+                    min_call_rate=0.0,
+                    region=_x_chrom_name,
+                    total_variants=len(_x_vars) if _x_vars else None,
                 )
                 logger.info(
                     "X-GRM: genotype load complete from %s: %d variants across %d samples",
