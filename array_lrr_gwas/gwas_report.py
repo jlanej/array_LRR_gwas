@@ -785,16 +785,20 @@ def build_manhattan_figure(
     annotations: list[dict] = []
     resolved_labels: list[tuple[int, str]] = []  # (rec_list_idx, symbol)
     if gene_labels:
+        # Index the filtered record list by (chrom, pos, variant_id) so
+        # we can resolve labels to their surviving position regardless
+        # of which input records were dropped for invalid p-values.
+        rec_by_key: dict[tuple[str, int, str], int] = {
+            (
+                str(r.get("chrom", "")).replace("chr", ""),
+                int(r.get("pos", 0)),
+                str(r.get("variant_id", "")),
+            ): j
+            for j, r in enumerate(rec_list)
+        }
         if isinstance(gene_labels, dict):
             # Back-compat: index refers to the *input* ``records`` list,
             # so translate by matching (chrom, pos, variant_id).
-            rec_by_key: dict[tuple[str, int, str], int] = {}
-            for j, r in enumerate(rec_list):
-                rec_by_key[(
-                    str(r.get("chrom", "")).replace("chr", ""),
-                    int(r.get("pos", 0)),
-                    str(r.get("variant_id", "")),
-                )] = j
             for in_idx, sym in gene_labels.items():
                 if not sym:
                     continue
@@ -809,13 +813,6 @@ def build_manhattan_figure(
                     if j is not None:
                         resolved_labels.append((j, str(sym)))
         else:
-            rec_by_key = {}
-            for j, r in enumerate(rec_list):
-                rec_by_key[(
-                    str(r.get("chrom", "")).replace("chr", ""),
-                    int(r.get("pos", 0)),
-                    str(r.get("variant_id", "")),
-                )] = j
             for chrom_, pos_, vid_, sym_ in gene_labels:
                 if not sym_:
                     continue
