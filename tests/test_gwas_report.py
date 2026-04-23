@@ -567,3 +567,210 @@ class TestReadRecords:
         assert back[0]["chrom"] == recs[0]["chrom"]
         assert back[0]["pos"] == recs[0]["pos"]
         assert math.isclose(back[0]["p_value"], recs[0]["p_value"])
+
+
+# ---------------------------------------------------------------------------
+# Trace-type and gene-label rendering guarantees
+#
+# The plotly.js rendering pipeline silently hides ``scattergl`` (WebGL)
+# traces whenever they share a subplot with ``scatter`` (SVG) traces
+# (plotly/plotly.js#6779 — see PR #106 discussion).  Every builder in
+# this module therefore has two hard rules:
+#
+#   1. Every trace in a single figure has the *same* ``type``.
+#   2. For genome-scale Manhattan/QQ/regional plots that type is
+#      ``scattergl`` so the HTML stays responsive on 30k+ markers.
+#
+# Gene-name labels are emitted as layout *annotations*, not traces,
+# and must therefore survive the WebGL switch.  These tests lock all
+# of the above in to prevent regressions from creeping back.
+# ---------------------------------------------------------------------------
+
+
+def _trace_types(fig: dict) -> list[str]:
+    return [t.get("type") for t in fig.get("data", [])]
+
+
+class TestScatterGLTraceTypes:
+    def test_manhattan_all_scattergl(self):
+        recs = _synthetic_records(
+            n_per_chrom=200,
+            planted=((("1", 150), 1e-10), (("2", 200), 1e-6)),
+        )
+        fig = build_manhattan_figure(recs, title="t")
+        types = _trace_types(fig)
+        assert types, "Manhattan figure has no traces"
+        # Every trace must be scattergl — never mix with plain scatter.
+        assert all(t == "scattergl" for t in types), types
+
+    def test_manhattan_no_svg_scatter_when_sig_present(self):
+        # Regression guard for PR #106: the GWS trace used to be plain
+        # ``scatter`` which silently hid every ``scattergl`` non-sig /
+        # suggestive trace in the same subplot.
+        recs = _synthetic_records(
+            n_per_chrom=50,
+            planted=((("1", 150), 1e-20),),
+        )
+        fig = build_manhattan_figure(recs, title="t")
+        assert "scatter" not in _trace_types(fig)
+
+    def test_qq_all_scattergl(self):
+        rng = np.random.default_rng(3)
+        p = rng.uniform(0, 1, 2000)
+        fig = build_qq_figure(p, title="q")
+        types = _trace_types(fig)
+        assert types, "QQ figure has no traces"
+        assert all(t == "scattergl" for t in types), types
+
+    def test_qq_ci_band_uses_tonexty(self):
+        # Two-trace fill="tonexty" pattern is WebGL-reliable; the old
+        # single-trace fill="toself" polygon is not.
+        rng = np.random.default_rng(4)
+        fig = build_qq_figure(rng.uniform(0, 1, 1000), title="q")
+        fills = [t.get("fill") for t in fig["data"] if t.get("fill")]
+        assert "toself" not in fills
+        assert "tonexty" in fills
+
+    def test_regional_points_scattergl(self, tmp_path):
+        _write_fake_refgene(tmp_path)
+        gt = load_gene_table("GRCh38", cache_dir=tmp_path, auto_download=False)
+        recs = [
+            {"chrom": "1", "pos": p, "variant_id": f"v{p}",
+             "p_value": 1e-9 if p == 150 else 0.5, "beta": 0.0, "se": 1.0}
+            for p in range(100, 900, 10)
+        ]
+        fig = build_regional_figure(
+            recs, chrom="1", center_pos=150,
+            half_window_kb=1, genes=gt["chr1"],
+            title="reg", lead_variant_id="v150",
+        )
+        assert fig["data"][0]["type"] == "scattergl"
+
+
+class TestManhattanGeneLabels:
+    def test_labels_via_tuple_api(self):
+        recs = _synthetic_records(
+            n_per_chrom=20,
+            planted=((("1", 150), 1e-10),),
+        )
+        fig = build_manhattan_figure(
+            recs, title="t",
+            gene_labels=[("1", 150, "1:150", "GENEX")],
+        )
+        texts = [a.get("text", "") for a in fig["layout"]["annotations"]]
+        assert any("GENEX" in t for t in texts)
+
+    def test_labels_via_dict_backcompat(self):
+        # Dict form is still accepted for backward compatibility.
+        recs = _synthetic_records(
+            n_per_chrom=20,
+            planted=((("1", 150), 1e-10),),
+        )
+        # Locate the planted hit's index in records.
+        idx = next(
+            i for i, r in enumerate(recs)
+            if r["chrom"] == "1" and r["pos"] == 150
+        )
+        fig = build_manhattan_figure(
+            recs, title="t", gene_labels={idx: "GENEZ"},
+        )
+        texts = [a.get("text", "") for a in fig["layout"]["annotations"]]
+        assert any("GENEZ" in t for t in texts)
+
+    def test_labels_survive_invalid_pvalues_in_records(self):
+        # If some records have invalid p-values they are filtered out
+        # by ``build_manhattan_figure`` before computing ``cum_x``.
+        # Gene-label resolution by (chrom, pos, variant_id) must
+        # therefore place the annotation at the *correct* surviving
+        # index, which is the whole point of the tuple API.
+        recs = [
+            {"chrom": "1", "pos": 10, "variant_id": "1:10",
+             "p_value": float("nan"), "beta": 0.0, "se": 1.0},
+            {"chrom": "1", "pos": 50, "variant_id": "1:50",
+             "p_value": 0.5, "beta": 0.0, "se": 1.0},
+            {"chrom": "1", "pos": 150, "variant_id": "1:150",
+             "p_value": 1e-10, "beta": 0.0, "se": 1.0},
+            {"chrom": "1", "pos": 200, "variant_id": "1:200",
+             "p_value": 0.8, "beta": 0.0, "se": 1.0},
+        ]
+        fig = build_manhattan_figure(
+            recs, title="t",
+            gene_labels=[("1", 150, "1:150", "GENEY")],
+        )
+        anns = fig["layout"]["annotations"]
+        matches = [a for a in anns if "GENEY" in a.get("text", "")]
+        assert len(matches) == 1
+        # The annotation's x must equal the cum_x of the planted hit
+        # after the NaN record was filtered out.  Since chr1 is the
+        # only chromosome, cum_x of pos=150 is simply 150.
+        assert matches[0]["x"] == 150
+
+    def test_labels_stagger_when_close(self):
+        # Two GWS hits < 1% of span apart → staggered ay offsets.
+        recs = [
+            {"chrom": "1", "pos": 1_000_000, "variant_id": "1:1M",
+             "p_value": 1e-10, "beta": 0.0, "se": 1.0},
+            {"chrom": "1", "pos": 1_000_100, "variant_id": "1:1M100",
+             "p_value": 1e-10, "beta": 0.0, "se": 1.0},
+            {"chrom": "1", "pos": 50_000_000, "variant_id": "1:50M",
+             "p_value": 0.9, "beta": 0.0, "se": 1.0},
+        ]
+        fig = build_manhattan_figure(
+            recs, title="t",
+            gene_labels=[
+                ("1", 1_000_000, "1:1M", "G1"),
+                ("1", 1_000_100, "1:1M100", "G2"),
+            ],
+        )
+        ays = sorted(a["ay"] for a in fig["layout"]["annotations"])
+        # Distinct offsets when labels are close together.
+        assert len(set(ays)) == 2
+
+    def test_labels_attached_for_suggestive_hits(self, tmp_path):
+        # The old code only labelled genome-wide hits; we now also
+        # label any hit below the suggestive threshold so labels stay
+        # visible in cohorts that never reach the 5e-8 line.
+        _write_fake_refgene(tmp_path / "cache")
+        p = tmp_path / "auto.tsv"
+        _write_results_tsv(p, _synthetic_records(
+            n_per_chrom=20, chroms=("1",),
+            planted=((("1", 150), 1e-6),),  # suggestive only
+        ))
+        out = tmp_path / "rpt.html"
+        generate_gwas_report(
+            {"autosomal": p}, out,
+            build="GRCh38", cache_dir=tmp_path / "cache",
+            gene_window_kb=1,
+        )
+        assert "GENEA" in out.read_text()
+
+
+class TestCombinedSummaryManhattan:
+    def test_combined_summary_has_gene_labels(self, tmp_path):
+        # With two summary modes present the combined Manhattan is
+        # built.  It must surface gene labels aggregated from the
+        # per-mode reports (fixes PR #106 regression where the
+        # combined summary had no labels at all).
+        _write_fake_refgene(tmp_path / "cache")
+        sources = {}
+        for mode, chroms in (
+            ("autosomal", ("1",)),
+            ("x_with_sex_covariate", ("X",)),
+        ):
+            p = tmp_path / f"{mode}.tsv"
+            _write_results_tsv(p, _synthetic_records(
+                n_per_chrom=20, chroms=chroms,
+                planted=(((chroms[0], 150), 1e-10),),
+            ))
+            sources[mode] = p
+        out = tmp_path / "rpt.html"
+        generate_gwas_report(
+            sources, out, build="GRCh38",
+            cache_dir=tmp_path / "cache", gene_window_kb=1,
+        )
+        txt = out.read_text()
+        # One combined-summary section plus two per-mode sections.
+        assert 'id="mode-summary"' in txt
+        # GENEA from the fake refgene must appear at least 3 times
+        # (per-mode Manhattan + summary Manhattan + top-hits table).
+        assert txt.count("GENEA") >= 3

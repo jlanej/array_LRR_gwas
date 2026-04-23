@@ -143,6 +143,10 @@ class ModeReport:
     qq_fig: dict         # plotly figure dict
     regional_figs: list[tuple[str, dict]]  # [(locus_label, fig_dict), ...]
     source_path: str = ""
+    # Gene labels used on this mode's Manhattan plot, reusable by the
+    # combined summary Manhattan so labels remain visible there too.
+    # Each entry is ``(chrom, pos, variant_id, gene_symbol)``.
+    gene_labels: list[tuple[str, int, str, str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -657,7 +661,9 @@ def build_manhattan_figure(
     records: Sequence[dict],
     *,
     title: str,
-    gene_labels: dict[int, str] | None = None,
+    gene_labels: (
+        "Sequence[tuple[str, int, str, str]] | dict[int, str] | None"
+    ) = None,
     genome_wide_p: float = GENOME_WIDE_P,
     suggestive_p: float = SUGGESTIVE_P,
     max_nonsig_points: int = _MAX_NONSIG_POINTS,
@@ -670,13 +676,25 @@ def build_manhattan_figure(
     the HTML file size manageable for genome-wide scans.  The figure
     annotation notes this downsampling so readers can interpret it.
 
+    All marker traces are emitted as ``scattergl`` (WebGL) for
+    performance on genome-wide point counts.  We never mix
+    ``scatter`` and ``scattergl`` traces in the same subplot
+    (a known Plotly.js rendering hazard: plotly/plotly.js#6779) —
+    significance threshold lines are emitted as layout *shapes* and
+    gene labels as layout *annotations*, neither of which participate
+    in WebGL/SVG mixing.
+
     Parameters
     ----------
     records : sequence of dict
         Association records (``chrom``, ``pos``, ``p_value`` at minimum).
-    gene_labels : dict[int, str], optional
-        Map from ``records`` index → gene-symbol label, used to
-        annotate top hits directly on the plot.
+    gene_labels : sequence of (chrom, pos, variant_id, symbol), optional
+        Gene-symbol labels to draw next to top hits.  Labels are
+        matched against the filtered record list by (chrom, pos,
+        variant_id) so they remain correct even when records with
+        invalid p-values are dropped.  For backward compatibility a
+        ``dict[int, str]`` mapping of ``records`` index → symbol is
+        also accepted, but the tuple form is preferred.
     """
     rec_list = [r for r in records if np.isfinite(r.get("p_value", float("nan")))
                 and 0.0 < r["p_value"] <= 1.0]
@@ -716,7 +734,7 @@ def build_manhattan_figure(
         if not sel.any():
             continue
         traces.append({
-            "type": "scatter",
+            "type": "scattergl",
             "x": cum_x[sel].tolist(),
             "y": log_p[sel].round(3).tolist(),
             "mode": "markers",
@@ -730,7 +748,7 @@ def build_manhattan_figure(
     # Suggestive points (all kept).
     if sug_mask.any():
         traces.append({
-            "type": "scatter",
+            "type": "scattergl",
             "x": cum_x[sug_mask].tolist(),
             "y": log_p[sug_mask].round(4).tolist(),
             "mode": "markers",
@@ -747,7 +765,7 @@ def build_manhattan_figure(
     if sig_mask.any():
         sig_idx = np.where(sig_mask)[0]
         traces.append({
-            "type": "scatter",
+            "type": "scattergl",
             "x": cum_x[sig_idx].tolist(),
             "y": log_p[sig_idx].round(4).tolist(),
             "mode": "markers",
@@ -761,23 +779,82 @@ def build_manhattan_figure(
             "hoverinfo": "text",
         })
 
-    # Gene annotations (top hits only).
-    annotations = []
+    # Gene annotations (top hits only).  Resolve labels against the
+    # *filtered* rec_list so indices stay aligned with cum_x / log_p
+    # regardless of records that were dropped for invalid p-values.
+    annotations: list[dict] = []
+    resolved_labels: list[tuple[int, str]] = []  # (rec_list_idx, symbol)
     if gene_labels:
-        for idx, sym in gene_labels.items():
-            if not sym or idx >= n_total:
-                continue
-            annotations.append({
-                "x": int(cum_x[idx]),
-                "y": float(log_p[idx]),
-                "text": sym,
-                "showarrow": True,
-                "arrowhead": 2,
-                "arrowsize": 0.8,
-                "ax": 0,
-                "ay": -25,
-                "font": {"size": 10, "color": "#333"},
-            })
+        if isinstance(gene_labels, dict):
+            # Back-compat: index refers to the *input* ``records`` list,
+            # so translate by matching (chrom, pos, variant_id).
+            rec_by_key: dict[tuple[str, int, str], int] = {}
+            for j, r in enumerate(rec_list):
+                rec_by_key[(
+                    str(r.get("chrom", "")).replace("chr", ""),
+                    int(r.get("pos", 0)),
+                    str(r.get("variant_id", "")),
+                )] = j
+            for in_idx, sym in gene_labels.items():
+                if not sym:
+                    continue
+                if 0 <= in_idx < len(records):
+                    r = records[in_idx]
+                    key = (
+                        str(r.get("chrom", "")).replace("chr", ""),
+                        int(r.get("pos", 0)),
+                        str(r.get("variant_id", "")),
+                    )
+                    j = rec_by_key.get(key)
+                    if j is not None:
+                        resolved_labels.append((j, str(sym)))
+        else:
+            rec_by_key = {}
+            for j, r in enumerate(rec_list):
+                rec_by_key[(
+                    str(r.get("chrom", "")).replace("chr", ""),
+                    int(r.get("pos", 0)),
+                    str(r.get("variant_id", "")),
+                )] = j
+            for chrom_, pos_, vid_, sym_ in gene_labels:
+                if not sym_:
+                    continue
+                key = (
+                    str(chrom_).replace("chr", ""),
+                    int(pos_),
+                    str(vid_),
+                )
+                j = rec_by_key.get(key)
+                if j is not None:
+                    resolved_labels.append((j, str(sym_)))
+
+        # Stagger vertical offsets for labels whose cumulative x
+        # positions lie within ~1% of the genomic span, to reduce
+        # visual overlap in dense hit clusters.
+        if resolved_labels:
+            span = max(1, int(cum_x.max() - cum_x.min()))
+            stagger_offsets = [-25, -45, -65]
+            resolved_labels.sort(key=lambda t: int(cum_x[t[0]]))
+            last_x: list[int] = []
+            for j, sym in resolved_labels:
+                xj = int(cum_x[j])
+                # Count recent labels within 1% of the span.
+                recent = sum(1 for lx in last_x if abs(xj - lx) < span / 100)
+                ay = stagger_offsets[recent % len(stagger_offsets)]
+                annotations.append({
+                    "x": xj,
+                    "y": float(log_p[j]),
+                    "text": f"<i>{html.escape(sym)}</i>",
+                    "showarrow": True,
+                    "arrowhead": 2,
+                    "arrowsize": 0.8,
+                    "ax": 0,
+                    "ay": ay,
+                    "font": {"size": 10, "color": "#333"},
+                    "bgcolor": "rgba(255,255,255,0.7)",
+                    "borderpad": 1,
+                })
+                last_x.append(xj)
 
     # X-axis ticks: chromosome centres.
     tickvals = []
@@ -895,17 +972,42 @@ def build_qq_figure(
 
     lam = lambda_gc(p)
 
+    # We keep every trace in this figure a ``scattergl`` trace so Plotly
+    # never has to mix WebGL (scattergl) and SVG (scatter) in the same
+    # subplot — that mixing is a well-known rendering hazard in
+    # plotly.js (plotly/plotly.js#6779) that can silently hide the
+    # WebGL layer.  The CI band is therefore rendered as *two*
+    # scattergl traces (lower then upper) with ``fill: "tonexty"`` on
+    # the upper, instead of a single ``fill: "toself"`` polygon,
+    # because the two-trace pattern is far more reliable under WebGL.
     traces: list[dict] = []
-    # Null band
+
+    # 95% null band (lower + upper with tonexty between them).
     if ci_lo is not None and ci_hi is not None:
-        xs = exp_log[keep].tolist()
+        # Sort xs ascending so the fill renders as a clean band.
+        xs_arr = exp_log[keep]
+        order = np.argsort(xs_arr)
+        xs_sorted = xs_arr[order].tolist()
+        lo_sorted = ci_lo[order].tolist()
+        hi_sorted = ci_hi[order].tolist()
         traces.append({
-            "type": "scatter",
-            "x": xs + xs[::-1],
-            "y": ci_hi.tolist() + ci_lo.tolist()[::-1],
-            "fill": "toself",
+            "type": "scattergl",
+            "x": xs_sorted,
+            "y": lo_sorted,
+            "mode": "lines",
+            "line": {"color": "rgba(0,0,0,0)", "width": 0},
+            "name": f"{int(ci_alpha * 100)}% CI under null (lower)",
+            "hoverinfo": "skip",
+            "showlegend": False,
+        })
+        traces.append({
+            "type": "scattergl",
+            "x": xs_sorted,
+            "y": hi_sorted,
+            "mode": "lines",
+            "fill": "tonexty",
             "fillcolor": "rgba(150,150,150,0.25)",
-            "line": {"color": "rgba(0,0,0,0)"},
+            "line": {"color": "rgba(0,0,0,0)", "width": 0},
             "name": f"{int(ci_alpha * 100)}% CI under null",
             "hoverinfo": "skip",
             "showlegend": True,
@@ -914,7 +1016,7 @@ def build_qq_figure(
     # y = x reference line
     lim = float(max(exp_log.max(), obs_log.max()))
     traces.append({
-        "type": "scatter",
+        "type": "scattergl",
         "x": [0, lim],
         "y": [0, lim],
         "mode": "lines",
@@ -925,7 +1027,7 @@ def build_qq_figure(
 
     # Observed QQ points
     traces.append({
-        "type": "scatter",
+        "type": "scattergl",
         "x": exp_log[keep].round(3).tolist(),
         "y": obs_log[keep].round(4).tolist(),
         "mode": "markers",
@@ -996,7 +1098,7 @@ def build_regional_figure(
     ]
 
     traces: list[dict] = [{
-        "type": "scatter",
+        "type": "scattergl",
         "x": x.tolist(),
         "y": y.round(4).tolist(),
         "mode": "markers",
@@ -1121,7 +1223,14 @@ def summarize_mode(
     hits = top_hits(records, n=top_n)
 
     # Gene annotation for hits.
-    gene_labels_for_manhattan: dict[int, str] = {}
+    # ``gene_labels_for_manhattan`` is a list of (chrom, pos,
+    # variant_id, symbol) tuples matched against the filtered record
+    # list inside ``build_manhattan_figure``.  We label every
+    # *suggestive-or-better* hit (p < SUGGESTIVE_P) that has an
+    # annotated nearest gene, so a reader can see candidate genes on
+    # the Manhattan even when no marker reaches genome-wide
+    # significance — which is the common case in small cohorts.
+    gene_labels_for_manhattan: list[tuple[str, int, str, str]] = []
     if gene_table:
         anns = annotate_hits_with_genes(hits, gene_table, window_kb=gene_window_kb)
         # Attach to hit records (non-destructive to input).
@@ -1133,21 +1242,25 @@ def summarize_mode(
             hc["genes_in_window"] = ",".join(ann.genes_in_window)
             hits_out.append(hc)
         hits = hits_out
-        # Build manhattan gene-label mapping (only genome-wide-significant hits).
-        # We need the index within the full records list for placement.
-        idx_by_key: dict[tuple[str, int, str], int] = {
-            (str(r.get("chrom", "")), int(r.get("pos", 0)),
-             str(r.get("variant_id", ""))): i
-            for i, r in enumerate(records)
-        }
+        seen_syms: set[str] = set()
         for h in hits:
-            if h.get("p_value", 1) >= GENOME_WIDE_P:
+            p_val = h.get("p_value", 1)
+            # Label any suggestive-or-better hit with an annotated gene.
+            if not (0 < p_val < SUGGESTIVE_P):
                 continue
-            key = (str(h.get("chrom", "")), int(h.get("pos", 0)),
-                   str(h.get("variant_id", "")))
-            idx = idx_by_key.get(key)
-            if idx is not None and h.get("nearest_gene"):
-                gene_labels_for_manhattan[idx] = h["nearest_gene"]
+            sym = h.get("nearest_gene") or ""
+            if not sym:
+                continue
+            # Avoid labelling the same gene repeatedly in dense clusters.
+            if sym in seen_syms:
+                continue
+            seen_syms.add(sym)
+            gene_labels_for_manhattan.append((
+                str(h.get("chrom", "")).replace("chr", ""),
+                int(h.get("pos", 0)),
+                str(h.get("variant_id", "")),
+                str(sym),
+            ))
     else:
         hits_out = []
         for h in hits:
@@ -1219,6 +1332,7 @@ def summarize_mode(
         qq_fig=qq,
         regional_figs=regional_figs,
         source_path=source_path,
+        gene_labels=gene_labels_for_manhattan,
     )
 
 
@@ -1740,12 +1854,23 @@ def generate_gwas_report(
     combined_manhattan_fig: dict | None = None
     _summary_modes_present = [m for m in _SUMMARY_MODES if m in report_by_mode]
     if _summary_records and len(_summary_modes_present) >= 2:
+        # Aggregate gene labels from every summary mode so the
+        # combined-summary Manhattan also shows candidate genes.
+        combined_gene_labels: list[tuple[str, int, str, str]] = []
+        seen_label_syms: set[str] = set()
+        for m in _summary_modes_present:
+            for chrom_, pos_, vid_, sym_ in report_by_mode[m].gene_labels:
+                if sym_ in seen_label_syms:
+                    continue
+                seen_label_syms.add(sym_)
+                combined_gene_labels.append((chrom_, pos_, vid_, sym_))
         combined_manhattan_fig = build_manhattan_figure(
             _summary_records,
             title=(
                 "Combined genome-wide summary "
                 f"({', '.join(_summary_modes_present)})"
             ),
+            gene_labels=combined_gene_labels,
         )
 
     # Optional top-hits TSVs.
