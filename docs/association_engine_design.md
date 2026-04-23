@@ -257,9 +257,19 @@ If the X-GRM cannot be computed (e.g. no chrX genotypes available, all
 variants filtered, or insufficient samples), the pipeline falls back to
 OLS regression with a warning.
 
-Requires `--sample-sheet` with a `predicted_sex` column (1 = male,
-2 = female).  Modes with fewer than 3 qualifying samples are skipped
-with a warning.
+Requires `--sample-sheet`.  Per-sample sex (1 = male, 2 = female) is
+auto-detected by walking the following columns in priority order, with
+per-row fallback when the preferred column is missing or ambiguous:
+
+1. `predicted_sex`           — already 1/2 numeric, or `M`/`F`/`male`/`female`
+2. `computed_gender`         — Illumina BeadArray `M`/`F`
+3. `peddy_sex_predicted_sex` — peddy `male`/`female`
+4. `peddy_sex`               — peddy `M`/`F` or `male`/`female`
+5. `f_sex`                   — continuous X-heterozygosity F statistic
+   (≥ 0.6 → male, ≤ 0.4 → female, in-between → missing)
+
+Values such as `NA`, `U`, and `AMBIGUOUS` are treated as missing.  Modes
+with fewer than 3 qualifying samples are skipped with a warning.
 
 ## Logistic Regression and Relatedness
 

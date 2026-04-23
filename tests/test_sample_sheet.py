@@ -10,6 +10,7 @@ from array_lrr_gwas.sample_sheet import (
     align_samples,
     classify_samples_from_sheet,
     read_all_raw_rows,
+    read_sample_sex_map,
 )
 
 
@@ -280,3 +281,121 @@ class TestReadAllRawRows:
         expected_id = "1000G_OMNI2.5M_07-10_01_D05_PT-G23E_5426529111_R04C01"
         if expected_id in raw:
             assert raw[expected_id]["Gender"] == "F"
+
+
+class TestReadSampleSexMap:
+    """Tests for ``read_sample_sex_map`` — the sex-column auto-resolver
+    used by sex-chromosome association modes.
+
+    The compiled sample sheet produced by the upstream
+    ``illumina_idat_processing`` pipeline does *not* expose a numeric
+    ``predicted_sex`` column; sex instead lives in ``computed_gender``,
+    ``peddy_sex``, ``peddy_sex_predicted_sex``, or ``f_sex``.  This
+    helper normalises those to ``{1: male, 2: female}`` with a
+    per-sample priority fallback so downstream sex-chr logic sees the
+    real male/female split rather than "0 males, N females".
+    """
+
+    def test_predicted_sex_numeric_passthrough(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "sample_id\tpredicted_sex\n"
+            "S1\t1\nS2\t2\nS3\tNA\n"
+        )
+        sex_map, primary, counts = read_sample_sex_map(
+            tsv, sample_id_col="sample_id"
+        )
+        assert sex_map == {"S1": 1, "S2": 2}
+        assert primary == "predicted_sex"
+        assert counts == {"predicted_sex": 2}
+
+    def test_computed_gender_string_codes(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "sample_id\tcomputed_gender\n"
+            "S1\tM\nS2\tF\nS3\tU\nS4\t\n"
+        )
+        sex_map, primary, _ = read_sample_sex_map(
+            tsv, sample_id_col="sample_id"
+        )
+        assert sex_map == {"S1": 1, "S2": 2}
+        assert primary == "computed_gender"
+
+    def test_peddy_style_words(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "sample_id\tpeddy_sex\n"
+            "S1\tmale\nS2\tfemale\nS3\tunknown\n"
+        )
+        sex_map, primary, _ = read_sample_sex_map(
+            tsv, sample_id_col="sample_id"
+        )
+        assert sex_map == {"S1": 1, "S2": 2}
+        assert primary == "peddy_sex"
+
+    def test_f_sex_threshold(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "sample_id\tf_sex\n"
+            "S1\t0.95\nS2\t0.05\nS3\t0.5\nS4\tNA\n"
+        )
+        sex_map, primary, _ = read_sample_sex_map(
+            tsv, sample_id_col="sample_id"
+        )
+        # 0.95 → male, 0.05 → female, 0.5 is in the ambiguous zone.
+        assert sex_map == {"S1": 1, "S2": 2}
+        assert primary == "f_sex"
+
+    def test_per_row_fallback_priority(self, tmp_path) -> None:
+        """When the highest-priority column is missing for a row, the
+        next column should be consulted *for that row only*."""
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "sample_id\tcomputed_gender\tpeddy_sex\tf_sex\n"
+            "S1\tM\tF\t0.1\n"        # computed_gender wins → male
+            "S2\tNA\tfemale\t0.9\n"  # fall through to peddy_sex → female
+            "S3\tU\tAMBIGUOUS\t0.95\n"  # fall through to f_sex → male
+            "S4\tNA\tNA\tNA\n"       # no usable column → omitted
+        )
+        sex_map, primary, counts = read_sample_sex_map(
+            tsv, sample_id_col="sample_id"
+        )
+        assert sex_map == {"S1": 1, "S2": 2, "S3": 1}
+        assert primary == "computed_gender"
+        assert counts == {
+            "computed_gender": 1,
+            "peddy_sex": 1,
+            "f_sex": 1,
+        }
+
+    def test_case_insensitive_sample_id_column(self, tmp_path) -> None:
+        tsv = tmp_path / "sheet.tsv"
+        tsv.write_text(
+            "SAMPLE_ID\tcomputed_gender\nS1\tM\nS2\tF\n"
+        )
+        sex_map, _, _ = read_sample_sex_map(
+            tsv, sample_id_col="sample_id"
+        )
+        assert sex_map == {"S1": 1, "S2": 2}
+
+    def test_compiled_sample_sheet_fixture(self) -> None:
+        """End-to-end against the bundled compiled sample sheet, which
+        has no ``predicted_sex`` column but does have ``computed_gender``,
+        ``peddy_sex``, ``peddy_sex_predicted_sex``, and ``f_sex``.
+        Regression guard for the bug where the sex-chr pipeline assigned
+        0 males / N females because ``predicted_sex`` was missing.
+        """
+        from pathlib import Path
+
+        sheet = Path(__file__).parent / "data" / "compiled_sample_sheet.tsv"
+        sex_map, primary, counts = read_sample_sex_map(
+            sheet, sample_id_col="sample_id"
+        )
+        # The bundled sheet carries both sexes in realistic proportions.
+        n_male = sum(1 for v in sex_map.values() if v == 1)
+        n_female = sum(1 for v in sex_map.values() if v == 2)
+        assert n_male > 500
+        assert n_female > 500
+        # computed_gender is the highest-priority column actually present.
+        assert primary == "computed_gender"
+        assert counts.get("computed_gender", 0) > 0
