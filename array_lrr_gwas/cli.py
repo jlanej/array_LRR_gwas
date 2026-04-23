@@ -1070,6 +1070,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rep.add_argument(
+        "--max-regional-loci",
+        type=int,
+        default=10,
+        help=(
+            "Maximum number of regional (locus-zoom style) plots to "
+            "generate per analysis mode.  Loci are chosen in order of "
+            "significance from the top-hits list; nearby hits within the "
+            "same window are collapsed.  Default: 10."
+        ),
+    )
+    rep.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -3611,6 +3622,7 @@ def _run_report(args: argparse.Namespace) -> int:
             title=args.title,
             annotate_genes=not args.no_gene_annotation,
             top_hits_tsv_dir=args.top_hits_tsv_dir,
+            max_regional_loci=args.max_regional_loci,
         )
     except ValueError as exc:
         logger.error("%s", exc)
