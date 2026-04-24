@@ -884,6 +884,17 @@ class TestAutosomalSummary:
         # Gene label for the planted autosomal hit is still present
         # (surfaced in the summary Manhattan labels + top-hits table).
         assert "GENEA" in txt
+        # Top hits table must appear inside the autosomal summary section.
+        summary_start = txt.index('id="mode-summary"')
+        # Find the end of the summary section (next <section or end of string).
+        next_section = txt.find("<section", summary_start + 1)
+        summary_section = txt[summary_start:next_section] if next_section != -1 else txt[summary_start:]
+        assert "hits-table" in summary_section, (
+            "Top hits table missing from autosomal summary section"
+        )
+        assert "Top" in summary_section and "hits (autosomal)" in summary_section, (
+            "Top hits heading missing from autosomal summary section"
+        )
 
     def test_summary_qq_uses_autosomal_pvalues_only(self, tmp_path):
         # Sanity-check that the summary QQ plot's λ_GC and point count
@@ -950,9 +961,10 @@ class TestAutosomalSummary:
             figs.append((fid, json.loads(payload)))
         summary_figs = [(fid, f) for fid, f in figs
                         if fid.startswith("fig-summary-")]
-        # Two summary figures: Manhattan + QQ.
-        assert len(summary_figs) == 2
-        for fid, fig in summary_figs:
+        # At least two summary figures: Manhattan + QQ (may also include
+        # regional plots for genome-wide significant loci).
+        assert len(summary_figs) >= 2
+        for fid, fig in summary_figs[:2]:
             point_counts = [
                 len(t.get("x", []))
                 for t in fig["data"]
