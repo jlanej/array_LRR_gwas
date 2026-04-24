@@ -79,8 +79,6 @@ DEFAULT_GENE_WINDOW_KB: int = 500
 # Default top-hits count for summary tables.
 DEFAULT_TOP_N: int = 10
 
-# Max number of non-suggestive points kept per analysis for the Manhattan
-# plot.  Reduces HTML size while preserving the genome-wide picture.
 # Cap on the number of non-significant points plotted per Manhattan.
 # We draw plots with SVG ``scatter`` (not WebGL ``scattergl``) because a
 # single report contains many figures and the browser's per-page WebGL
