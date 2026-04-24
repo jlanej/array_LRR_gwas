@@ -426,8 +426,15 @@ class TestGenerateReport:
         out = tmp_path / "rpt.html"
         generate_gwas_report(sources, out, annotate_genes=False)
         txt = out.read_text()
-        # Each mode has its own section.
+        # The autosomal scan is surfaced as the top "Autosomal summary"
+        # section (id="mode-summary"), so it is *not* also rendered as
+        # a per-mode section.  All non-autosomal modes get their own
+        # per-mode section as before.
+        assert 'id="mode-summary"' in txt
+        assert 'id="mode-autosomal"' not in txt
         for mode in sources:
+            if mode == "autosomal":
+                continue
             assert f'id="mode-{mode}"' in txt
         # Methods section + TOC.
         assert "<h2>Methods</h2>" in txt
@@ -572,18 +579,27 @@ class TestReadRecords:
 # ---------------------------------------------------------------------------
 # Trace-type and gene-label rendering guarantees
 #
-# The plotly.js rendering pipeline silently hides ``scattergl`` (WebGL)
-# traces whenever they share a subplot with ``scatter`` (SVG) traces
-# (plotly/plotly.js#6779 — see PR #106 discussion).  Every builder in
-# this module therefore has two hard rules:
+# ---------------------------------------------------------------------------
+# Trace-type invariants (regression guards for plot-rendering failures)
+#
+# Lesson from PRs #106 and #107: plotly.js silently hides ``scattergl``
+# (WebGL) traces whenever they share a subplot with ``scatter`` (SVG)
+# traces (plotly/plotly.js#6779); more subtly, a report that contains
+# many ``scattergl`` figures on one page exceeds the browser's
+# per-page WebGL context cap (~8–16), after which plotly.js silently
+# drops the WebGL layer for existing figures so only layout
+# annotations (threshold lines, gene-label arrows) render — the
+# Manhattan looks empty of points.  Every builder in this module
+# therefore has two hard rules:
 #
 #   1. Every trace in a single figure has the *same* ``type``.
-#   2. For genome-scale Manhattan/QQ/regional plots that type is
-#      ``scattergl`` so the HTML stays responsive on 30k+ markers.
+#   2. That type is SVG ``scatter`` (never ``scattergl``) so the
+#      report survives the per-page WebGL context cap with many
+#      embedded figures.
 #
 # Gene-name labels are emitted as layout *annotations*, not traces,
-# and must therefore survive the WebGL switch.  These tests lock all
-# of the above in to prevent regressions from creeping back.
+# and must survive unchanged.  These tests lock all of the above in
+# to prevent either failure mode from creeping back.
 # ---------------------------------------------------------------------------
 
 
@@ -591,8 +607,8 @@ def _trace_types(fig: dict) -> list[str]:
     return [t.get("type") for t in fig.get("data", [])]
 
 
-class TestScatterGLTraceTypes:
-    def test_manhattan_all_scattergl(self):
+class TestScatterTraceTypes:
+    def test_manhattan_all_scatter(self):
         recs = _synthetic_records(
             n_per_chrom=200,
             planted=((("1", 150), 1e-10), (("2", 200), 1e-6)),
@@ -600,38 +616,40 @@ class TestScatterGLTraceTypes:
         fig = build_manhattan_figure(recs, title="t")
         types = _trace_types(fig)
         assert types, "Manhattan figure has no traces"
-        # Every trace must be scattergl — never mix with plain scatter.
-        assert all(t == "scattergl" for t in types), types
+        # Every trace must be SVG scatter — never scattergl.
+        assert all(t == "scatter" for t in types), types
+        assert "scattergl" not in types
 
-    def test_manhattan_no_svg_scatter_when_sig_present(self):
-        # Regression guard for PR #106: the GWS trace used to be plain
-        # ``scatter`` which silently hid every ``scattergl`` non-sig /
-        # suggestive trace in the same subplot.
+    def test_manhattan_no_scattergl_when_sig_present(self):
+        # Regression guard for PR #107: scattergl Manhattans in a
+        # many-figure report silently lose their WebGL layer in the
+        # browser and render only the gene-label annotations.
         recs = _synthetic_records(
             n_per_chrom=50,
             planted=((("1", 150), 1e-20),),
         )
         fig = build_manhattan_figure(recs, title="t")
-        assert "scatter" not in _trace_types(fig)
+        assert "scattergl" not in _trace_types(fig)
 
-    def test_qq_all_scattergl(self):
+    def test_qq_all_scatter(self):
         rng = np.random.default_rng(3)
         p = rng.uniform(0, 1, 2000)
         fig = build_qq_figure(p, title="q")
         types = _trace_types(fig)
         assert types, "QQ figure has no traces"
-        assert all(t == "scattergl" for t in types), types
+        assert all(t == "scatter" for t in types), types
+        assert "scattergl" not in types
 
     def test_qq_ci_band_uses_tonexty(self):
-        # Two-trace fill="tonexty" pattern is WebGL-reliable; the old
-        # single-trace fill="toself" polygon is not.
+        # Two-trace fill="tonexty" pattern is both SVG- and WebGL-safe;
+        # the old single-trace fill="toself" polygon is not.
         rng = np.random.default_rng(4)
         fig = build_qq_figure(rng.uniform(0, 1, 1000), title="q")
         fills = [t.get("fill") for t in fig["data"] if t.get("fill")]
         assert "toself" not in fills
         assert "tonexty" in fills
 
-    def test_regional_points_scattergl(self, tmp_path):
+    def test_regional_points_scatter(self, tmp_path):
         _write_fake_refgene(tmp_path)
         gt = load_gene_table("GRCh38", cache_dir=tmp_path, auto_download=False)
         recs = [
@@ -644,7 +662,86 @@ class TestScatterGLTraceTypes:
             half_window_kb=1, genes=gt["chr1"],
             title="reg", lead_variant_id="v150",
         )
-        assert fig["data"][0]["type"] == "scattergl"
+        assert fig["data"][0]["type"] == "scatter"
+        assert "scattergl" not in _trace_types(fig)
+
+
+class TestPointsActuallyRendered:
+    # Regression guards that every plot actually contains point data —
+    # not just threshold lines / gene-label annotations.  PR #107
+    # produced plots that had only layout annotations visible (the
+    # "arrows-only Manhattan" bug); these tests catch that failure
+    # mode by asserting the data traces carry non-empty coordinate
+    # arrays for each significance tier.
+
+    def test_manhattan_has_nonsig_suggestive_and_gws_points(self):
+        recs = _synthetic_records(
+            n_per_chrom=100,
+            planted=(
+                (("1", 500), 1e-10),   # genome-wide
+                (("1", 600), 5e-6),    # suggestive
+            ),
+        )
+        fig = build_manhattan_figure(recs, title="t")
+        # Locate each tier by trace name / legendgroup.
+        nonsig = [t for t in fig["data"]
+                  if t.get("legendgroup") == "nonsig"]
+        sug = [t for t in fig["data"]
+               if "suggestive" in t.get("name", "")]
+        gws = [t for t in fig["data"]
+               if "genome-wide" in t.get("name", "")]
+        assert nonsig and sum(len(t["x"]) for t in nonsig) > 0
+        assert len(sug) == 1 and len(sug[0]["x"]) == 1
+        assert len(gws) == 1 and len(gws[0]["x"]) == 1
+        # x and y arrays must line up point-for-point on every trace.
+        for t in fig["data"]:
+            if t.get("mode") == "markers":
+                assert len(t["x"]) == len(t["y"]) > 0, t.get("name")
+
+    def test_qq_observed_trace_has_points(self):
+        rng = np.random.default_rng(7)
+        fig = build_qq_figure(rng.uniform(0, 1, 2000), title="q")
+        obs = [t for t in fig["data"]
+               if t.get("name") == "observed"]
+        assert len(obs) == 1
+        assert len(obs[0]["x"]) == len(obs[0]["y"]) > 0
+
+    def test_regional_points_have_data(self, tmp_path):
+        _write_fake_refgene(tmp_path)
+        gt = load_gene_table("GRCh38", cache_dir=tmp_path, auto_download=False)
+        recs = [
+            {"chrom": "1", "pos": p, "variant_id": f"v{p}",
+             "p_value": 1e-9 if p == 150 else 0.5, "beta": 0.0, "se": 1.0}
+            for p in range(100, 900, 10)
+        ]
+        fig = build_regional_figure(
+            recs, chrom="1", center_pos=150,
+            half_window_kb=1, genes=gt["chr1"],
+            title="reg", lead_variant_id="v150",
+        )
+        assert len(fig["data"][0]["x"]) == len(fig["data"][0]["y"]) > 0
+
+    def test_manhattan_points_present_after_gene_labels(self):
+        # A Manhattan with gene labels must still carry point data —
+        # the PR #107 failure mode was "only arrows (annotations)
+        # visible, no points".
+        recs = _synthetic_records(
+            n_per_chrom=50,
+            planted=((("1", 150), 1e-10),),
+        )
+        fig = build_manhattan_figure(
+            recs, title="t",
+            gene_labels=[("1", 150, "1:150", "GENEX")],
+        )
+        total_points = sum(
+            len(t.get("x", []))
+            for t in fig["data"]
+            if t.get("mode") == "markers"
+        )
+        assert total_points > 0
+        # And the label still renders.
+        texts = [a.get("text", "") for a in fig["layout"]["annotations"]]
+        assert any("GENEX" in t for t in texts)
 
 
 class TestManhattanGeneLabels:
@@ -745,17 +842,19 @@ class TestManhattanGeneLabels:
         assert "GENEA" in out.read_text()
 
 
-class TestCombinedSummaryManhattan:
-    def test_combined_summary_has_gene_labels(self, tmp_path):
-        # With two summary modes present the combined Manhattan is
-        # built.  It must surface gene labels aggregated from the
-        # per-mode reports (fixes PR #106 regression where the
-        # combined summary had no labels at all).
+class TestAutosomalSummary:
+    def test_summary_is_autosomal_only(self, tmp_path):
+        # The top-of-report summary section must (a) be titled
+        # "Autosomal summary", (b) embed a Manhattan *and* a QQ plot,
+        # both carrying autosomal-only data, and (c) *not* overlay any
+        # chrX / chrY / chrM-MT records.  The non-autosomal modes are
+        # rendered below in their own per-mode sections.
         _write_fake_refgene(tmp_path / "cache")
         sources = {}
         for mode, chroms in (
             ("autosomal", ("1",)),
             ("x_with_sex_covariate", ("X",)),
+            ("y_male_only", ("Y",)),
         ):
             p = tmp_path / f"{mode}.tsv"
             _write_results_tsv(p, _synthetic_records(
@@ -769,8 +868,94 @@ class TestCombinedSummaryManhattan:
             cache_dir=tmp_path / "cache", gene_window_kb=1,
         )
         txt = out.read_text()
-        # One combined-summary section plus two per-mode sections.
+        # Summary section is present and is titled "Autosomal summary".
         assert 'id="mode-summary"' in txt
-        # GENEA from the fake refgene must appear at least 3 times
-        # (per-mode Manhattan + summary Manhattan + top-hits table).
-        assert txt.count("GENEA") >= 3
+        assert "Autosomal summary" in txt
+        # Old wording must be gone.
+        assert "Genome-wide summary" not in txt
+        assert "Combined genome-wide summary" not in txt
+        # Summary describes an autosomal-only scope.
+        assert "Autosomal-only association summary" in txt
+        # Autosomal scan is not duplicated as its own per-mode section.
+        assert 'id="mode-autosomal"' not in txt
+        # Non-autosomal modes are still rendered below as per-mode sections.
+        assert 'id="mode-x_with_sex_covariate"' in txt
+        assert 'id="mode-y_male_only"' in txt
+        # Gene label for the planted autosomal hit is still present
+        # (surfaced in the summary Manhattan labels + top-hits table).
+        assert "GENEA" in txt
+
+    def test_summary_qq_uses_autosomal_pvalues_only(self, tmp_path):
+        # Sanity-check that the summary QQ plot's λ_GC and point count
+        # reflect the autosomal scan only, not an overlay of every
+        # mode's p-values.
+        autosomal = _synthetic_records(
+            n_per_chrom=40, chroms=("1", "2"),
+            planted=((("1", 150), 1e-10),),
+        )
+        chrx = _synthetic_records(
+            n_per_chrom=40, chroms=("X",),
+            planted=((("X", 150), 1e-10),),
+        )
+        sources = {"autosomal": autosomal, "x_with_sex_covariate": chrx}
+        out = tmp_path / "rpt.html"
+        generate_gwas_report(sources, out, annotate_genes=False)
+        txt = out.read_text()
+        # Both summary and per-mode section blocks are present.
+        assert 'id="mode-summary"' in txt
+        # The summary section should mention "n = 80" (autosomal only),
+        # not "n = 120" (all modes merged).
+        assert re.search(r"n\s*=\s*80", txt)
+
+    def test_summary_skipped_when_no_autosomal(self, tmp_path):
+        # No autosomal mode → no summary block is rendered; non-autosomal
+        # modes appear in their own per-mode sections.
+        sources = {
+            "x_with_sex_covariate": _synthetic_records(
+                n_per_chrom=20, chroms=("X",),
+                planted=((("X", 150), 1e-10),),
+            ),
+        }
+        out = tmp_path / "rpt.html"
+        generate_gwas_report(sources, out, annotate_genes=False)
+        txt = out.read_text()
+        assert 'id="mode-summary"' not in txt
+        assert 'id="mode-x_with_sex_covariate"' in txt
+
+    def test_summary_manhattan_and_qq_both_have_points(self, tmp_path):
+        # Regression guard that the autosomal summary carries real
+        # point data, not just threshold lines / annotations.
+        autosomal = _synthetic_records(
+            n_per_chrom=50, chroms=("1", "2"),
+            planted=((("1", 150), 1e-10),),
+        )
+        sources = {
+            "autosomal": autosomal,
+            "x_with_sex_covariate": _synthetic_records(
+                n_per_chrom=20, chroms=("X",),
+                planted=((("X", 150), 1e-9),),
+            ),
+        }
+        out = tmp_path / "rpt.html"
+        generate_gwas_report(sources, out, annotate_genes=False)
+        txt = out.read_text()
+        # Pull every embedded plotly figure JSON out of the report.
+        figs = []
+        for m in re.finditer(
+            r'<script type="application/json" data-figure-id="([^"]+)">'
+            r'(.*?)</script>',
+            txt, flags=re.DOTALL,
+        ):
+            fid, payload = m.group(1), m.group(2)
+            figs.append((fid, json.loads(payload)))
+        summary_figs = [(fid, f) for fid, f in figs
+                        if fid.startswith("fig-summary-")]
+        # Two summary figures: Manhattan + QQ.
+        assert len(summary_figs) == 2
+        for fid, fig in summary_figs:
+            point_counts = [
+                len(t.get("x", []))
+                for t in fig["data"]
+                if t.get("mode") == "markers"
+            ]
+            assert point_counts and sum(point_counts) > 0, fid
