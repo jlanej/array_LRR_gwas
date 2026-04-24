@@ -1671,6 +1671,18 @@ def _render_html(
           per-mode sections that follow.
         </div>
         """)
+        summary_regional_blocks = []
+        if autosomal_report.regional_figs:
+            summary_regional_blocks.append('<h3 class="sub">Regional plots (top loci)</h3>')
+            for label, fig in autosomal_report.regional_figs:
+                fid = f"fig-summary-{fig_counter[0]}"; fig_counter[0] += 1
+                summary_regional_blocks.append(
+                    f'<div class="plot-container" id="{fid}"></div>'
+                    f'<script type="application/json" data-figure-id="{fid}">'
+                    f"{_fig_to_json(fig)}</script>"
+                )
+        with_gene_cols = any("nearest_gene" in h for h in autosomal_report.top_hits)
+        summary_hits_html = _hits_table_html(autosomal_report.top_hits, with_gene_cols=with_gene_cols)
         summary_block = textwrap.dedent(f"""\
         <section class="mode-section" id="mode-summary">
           <h2>Autosomal summary</h2>
@@ -1684,6 +1696,11 @@ def _render_html(
           <h3 class="sub">QQ plot (autosomal)</h3>
           <div class="plot-container" id="{qq_id}"></div>
           <script type="application/json" data-figure-id="{qq_id}">{_fig_to_json(autosomal_report.qq_fig)}</script>
+
+          {"".join(summary_regional_blocks)}
+
+          <h3 class="sub">Top {len(autosomal_report.top_hits)} hits (autosomal)</h3>
+          {summary_hits_html}
         </section>
         """)
 
