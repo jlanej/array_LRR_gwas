@@ -81,7 +81,15 @@ DEFAULT_TOP_N: int = 10
 
 # Max number of non-suggestive points kept per analysis for the Manhattan
 # plot.  Reduces HTML size while preserving the genome-wide picture.
-_MAX_NONSIG_POINTS: int = 30_000
+# Cap on the number of non-significant points plotted per Manhattan.
+# We draw plots with SVG ``scatter`` (not WebGL ``scattergl``) because a
+# single report contains many figures and the browser's per-page WebGL
+# context cap (~8–16) causes plotly.js to silently drop the WebGL layer
+# once exceeded, producing Manhattan plots that render *only* the gene
+# label annotations with no point data.  SVG ``scatter`` has no such
+# cap, so we keep the per-figure point count modest and rely on sig /
+# suggestive tiers being preserved to tell the statistical story.
+_MAX_NONSIG_POINTS: int = 8_000
 
 # Plotly CDN version pinned for reproducibility.
 _PLOTLY_CDN: str = "https://cdn.plot.ly/plotly-2.35.2.min.js"
@@ -676,13 +684,19 @@ def build_manhattan_figure(
     the HTML file size manageable for genome-wide scans.  The figure
     annotation notes this downsampling so readers can interpret it.
 
-    All marker traces are emitted as ``scattergl`` (WebGL) for
-    performance on genome-wide point counts.  We never mix
-    ``scatter`` and ``scattergl`` traces in the same subplot
-    (a known Plotly.js rendering hazard: plotly/plotly.js#6779) —
-    significance threshold lines are emitted as layout *shapes* and
-    gene labels as layout *annotations*, neither of which participate
-    in WebGL/SVG mixing.
+    All marker traces are emitted as SVG ``scatter`` (not the WebGL
+    ``scattergl``).  A single GWAS report HTML embeds many figures
+    (Manhattan + QQ + multiple regional plots across every analysis
+    mode), and browsers cap the number of concurrent WebGL contexts
+    on a page; once exceeded, plotly.js silently drops the WebGL
+    layer — the Manhattan then shows *only* layout annotations
+    (threshold lines, gene-label arrows) with no point data visible.
+    SVG ``scatter`` has no such cap, and we keep the per-figure point
+    count modest via ``max_nonsig_points``.  We also never mix
+    ``scatter`` and ``scattergl`` traces in the same subplot (a known
+    Plotly.js rendering hazard: plotly/plotly.js#6779); threshold
+    lines are emitted as layout *shapes* and gene labels as layout
+    *annotations*, neither of which participate in trace-type mixing.
 
     Parameters
     ----------
@@ -734,7 +748,7 @@ def build_manhattan_figure(
         if not sel.any():
             continue
         traces.append({
-            "type": "scattergl",
+            "type": "scatter",
             "x": cum_x[sel].tolist(),
             "y": log_p[sel].round(3).tolist(),
             "mode": "markers",
@@ -748,7 +762,7 @@ def build_manhattan_figure(
     # Suggestive points (all kept).
     if sug_mask.any():
         traces.append({
-            "type": "scattergl",
+            "type": "scatter",
             "x": cum_x[sug_mask].tolist(),
             "y": log_p[sug_mask].round(4).tolist(),
             "mode": "markers",
@@ -765,7 +779,7 @@ def build_manhattan_figure(
     if sig_mask.any():
         sig_idx = np.where(sig_mask)[0]
         traces.append({
-            "type": "scattergl",
+            "type": "scatter",
             "x": cum_x[sig_idx].tolist(),
             "y": log_p[sig_idx].round(4).tolist(),
             "mode": "markers",
@@ -925,13 +939,16 @@ def build_qq_figure(
     p_values: Iterable[float],
     *,
     title: str,
-    max_points: int = 50_000,
+    max_points: int = 8_000,
     ci_alpha: float = 0.95,
 ) -> dict:
     """Build a plotly QQ-plot figure dict with a 95 % confidence band.
 
     All significant points (top 1000 by p-value) are always retained;
     the remainder are log-uniformly thinned to ``max_points`` total.
+    Traces use SVG ``scatter`` so they survive browser WebGL context
+    limits on reports with many embedded figures (see
+    :func:`build_manhattan_figure` for the full rationale).
     """
     arr = np.asarray(list(p_values), dtype=float)
     mask = np.isfinite(arr) & (arr > 0) & (arr <= 1.0)
@@ -969,14 +986,15 @@ def build_qq_figure(
 
     lam = lambda_gc(p)
 
-    # We keep every trace in this figure a ``scattergl`` trace so Plotly
-    # never has to mix WebGL (scattergl) and SVG (scatter) in the same
-    # subplot — that mixing is a well-known rendering hazard in
-    # plotly.js (plotly/plotly.js#6779) that can silently hide the
-    # WebGL layer.  The CI band is therefore rendered as *two*
-    # scattergl traces (lower then upper) with ``fill: "tonexty"`` on
-    # the upper, instead of a single ``fill: "toself"`` polygon,
-    # because the two-trace pattern is far more reliable under WebGL.
+    # Keep every trace in this figure the same type so plotly never
+    # has to mix ``scatter`` (SVG) and ``scattergl`` (WebGL) in the
+    # same subplot — that mixing is a well-known rendering hazard in
+    # plotly.js (plotly/plotly.js#6779).  We use SVG ``scatter``
+    # everywhere in the GWAS report (see ``build_manhattan_figure``
+    # for why WebGL is unreliable in a report with many figures).
+    # The CI band is therefore rendered as *two* scatter traces
+    # (lower then upper) with ``fill: "tonexty"`` on the upper, which
+    # is robust under SVG.
     traces: list[dict] = []
 
     # 95% null band (lower + upper with tonexty between them).
@@ -988,7 +1006,7 @@ def build_qq_figure(
         lo_sorted = ci_lo[order].tolist()
         hi_sorted = ci_hi[order].tolist()
         traces.append({
-            "type": "scattergl",
+            "type": "scatter",
             "x": xs_sorted,
             "y": lo_sorted,
             "mode": "lines",
@@ -998,7 +1016,7 @@ def build_qq_figure(
             "showlegend": False,
         })
         traces.append({
-            "type": "scattergl",
+            "type": "scatter",
             "x": xs_sorted,
             "y": hi_sorted,
             "mode": "lines",
@@ -1013,7 +1031,7 @@ def build_qq_figure(
     # y = x reference line
     lim = float(max(exp_log.max(), obs_log.max()))
     traces.append({
-        "type": "scattergl",
+        "type": "scatter",
         "x": [0, lim],
         "y": [0, lim],
         "mode": "lines",
@@ -1024,7 +1042,7 @@ def build_qq_figure(
 
     # Observed QQ points
     traces.append({
-        "type": "scattergl",
+        "type": "scatter",
         "x": exp_log[keep].round(3).tolist(),
         "y": obs_log[keep].round(4).tolist(),
         "mode": "markers",
@@ -1095,7 +1113,7 @@ def build_regional_figure(
     ]
 
     traces: list[dict] = [{
-        "type": "scattergl",
+        "type": "scatter",
         "x": x.tolist(),
         "y": y.round(4).tolist(),
         "mode": "markers",
@@ -1576,11 +1594,17 @@ def _interpret_lambda(lam: float) -> str:
     return f"Genomic inflation {tag} (λ<sub>GC</sub> = {lam:.3f})."
 
 
-def _toc_html(report_by_mode: dict[str, ModeReport]) -> str:
+def _toc_html(
+    report_by_mode: dict[str, ModeReport],
+    *,
+    anchor_overrides: "dict[str, str] | None" = None,
+) -> str:
+    overrides = anchor_overrides or {}
     items = []
     for k, r in report_by_mode.items():
+        anchor = overrides.get(k, f"mode-{k}")
         items.append(
-            f'<li><a href="#mode-{html.escape(k)}">{html.escape(k)}</a> '
+            f'<li><a href="#{html.escape(anchor)}">{html.escape(k)}</a> '
             f'&middot; n={r.n_tested:,} &middot; λ={r.lambda_gc:.3f} '
             f'&middot; gws={r.n_genome_wide}</li>'
         )
@@ -1594,14 +1618,26 @@ def _render_html(
     build: str | None,
     gene_window_kb: int,
     gene_source: str | None,
-    combined_manhattan_fig: dict | None = None,
-    summary_modes: Sequence[str] | None = None,
+    autosomal_report: "ModeReport | None" = None,
 ) -> str:
     fig_counter = [0]
-    mode_blocks = "\n".join(
-        _mode_html(k, v, fig_counter) for k, v in report_by_mode.items()
+
+    # If we have an autosomal summary block, render the non-autosomal
+    # per-mode sections only (chrX / chrY / chrM-MT).  Otherwise render
+    # every mode, preserving input order.
+    _mode_iter = (
+        (k, v) for k, v in report_by_mode.items()
+        if not (autosomal_report is not None and k == "autosomal")
     )
-    toc = _toc_html(report_by_mode)
+    mode_blocks = "\n".join(
+        _mode_html(k, v, fig_counter) for k, v in _mode_iter
+    )
+    toc = _toc_html(
+        report_by_mode,
+        anchor_overrides=(
+            {"autosomal": "mode-summary"} if autosomal_report is not None else None
+        ),
+    )
     methods = _methods_html(
         build=build,
         gene_window_kb=gene_window_kb,
@@ -1610,28 +1646,46 @@ def _render_html(
         suggestive_p=SUGGESTIVE_P,
     )
 
-    # Optional combined summary Manhattan block (shown above the
-    # per-mode sections) overlaying autosomal + headline sex/MT scans.
+    # Top-of-report "Autosomal summary" section.  We reuse the
+    # autosomal ModeReport verbatim so the Manhattan, QQ, stats, and
+    # top-hit labels are all derived from the same autosomal-only
+    # association results (chrX/Y/MT analyses are *not* overlaid here
+    # and appear in their own per-mode sections below).
     summary_block = ""
-    if combined_manhattan_fig is not None:
-        fid = f"fig-summary-{fig_counter[0]}"; fig_counter[0] += 1
-        modes_txt = (
-            html.escape(", ".join(summary_modes))
-            if summary_modes else ""
-        )
+    if autosomal_report is not None:
+        man_id = f"fig-summary-{fig_counter[0]}"; fig_counter[0] += 1
+        qq_id = f"fig-summary-{fig_counter[0]}"; fig_counter[0] += 1
+        lam_comment = _interpret_lambda(autosomal_report.lambda_gc)
+        summary_stats = textwrap.dedent(f"""\
+        <div class="info">
+          Autosomal-only association summary.
+          Markers tested: <strong>{autosomal_report.n_tested:,}</strong>
+          &middot; λ<sub>GC</sub>:
+            <strong>{autosomal_report.lambda_gc:.3f}</strong>
+          &middot; Min p:
+            <strong>{_format_p(autosomal_report.min_p)}</strong>
+          &middot; Genome-wide (p&lt;{GENOME_WIDE_P:g}):
+            <strong>{autosomal_report.n_genome_wide}</strong>
+          &middot; Suggestive (p&lt;{SUGGESTIVE_P:g}):
+            <strong>{autosomal_report.n_suggestive}</strong>
+          <br>QQ statistics and plot below use the autosomal scan only;
+          chrX, chrY, and chrM/MT analyses are shown separately in the
+          per-mode sections that follow.
+        </div>
+        """)
         summary_block = textwrap.dedent(f"""\
         <section class="mode-section" id="mode-summary">
-          <h2>Genome-wide summary</h2>
-          <div class="info">
-            Combined Manhattan plot overlaying the autosomal scan with the
-            headline non-autosomal scans ({modes_txt}).  chrX uses the
-            sex-as-covariate mode, chrY uses the male-only mode, and
-            chrM/MT uses the sex-as-covariate mode.  Per-mode Manhattan,
-            QQ, regional, and top-hit views are available in the sections
-            below.
-          </div>
-          <div class="plot-container" id="{fid}"></div>
-          <script type="application/json" data-figure-id="{fid}">{_fig_to_json(combined_manhattan_fig)}</script>
+          <h2>Autosomal summary</h2>
+          {summary_stats}
+          <p class="muted">{lam_comment}</p>
+
+          <h3 class="sub">Manhattan plot (autosomal)</h3>
+          <div class="plot-container" id="{man_id}"></div>
+          <script type="application/json" data-figure-id="{man_id}">{_fig_to_json(autosomal_report.manhattan_fig)}</script>
+
+          <h3 class="sub">QQ plot (autosomal)</h3>
+          <div class="plot-container" id="{qq_id}"></div>
+          <script type="application/json" data-figure-id="{qq_id}">{_fig_to_json(autosomal_report.qq_fig)}</script>
         </section>
         """)
 
@@ -1800,17 +1854,12 @@ def generate_gwas_report(
             )
             gene_table = None
 
-    # Build per-mode reports.  Also accumulate records for the combined
-    # genome-wide summary Manhattan plot (autosomal + headline non-autosomal
-    # modes: chrX sex-as-covariate, chrY males, chrM/MT sex-as-covariate).
+    # Build per-mode reports.  The autosomal mode, when present, is
+    # also surfaced at the top of the report as an "Autosomal summary"
+    # section (Manhattan + QQ + stats).  chrX / chrY / chrM-MT
+    # analyses are rendered as their own per-mode sections below.
     report_by_mode: dict[str, ModeReport] = {}
-    _SUMMARY_MODES = (
-        "autosomal",
-        "x_with_sex_covariate",
-        "y_male_only",
-        "mt_with_sex_covariate",
-    )
-    _summary_records: list[dict] = []
+    _AUTOSOMAL_KEY = "autosomal"
     for mode, src in mode_sources.items():
         if isinstance(src, (str, Path)):
             path = Path(src)
@@ -1825,8 +1874,6 @@ def generate_gwas_report(
         if not records:
             logger.warning("Skipping %s — no records.", mode)
             continue
-        if mode in _SUMMARY_MODES:
-            _summary_records.extend(records)
         report_by_mode[mode] = summarize_mode(
             mode,
             records,
@@ -1843,32 +1890,12 @@ def generate_gwas_report(
             "generate_gwas_report: no input modes produced any records."
         )
 
-    # Build a genome-wide combined Manhattan figure that overlays the
-    # autosomal scan with the headline non-autosomal scans (chrX full
-    # cohort with sex as covariate, chrY males, chrM/MT full cohort with
-    # sex as covariate).  Only built when more than one summary mode is
-    # present; otherwise the per-mode plot already covers the full genome.
-    combined_manhattan_fig: dict | None = None
-    _summary_modes_present = [m for m in _SUMMARY_MODES if m in report_by_mode]
-    if _summary_records and len(_summary_modes_present) >= 2:
-        # Aggregate gene labels from every summary mode so the
-        # combined-summary Manhattan also shows candidate genes.
-        combined_gene_labels: list[tuple[str, int, str, str]] = []
-        seen_label_syms: set[str] = set()
-        for m in _summary_modes_present:
-            for chrom_, pos_, vid_, sym_ in report_by_mode[m].gene_labels:
-                if sym_ in seen_label_syms:
-                    continue
-                seen_label_syms.add(sym_)
-                combined_gene_labels.append((chrom_, pos_, vid_, sym_))
-        combined_manhattan_fig = build_manhattan_figure(
-            _summary_records,
-            title=(
-                "Combined genome-wide summary "
-                f"({', '.join(_summary_modes_present)})"
-            ),
-            gene_labels=combined_gene_labels,
-        )
+    # The autosomal scan (when present) is shown in a dedicated summary
+    # section at the top — Manhattan, QQ, and summary statistics are
+    # all autosomal-only, per the report structure.  The non-autosomal
+    # (chrX/Y/MT) modes follow in their own per-mode sections and are
+    # not overlaid onto the summary.
+    autosomal_report: ModeReport | None = report_by_mode.get(_AUTOSOMAL_KEY)
 
     # Optional top-hits TSVs.
     if top_hits_tsv_dir is not None:
@@ -1892,8 +1919,7 @@ def generate_gwas_report(
         build=build,
         gene_window_kb=gene_window_kb,
         gene_source=gene_source_name,
-        combined_manhattan_fig=combined_manhattan_fig,
-        summary_modes=_summary_modes_present,
+        autosomal_report=autosomal_report,
     )
     output_path.write_text(html_doc, encoding="utf-8")
     logger.info("GWAS report written: %s (%.1f KB)", output_path,
