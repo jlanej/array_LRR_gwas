@@ -1677,7 +1677,7 @@ def _render_html(
             for label, fig in autosomal_report.regional_figs:
                 fid = f"fig-summary-{fig_counter[0]}"; fig_counter[0] += 1
                 summary_regional_blocks.append(
-                    f'<div class="plot-container" id="{fid}"></div>'
+                    f'<div class="plot-container" id="{fid}"></div>\n'
                     f'<script type="application/json" data-figure-id="{fid}">'
                     f"{_fig_to_json(fig)}</script>"
                 )
