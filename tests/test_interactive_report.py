@@ -1158,3 +1158,370 @@ class TestGenerateReportWithPrecomputedPostMetrics:
         parts = lines[1].split("\t")
         post_sd = float(parts[4])
         assert post_sd == pytest.approx(0.123, abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# write_umap_tsv
+# ---------------------------------------------------------------------------
+
+class TestWriteUmapTsv:
+    """Tests for write_umap_tsv()."""
+
+    def test_writes_correct_header_and_rows(self, sample_ids, tmp_path):
+        from array_lrr_gwas.interactive_report import write_umap_tsv
+
+        u1 = [float(i) * 0.1 for i in range(15)]
+        u2 = [float(i) * -0.1 for i in range(15)]
+        out = write_umap_tsv(sample_ids, u1, u2, tmp_path / "umap.tsv")
+        lines = out.read_text().splitlines()
+        assert lines[0] == "SAMPLE\tumap1\tumap2"
+        assert len(lines) == 16  # header + 15 samples
+        parts = lines[1].split("\t")
+        assert parts[0] == "S0"
+        assert float(parts[1]) == pytest.approx(0.0)
+        assert float(parts[2]) == pytest.approx(0.0)
+
+    def test_returns_path(self, sample_ids, tmp_path):
+        from array_lrr_gwas.interactive_report import write_umap_tsv
+
+        out = write_umap_tsv(sample_ids, [0.0] * 15, [0.0] * 15, tmp_path / "u.tsv")
+        assert out == tmp_path / "u.tsv"
+
+
+# ---------------------------------------------------------------------------
+# write_consolidated_sample_tsv
+# ---------------------------------------------------------------------------
+
+class TestWriteConsolidatedSampleTsv:
+    """Tests for write_consolidated_sample_tsv()."""
+
+    def test_basic_columns(self, sample_ids, synthetic_lrr, tmp_path):
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            write_consolidated_sample_tsv,
+        )
+
+        metrics = compute_sample_metrics(synthetic_lrr, sample_ids)
+        hq = np.ones(15, dtype=bool)
+        hq[12:] = False
+        out = write_consolidated_sample_tsv(
+            sample_ids, metrics, hq, tmp_path / "summary.tsv"
+        )
+        lines = out.read_text().splitlines()
+        header = lines[0].split("\t")
+        assert "sample_id" in header
+        assert "LRR_SD" in header
+        assert "callrate" in header
+        assert "hq" in header
+        assert len(lines) == 16  # header + 15 samples
+
+    def test_with_post_metrics(self, sample_ids, synthetic_lrr, tmp_path):
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            write_consolidated_sample_tsv,
+        )
+
+        pre = compute_sample_metrics(synthetic_lrr, sample_ids)
+        post = compute_sample_metrics(synthetic_lrr * 0.7, sample_ids)
+        hq = np.ones(15, dtype=bool)
+        out = write_consolidated_sample_tsv(
+            sample_ids, pre, hq, tmp_path / "summary.tsv", post_metrics=post
+        )
+        header = out.read_text().splitlines()[0].split("\t")
+        assert "LRR_SD_post" in header
+        assert "callrate_post" in header
+
+    def test_with_umap(self, sample_ids, synthetic_lrr, tmp_path):
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            write_consolidated_sample_tsv,
+        )
+
+        metrics = compute_sample_metrics(synthetic_lrr, sample_ids)
+        hq = np.ones(15, dtype=bool)
+        u1 = [float(i) for i in range(15)]
+        u2 = [float(-i) for i in range(15)]
+        out = write_consolidated_sample_tsv(
+            sample_ids, metrics, hq, tmp_path / "summary.tsv",
+            umap1=u1, umap2=u2,
+        )
+        lines = out.read_text().splitlines()
+        header = lines[0].split("\t")
+        assert "umap1" in header
+        assert "umap2" in header
+        # Check a data row
+        row = lines[1].split("\t")
+        umap1_idx = header.index("umap1")
+        assert float(row[umap1_idx]) == pytest.approx(0.0)
+
+    def test_hq_flag_values(self, sample_ids, synthetic_lrr, tmp_path):
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            write_consolidated_sample_tsv,
+        )
+
+        metrics = compute_sample_metrics(synthetic_lrr, sample_ids)
+        hq = np.array([True] * 12 + [False] * 3, dtype=bool)
+        out = write_consolidated_sample_tsv(
+            sample_ids, metrics, hq, tmp_path / "summary.tsv"
+        )
+        lines = out.read_text().splitlines()
+        header = lines[0].split("\t")
+        hq_idx = header.index("hq")
+        hq_values = [line.split("\t")[hq_idx] for line in lines[1:]]
+        assert hq_values[:12] == ["1"] * 12
+        assert hq_values[12:] == ["0"] * 3
+
+
+# ---------------------------------------------------------------------------
+# generate_report with pre_metrics (no LRR required)
+# ---------------------------------------------------------------------------
+
+class TestGenerateReportWithPreMetrics:
+    """generate_report() accepts pre_metrics and works without lrr."""
+
+    def test_no_lrr_with_pre_metrics(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            generate_report,
+        )
+
+        pre_metrics = compute_sample_metrics(synthetic_lrr, sample_ids)
+        out = generate_report(
+            synthetic_info,
+            sample_ids,
+            None,  # lrr=None
+            tmp_path / "report.html",
+            pre_metrics=pre_metrics,
+            skip_umap=True,
+        )
+        assert out.exists()
+        html = out.read_text()
+        assert "LRR Correction Diagnostic Report" in html
+
+    def test_raises_without_lrr_and_without_pre_metrics(
+        self, synthetic_info, sample_ids, tmp_path
+    ):
+        from array_lrr_gwas.interactive_report import generate_report
+
+        with pytest.raises(ValueError, match="pre_metrics"):
+            generate_report(
+                synthetic_info,
+                sample_ids,
+                None,  # no lrr
+                tmp_path / "report.html",
+                # no pre_metrics either
+                skip_umap=True,
+            )
+
+    def test_precomputed_umap_used_in_report(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        from array_lrr_gwas.interactive_report import generate_report
+
+        precomputed_umap = ([float(i) for i in range(15)], [float(-i) for i in range(15)])
+        out = generate_report(
+            synthetic_info,
+            sample_ids,
+            synthetic_lrr,
+            tmp_path / "report.html",
+            precomputed_umap=precomputed_umap,
+        )
+        import json
+        html = out.read_text()
+        # Find the embedded DATA blob; umap should not be null
+        assert '"umap": null' not in html
+        assert '"umap1"' in html
+
+
+# ---------------------------------------------------------------------------
+# generate_report_from_sidecars
+# ---------------------------------------------------------------------------
+
+class TestGenerateReportFromSidecars:
+    """generate_report_from_sidecars() loads sidecar files and builds report."""
+
+    def _write_sidecars(self, tmp_path, synthetic_info, synthetic_lrr, sample_ids):
+        """Helper: write all required sidecars and return the SVD prefix."""
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            write_sample_metrics_tsv,
+            write_umap_tsv,
+            compute_umap,
+        )
+        import json
+
+        svd_prefix = tmp_path / "test.svd"
+
+        # correction_info.json
+        hq_mask = np.asarray(synthetic_info["hq_sample_mask"], dtype=bool)
+        info_data = {
+            "k": int(synthetic_info["k"]),
+            "n_hq_samples": int(synthetic_info["n_hq_samples"]),
+            "n_markers_used": int(synthetic_info["n_markers_used"]),
+            "hq_sample_mask": hq_mask.tolist(),
+        }
+        with open(f"{svd_prefix}.correction_info.json", "w") as fh:
+            json.dump(info_data, fh)
+
+        # sample_pcs.tsv
+        sv = np.asarray(synthetic_info["singular_values"])
+        ss = np.asarray(synthetic_info["sample_scores"])
+        k = int(synthetic_info["k"])
+        n_computed = ss.shape[0]
+        pc_scores = sv[:, np.newaxis] * ss  # (n_computed, n_samples)
+        with open(f"{svd_prefix}.sample_pcs.tsv", "w") as fh:
+            header = ["SAMPLE"] + [f"PC{i+1}" for i in range(n_computed)]
+            fh.write("\t".join(header) + "\n")
+            for i, sid in enumerate(sample_ids):
+                vals = [f"{pc_scores[j, i]:.10g}" for j in range(n_computed)]
+                fh.write("\t".join([sid] + vals) + "\n")
+
+        # singular_values.tsv
+        with open(f"{svd_prefix}.singular_values.tsv", "w") as fh:
+            fh.write("PC\tsingular_value\tused_for_correction\n")
+            for i, sval in enumerate(sv, start=1):
+                used = "yes" if i <= k else "no"
+                fh.write(f"PC{i}\t{sval:.10g}\t{used}\n")
+
+        # sample_metrics.tsv
+        metrics = compute_sample_metrics(synthetic_lrr, sample_ids)
+        write_sample_metrics_tsv(metrics, f"{svd_prefix}.sample_metrics.tsv")
+
+        # umap.tsv (optional)
+        try:
+            u1, u2 = compute_umap(ss, sv, k)
+            write_umap_tsv(sample_ids, u1, u2, f"{svd_prefix}.umap.tsv")
+        except Exception:
+            pass  # umap-learn may not be available
+
+        return svd_prefix
+
+    def test_generates_html_from_sidecars(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        from array_lrr_gwas.interactive_report import generate_report_from_sidecars
+
+        svd_prefix = self._write_sidecars(tmp_path, synthetic_info, synthetic_lrr, sample_ids)
+        out = generate_report_from_sidecars(
+            svd_prefix,
+            tmp_path / "regen_report.html",
+            skip_umap=True,
+        )
+        assert out.exists()
+        html = out.read_text()
+        assert "LRR Correction Diagnostic Report" in html
+        assert '"scree"' in html
+        assert '"scatter"' in html
+
+    def test_missing_correction_info_raises(self, tmp_path):
+        from array_lrr_gwas.interactive_report import generate_report_from_sidecars
+
+        with pytest.raises(FileNotFoundError, match="correction_info.json"):
+            generate_report_from_sidecars(
+                tmp_path / "nonexistent.svd",
+                tmp_path / "out.html",
+                skip_umap=True,
+            )
+
+    def test_loads_precomputed_umap_from_file(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        from array_lrr_gwas.interactive_report import generate_report_from_sidecars
+
+        svd_prefix = self._write_sidecars(tmp_path, synthetic_info, synthetic_lrr, sample_ids)
+        umap_path = Path(f"{svd_prefix}.umap.tsv")
+        if not umap_path.exists():
+            pytest.skip("umap.tsv not written (umap-learn unavailable)")
+
+        out = generate_report_from_sidecars(
+            svd_prefix,
+            tmp_path / "regen_umap.html",
+        )
+        html = out.read_text()
+        # UMAP should be embedded (not null) because the sidecar exists
+        assert '"umap": null' not in html
+
+
+# ---------------------------------------------------------------------------
+# CLI: diagnostic-report subcommand
+# ---------------------------------------------------------------------------
+
+class TestDiagnosticReportCLI:
+    """Tests for the CLI diagnostic-report subcommand."""
+
+    def _write_sidecars(self, tmp_path, synthetic_info, synthetic_lrr, sample_ids):
+        """Write sidecar files and return (svd_prefix, output_path, bcf_path)."""
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            write_sample_metrics_tsv,
+        )
+        import json
+
+        svd_prefix = tmp_path / "test.svd"
+        fake_output = tmp_path / "corrected.bcf"
+
+        # correction_info.json
+        hq_mask = np.asarray(synthetic_info["hq_sample_mask"], dtype=bool)
+        with open(f"{svd_prefix}.correction_info.json", "w") as fh:
+            json.dump({
+                "k": int(synthetic_info["k"]),
+                "n_hq_samples": int(synthetic_info["n_hq_samples"]),
+                "n_markers_used": int(synthetic_info["n_markers_used"]),
+                "hq_sample_mask": hq_mask.tolist(),
+            }, fh)
+
+        # sample_pcs.tsv
+        sv = np.asarray(synthetic_info["singular_values"])
+        ss = np.asarray(synthetic_info["sample_scores"])
+        n_computed = ss.shape[0]
+        k = int(synthetic_info["k"])
+        pc_scores = sv[:, np.newaxis] * ss
+        with open(f"{svd_prefix}.sample_pcs.tsv", "w") as fh:
+            fh.write("\t".join(["SAMPLE"] + [f"PC{i+1}" for i in range(n_computed)]) + "\n")
+            for i, sid in enumerate(sample_ids):
+                vals = [f"{pc_scores[j, i]:.10g}" for j in range(n_computed)]
+                fh.write("\t".join([sid] + vals) + "\n")
+
+        # singular_values.tsv
+        with open(f"{svd_prefix}.singular_values.tsv", "w") as fh:
+            fh.write("PC\tsingular_value\tused_for_correction\n")
+            for i, sval in enumerate(sv, start=1):
+                used = "yes" if i <= k else "no"
+                fh.write(f"PC{i}\t{sval:.10g}\t{used}\n")
+
+        # sample_metrics.tsv
+        metrics = compute_sample_metrics(synthetic_lrr, sample_ids)
+        write_sample_metrics_tsv(metrics, f"{svd_prefix}.sample_metrics.tsv")
+
+        return svd_prefix, fake_output
+
+    def test_diagnostic_report_produces_html(
+        self, synthetic_info, synthetic_lrr, sample_ids, tmp_path
+    ):
+        from array_lrr_gwas.cli import main
+
+        svd_prefix, _ = self._write_sidecars(tmp_path, synthetic_info, synthetic_lrr, sample_ids)
+        out_html = tmp_path / "regen.html"
+        ret = main([
+            "diagnostic-report",
+            "--svd-prefix", str(svd_prefix),
+            "-o", str(out_html),
+            "--skip-umap",
+        ])
+        assert ret == 0
+        assert out_html.exists()
+        html = out_html.read_text()
+        assert "LRR Correction Diagnostic Report" in html
+
+    def test_missing_sidecar_returns_nonzero(self, tmp_path):
+        from array_lrr_gwas.cli import main
+
+        ret = main([
+            "diagnostic-report",
+            "--svd-prefix", str(tmp_path / "nonexistent.svd"),
+            "-o", str(tmp_path / "out.html"),
+        ])
+        assert ret != 0

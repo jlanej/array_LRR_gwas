@@ -22,6 +22,16 @@ programmatically::
         lrr=lrr,             # original LRR matrix (markers × samples)
         output_path="report.html",
     )
+
+To regenerate the report from sidecar files written by ``correct`` (no LRR
+matrix required)::
+
+    from array_lrr_gwas.interactive_report import generate_report_from_sidecars
+
+    generate_report_from_sidecars(
+        svd_prefix="corrected.bcf.svd",
+        output_path="report.html",
+    )
 """
 
 from __future__ import annotations
@@ -834,13 +844,326 @@ def _merge_sheet_data(primary: dict, secondary: dict) -> dict:
 # Public API
 # ---------------------------------------------------------------------------
 
+def write_umap_tsv(
+    samples: list[str],
+    umap1: list[float],
+    umap2: list[float],
+    path: str | Path,
+) -> Path:
+    """Write UMAP coordinates to a two-column TSV file.
+
+    Parameters
+    ----------
+    samples : list of str
+        Sample IDs (one per row).
+    umap1, umap2 : list of float
+        UMAP dimension 1 and 2 coordinates, aligned to *samples*.
+    path : path-like
+        Output file path.
+
+    Returns
+    -------
+    Path to the written file.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write("SAMPLE\tumap1\tumap2\n")
+        for sid, u1, u2 in zip(samples, umap1, umap2):
+            fh.write(f"{sid}\t{u1:.10g}\t{u2:.10g}\n")
+    return path
+
+
+def write_consolidated_sample_tsv(
+    samples: list[str],
+    pre_metrics: dict[str, list],
+    hq_sample_mask: NDArray[np.bool_],
+    path: str | Path,
+    *,
+    post_metrics: dict[str, list] | None = None,
+    umap1: list[float] | None = None,
+    umap2: list[float] | None = None,
+    sheet_data: dict | None = None,
+) -> Path:
+    """Write a consolidated per-sample TSV with QC metrics, HQ status,
+    optional UMAP coordinates, and optional sample-sheet columns.
+
+    The output has one row per sample and the following columns (in order):
+
+    * ``sample_id`` – sample identifier
+    * ``LRR_SD`` – pre-correction LRR standard deviation
+    * ``callrate`` – pre-correction call rate
+    * ``n_markers_used`` – number of autosomal markers used for LRR_SD/callrate
+    * ``LRR_SD_post`` – post-correction LRR SD (if *post_metrics* supplied)
+    * ``callrate_post`` – post-correction call rate (if *post_metrics* supplied)
+    * ``hq`` – 1 (HQ) or 0 (LQ)
+    * ``umap1``, ``umap2`` – UMAP coordinates (if computed)
+    * Any additional columns from *sheet_data*
+
+    Parameters
+    ----------
+    samples : list of str
+    pre_metrics : dict
+        As returned by :func:`compute_sample_metrics`.
+    hq_sample_mask : ndarray of bool
+        HQ status per sample, aligned to *samples*.
+    path : path-like
+        Output file path.
+    post_metrics : dict, optional
+        Post-correction sample metrics.
+    umap1, umap2 : list of float, optional
+        UMAP coordinates, aligned to *samples*.
+    sheet_data : dict, optional
+        Extra columns dict as returned by :func:`_parse_sample_sheet_columns`
+        or :func:`_merge_sheet_data`.  Keys: ``columns`` (list[str]),
+        ``numeric`` (list[bool]), ``data`` (dict column→list).
+
+    Returns
+    -------
+    Path to the written file.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    has_post = post_metrics is not None
+    has_umap = umap1 is not None and umap2 is not None
+    has_n_markers = pre_metrics.get("n_markers_used") is not None
+    sheet_cols: list[str] = sheet_data["columns"] if sheet_data else []
+
+    header_parts = ["sample_id", "LRR_SD", "callrate"]
+    if has_n_markers:
+        header_parts.append("n_markers_used")
+    if has_post:
+        header_parts += ["LRR_SD_post", "callrate_post"]
+    header_parts.append("hq")
+    if has_umap:
+        header_parts += ["umap1", "umap2"]
+    header_parts += sheet_cols
+
+    hq_arr = np.asarray(hq_sample_mask, dtype=bool)
+    n_markers_used = pre_metrics.get("n_markers_used")
+
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write("\t".join(header_parts) + "\n")
+        for i, sid in enumerate(samples):
+            lrr_sd_val = pre_metrics["LRR_SD"][i]
+            lrr_sd_str = "nan" if lrr_sd_val is None else f"{lrr_sd_val:.6g}"
+            row = [sid, lrr_sd_str, f"{pre_metrics['callrate'][i]:.6g}"]
+            if has_n_markers:
+                row.append(str(n_markers_used[i]))
+            if has_post:
+                post_sd = post_metrics["LRR_SD"][i]  # type: ignore[index]
+                post_sd_str = "nan" if post_sd is None else f"{post_sd:.6g}"
+                row.append(post_sd_str)
+                row.append(f"{post_metrics['callrate'][i]:.6g}")  # type: ignore[index]
+            row.append("1" if hq_arr[i] else "0")
+            if has_umap:
+                row.append(f"{umap1[i]:.10g}")  # type: ignore[index]
+                row.append(f"{umap2[i]:.10g}")  # type: ignore[index]
+            for col in sheet_cols:
+                val = sheet_data["data"][col][i]  # type: ignore[index]
+                row.append("" if val is None else str(val))
+            fh.write("\t".join(row) + "\n")
+    return path
+
+
+def generate_report_from_sidecars(
+    svd_prefix: str | Path,
+    output_path: str | Path,
+    *,
+    sample_sheet_path: str | Path | None = None,
+    illumina_sample_sheet_path: str | Path | None = None,
+    illumina_sample_id_col: str = "Sample_Group",
+    skip_umap: bool = False,
+) -> Path:
+    """Regenerate the interactive HTML diagnostic report from sidecar files.
+
+    This function loads the sidecar files written by the ``correct`` CLI
+    sub-command and calls :func:`generate_report` without needing to reload
+    the original LRR matrix or BCF/VCF file.
+
+    Required sidecar files (all relative to *svd_prefix*):
+
+    * ``<prefix>.correction_info.json`` – k, n_hq_samples, n_markers_used,
+      hq_sample_mask (written by ``correct``).
+    * ``<prefix>.sample_pcs.tsv`` – PC scores per sample.
+    * ``<prefix>.singular_values.tsv`` – singular values and used-flag.
+    * ``<prefix>.sample_metrics.tsv`` – per-sample LRR_SD and callrate.
+
+    Optional sidecar:
+
+    * ``<prefix>.umap.tsv`` – precomputed UMAP coordinates (umap1, umap2).
+      When present, UMAP is loaded from file instead of being recomputed.
+
+    Parameters
+    ----------
+    svd_prefix : path-like
+        SVD output prefix used when running ``correct``
+        (i.e. the value of ``--svd-output-prefix``, defaulting to
+        ``<output>.svd``).
+    output_path : path-like
+        Path for the regenerated HTML file.
+    sample_sheet_path : path-like, optional
+        Optional compiled sample sheet TSV for colour overlays.
+    illumina_sample_sheet_path : path-like, optional
+        Optional Illumina SampleSheet.csv for colour overlays.
+    illumina_sample_id_col : str
+        Column in the Illumina sheet whose values match sample IDs.
+    skip_umap : bool
+        When ``True``, skip UMAP even if the sidecar exists.
+
+    Returns
+    -------
+    Path to the written HTML file.
+    """
+    import csv
+
+    svd_prefix = Path(svd_prefix)
+
+    # 1. Load correction_info.json
+    info_path = Path(f"{svd_prefix}.correction_info.json")
+    if not info_path.exists():
+        raise FileNotFoundError(
+            f"correction_info.json not found: {info_path}. "
+            "Re-run 'correct' to generate this sidecar file."
+        )
+    with info_path.open(encoding="utf-8") as fh:
+        stored = json.load(fh)
+
+    k = int(stored["k"])
+    n_hq_samples = int(stored["n_hq_samples"])
+    n_markers_used = int(stored["n_markers_used"])
+    hq_sample_mask = np.array(stored["hq_sample_mask"], dtype=bool)
+
+    # 2. Load sample PCs TSV → reconstruct samples list and pc_scores
+    pcs_path = Path(f"{svd_prefix}.sample_pcs.tsv")
+    if not pcs_path.exists():
+        raise FileNotFoundError(f"sample_pcs.tsv not found: {pcs_path}")
+    samples: list[str] = []
+    pc_rows: list[list[float]] = []
+    with pcs_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        pc_cols = [h for h in (reader.fieldnames or []) if h.startswith("PC")]
+        for row in reader:
+            samples.append(row["SAMPLE"])
+            pc_rows.append([float(row[c]) for c in pc_cols])
+    if not samples:
+        raise ValueError(f"No samples found in {pcs_path}")
+    # pc_scores has shape (n_computed, n_samples) — same layout as info["sample_scores"]
+    pc_scores_arr = np.array(pc_rows, dtype=float).T  # (n_computed, n_samples)
+
+    # 3. Load singular values TSV
+    sv_path = Path(f"{svd_prefix}.singular_values.tsv")
+    if not sv_path.exists():
+        raise FileNotFoundError(f"singular_values.tsv not found: {sv_path}")
+    singular_values_list: list[float] = []
+    with sv_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row in reader:
+            singular_values_list.append(float(row["singular_value"]))
+    singular_values = np.array(singular_values_list, dtype=float)
+
+    # Reconstruct sample_scores: pc_scores = singular_values * sample_scores
+    # → sample_scores[i] = pc_scores[i] / singular_values[i]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sample_scores = np.where(
+            singular_values[:, np.newaxis] != 0,
+            pc_scores_arr / singular_values[:, np.newaxis],
+            0.0,
+        )
+
+    # Rebuild the info dict that generate_report expects
+    info: dict = {
+        "k": k,
+        "n_hq_samples": n_hq_samples,
+        "n_markers_used": n_markers_used,
+        "hq_sample_mask": hq_sample_mask,
+        "singular_values": singular_values,
+        "sample_scores": sample_scores,
+        "n_components_computed": len(singular_values),
+    }
+
+    # 4. Load sample metrics TSV (pre-correction)
+    metrics_path = Path(f"{svd_prefix}.sample_metrics.tsv")
+    if not metrics_path.exists():
+        raise FileNotFoundError(f"sample_metrics.tsv not found: {metrics_path}")
+    pre_metrics: dict[str, list] = {
+        "SAMPLE": [],
+        "LRR_SD": [],
+        "callrate": [],
+        "n_markers_used": [],
+    }
+    post_metrics: dict[str, list] | None = None
+    with metrics_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        fieldnames = reader.fieldnames or []
+        has_post_cols = "LRR_SD_post" in fieldnames
+        if has_post_cols:
+            post_metrics = {"SAMPLE": [], "LRR_SD": [], "callrate": [], "n_markers_used": []}
+        for row in reader:
+            pre_metrics["SAMPLE"].append(row["SAMPLE"])
+            lrr_sd_raw = row.get("LRR_SD", "nan")
+            pre_metrics["LRR_SD"].append(
+                None if lrr_sd_raw in ("nan", "", "NaN") else float(lrr_sd_raw)
+            )
+            pre_metrics["callrate"].append(float(row.get("callrate", "nan")))
+            n_mk = row.get("n_markers_used")
+            pre_metrics["n_markers_used"].append(
+                None if n_mk is None or n_mk == "" else int(float(n_mk))
+            )
+            if has_post_cols and post_metrics is not None:
+                post_metrics["SAMPLE"].append(row["SAMPLE"])
+                post_sd_raw = row.get("LRR_SD_post", "nan")
+                post_metrics["LRR_SD"].append(
+                    None if post_sd_raw in ("nan", "", "NaN") else float(post_sd_raw)
+                )
+                post_metrics["callrate"].append(float(row.get("callrate_post", "nan")))
+                post_metrics["n_markers_used"].append(
+                    None if n_mk is None or n_mk == "" else int(float(n_mk))
+                )
+
+    # 5. Load precomputed UMAP if available (and not skipped)
+    precomputed_umap: tuple[list[float], list[float]] | None = None
+    if not skip_umap:
+        umap_path = Path(f"{svd_prefix}.umap.tsv")
+        if umap_path.exists():
+            u1_list: list[float] = []
+            u2_list: list[float] = []
+            with umap_path.open(encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh, delimiter="\t")
+                for row in reader:
+                    u1_list.append(float(row["umap1"]))
+                    u2_list.append(float(row["umap2"]))
+            if u1_list:
+                precomputed_umap = (u1_list, u2_list)
+                logger.info(
+                    "Loaded precomputed UMAP from %s (%d samples)",
+                    umap_path, len(u1_list),
+                )
+
+    return generate_report(
+        info,
+        samples,
+        None,
+        output_path,
+        pre_metrics=pre_metrics,
+        post_metrics=post_metrics,
+        sample_sheet_path=sample_sheet_path,
+        illumina_sample_sheet_path=illumina_sample_sheet_path,
+        illumina_sample_id_col=illumina_sample_id_col,
+        precomputed_umap=precomputed_umap,
+        skip_umap=skip_umap,
+    )
+
+
 def generate_report(
     info: dict,
     samples: list[str],
-    lrr: NDArray[np.floating],
+    lrr: NDArray[np.floating] | None,
     output_path: str | Path,
     *,
     corrected_lrr: NDArray[np.floating] | None = None,
+    pre_metrics: dict[str, list] | None = None,
     post_metrics: dict[str, list] | None = None,
     chromosomes: NDArray | Sequence[str] | None = None,
     upstream_qc_mask: NDArray[np.bool_] | None = None,
@@ -848,6 +1171,7 @@ def generate_report(
     sample_sheet_path: str | Path | None = None,
     illumina_sample_sheet_path: str | Path | None = None,
     illumina_sample_id_col: str = "Sample_Group",
+    precomputed_umap: tuple[list[float], list[float]] | None = None,
     skip_umap: bool = False,
 ) -> Path:
     """Generate an interactive HTML diagnostic report.
@@ -860,8 +1184,10 @@ def generate_report(
         ``k``, ``n_hq_samples``, and ``n_markers_used``.
     samples : list of str
         Sample ID strings.
-    lrr : ndarray, shape (n_markers, n_samples)
-        Original (uncorrected) LRR matrix.
+    lrr : ndarray, shape (n_markers, n_samples), or None
+        Original (uncorrected) LRR matrix.  Used to compute pre-correction
+        sample metrics when *pre_metrics* is not supplied.  May be ``None``
+        when *pre_metrics* is provided (e.g. when regenerating from sidecars).
     output_path : path-like
         Where to write the HTML file.
     corrected_lrr : ndarray, shape (n_markers, n_samples), optional
@@ -869,6 +1195,12 @@ def generate_report(
         and callrate are computed on the same marker set as pre-correction
         and included in the metrics TSV and interactive comparison plots
         (scatter and Bland–Altman).
+    pre_metrics : dict, optional
+        Pre-computed pre-correction sample metrics (with keys ``SAMPLE``,
+        ``LRR_SD``, ``callrate``, ``n_markers_used``), as returned by
+        :func:`compute_sample_metrics`.  When provided, these are used
+        directly instead of computing from *lrr*.  Either *lrr* or
+        *pre_metrics* must be supplied.
     post_metrics : dict, optional
         Pre-computed post-correction sample metrics (with keys ``SAMPLE``,
         ``LRR_SD``, ``callrate``, ``n_markers_used``), as returned by
@@ -903,14 +1235,24 @@ def generate_report(
         identifier (e.g. ``NA19152``) in that column while ``Sample_ID``
         holds a longer Illumina-internal barcode string.  If the column is not
         found the first column of the ``[Data]`` section is used as a fallback.
+    precomputed_umap : tuple of (list[float], list[float]), optional
+        Precomputed UMAP coordinates ``(umap1, umap2)`` aligned to *samples*.
+        When provided, these are embedded directly in the report without
+        calling :func:`compute_umap`.  Takes precedence over *skip_umap*.
     skip_umap : bool
         If ``True``, skip the UMAP computation (useful when umap-learn is
-        not installed or the dataset is very small).
+        not installed or the dataset is very small).  Ignored when
+        *precomputed_umap* is supplied.
 
     Returns
     -------
     Path to the written HTML file.
     """
+    if lrr is None and pre_metrics is None:
+        raise ValueError(
+            "Either 'lrr' (LRR matrix) or 'pre_metrics' (pre-computed sample "
+            "metrics) must be provided to generate_report()."
+        )
     output_path = Path(output_path)
     singular_values = np.asarray(info["singular_values"])
     sample_scores = np.asarray(info["sample_scores"])
@@ -919,11 +1261,18 @@ def generate_report(
     n_hq = int(info["n_hq_samples"])
     n_markers = int(info["n_markers_used"])
 
-    # 1. Compute pre-correction sample metrics
-    metrics = compute_sample_metrics(
-        lrr, samples, chromosomes=chromosomes,
-        upstream_qc_mask=upstream_qc_mask,
-    )
+    # 1. Compute or use pre-computed pre-correction sample metrics
+    if pre_metrics is not None:
+        metrics = pre_metrics
+        logger.info(
+            "Using pre-computed pre-correction metrics for %d samples",
+            len(samples),
+        )
+    else:
+        metrics = compute_sample_metrics(
+            lrr, samples, chromosomes=chromosomes,
+            upstream_qc_mask=upstream_qc_mask,
+        )
 
     # 1b. Compute or use pre-computed post-correction metrics
     _post: dict[str, list] | None = post_metrics
@@ -957,9 +1306,13 @@ def generate_report(
         sample_scores, singular_values, samples, metrics, hq_mask, k_mp
     )
 
-    # 4. UMAP
+    # 4. UMAP — use precomputed coordinates if provided, otherwise compute
     umap_data = None
-    if not skip_umap:
+    if precomputed_umap is not None:
+        u1, u2 = precomputed_umap
+        n_dims = min(max(3, k_mp), sample_scores.shape[0])
+        umap_data = {"umap1": u1, "umap2": u2, "n_dims": n_dims}
+    elif not skip_umap:
         try:
             u1, u2 = compute_umap(sample_scores, singular_values, k_mp)
             n_dims = min(max(3, k_mp), sample_scores.shape[0])

@@ -22,6 +22,7 @@
   - [associate](#associate)
   - [segment](#segment)
   - [report](#report)
+  - [diagnostic-report](#diagnostic-report)
 - [Sample Exclusion Strategies](#sample-exclusion-strategies)
   - [RSVD Correction Stage](#rsvd-correction-stage)
   - [Association Stage](#association-stage)
@@ -525,6 +526,60 @@ one-glance view across the whole genome.
 
 ---
 
+### `diagnostic-report`
+
+Regenerate the interactive LRR correction diagnostic HTML report **from
+sidecar files** written by `correct` — without reloading the original BCF/VCF
+or LRR matrix.  This is useful when you want to:
+
+* Quickly tweak the report aesthetics or colour overlays with a different
+  `--sample-sheet`.
+* Re-run report generation as part of a downstream workflow after the
+  `correct` step has already finished.
+* Archive a fresh copy of the report alongside analysis notebooks.
+
+**Prerequisites:** The following sidecar files must exist at `--svd-prefix`
+(all written automatically by `correct`):
+
+| File | Contents |
+|------|---------|
+| `<prefix>.correction_info.json` | k, n\_hq\_samples, n\_markers\_used, per-sample HQ mask |
+| `<prefix>.sample_pcs.tsv` | Per-sample PC scores |
+| `<prefix>.singular_values.tsv` | Singular values with used-for-correction flag |
+| `<prefix>.sample_metrics.tsv` | Per-sample LRR\_SD, callrate, n\_markers\_used (pre/post) |
+| `<prefix>.umap.tsv` *(optional)* | Pre-computed UMAP coordinates — loaded when present |
+
+```
+array-lrr-gwas diagnostic-report --svd-prefix PREFIX -o OUTPUT.html [OPTIONS]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--svd-prefix` | path | *required* | SVD prefix used when running `correct` (matches `--svd-output-prefix`) |
+| `-o, --output` | path | *required* | Output HTML file for the regenerated report |
+| `--sample-sheet` | path | `None` | Compiled sample sheet TSV for colour overlays |
+| `--illumina-sample-sheet` | path | `None` | Illumina-format SampleSheet.csv for additional overlays |
+| `--illumina-sample-id-col` | str | `Sample_Group` | Column in the Illumina sheet whose values match sample IDs |
+| `--skip-umap` | flag | `False` | Skip UMAP even if `<prefix>.umap.tsv` exists |
+| `-v, --verbose` | flag | `False` | Enable debug logging |
+
+**Example workflow:**
+
+```bash
+# Step 1: run correction (writes all sidecars automatically)
+array-lrr-gwas correct input.bcf -o corrected.bcf \
+    --sample-sheet compiled_sample_sheet.tsv
+
+# Step 2 (later): regenerate the report, adding an Illumina sheet
+array-lrr-gwas diagnostic-report \
+    --svd-prefix corrected.bcf.svd \
+    -o corrected.bcf.diagnostic_report_v2.html \
+    --sample-sheet compiled_sample_sheet.tsv \
+    --illumina-sample-sheet SampleSheet.csv
+```
+
+---
+
 ## Sample Exclusion Strategies
 
 Rigorous sample exclusion is essential for both the RSVD batch-effect
@@ -871,12 +926,43 @@ is `<OUTPUT>.svd`; override with `--svd-output-prefix`.
    - Values: sample PC values for the correction components (`diag(s) @ Vᵀ`)
 
 2. `<prefix>.singular_values.tsv`
-   - Header: `PC`, `singular_value`
+   - Header: `PC`, `singular_value`, `used_for_correction`
    - One row per component (`PC1`..`PCk`)
+
+3. `<prefix>.correction_info.json`
+   - JSON sidecar written by `correct`; required by `diagnostic-report`
+   - Fields: `k` (int), `n_hq_samples` (int), `n_markers_used` (int),
+     `hq_sample_mask` (list of bool, one entry per sample)
+
+4. `<prefix>.sample_metrics.tsv`
+   - Per-sample QC metrics written alongside every report
+   - Header: `SAMPLE`, `LRR_SD`, `callrate`, `n_markers_used`
+   - When post-correction metrics are available: also `LRR_SD_post`,
+     `callrate_post`
+
+5. `<prefix>.umap.tsv` *(written when UMAP is computed)*
+   - Header: `SAMPLE`, `umap1`, `umap2`
+   - Pre-computed 2-D UMAP embedding of samples (from `max(3, k_MP)` PCs)
+   - Written during `correct`; loaded by `diagnostic-report` to avoid
+     recomputing
+
+6. `<prefix>.sample_summary.tsv` — **Consolidated per-sample table**
+   - One row per sample; all key per-sample data in one file
+   - Columns (in order):
+     - `sample_id` — sample identifier
+     - `LRR_SD` — pre-correction LRR standard deviation
+     - `callrate` — pre-correction call rate
+     - `n_markers_used` — number of autosomal markers used for metrics
+     - `LRR_SD_post`, `callrate_post` — post-correction equivalents (if available)
+     - `hq` — 1 = HQ, 0 = LQ
+     - `umap1`, `umap2` — UMAP coordinates (if computed)
+     - All additional columns from `--sample-sheet` (and `--illumina-sample-sheet`)
+   - Suitable as input to downstream visualisation scripts, R/Pandas analyses,
+     or supplementary tables
 
 Optional (`--write-loadings`):
 
-3. `<prefix>.loadings.tsv`
+7. `<prefix>.loadings.tsv`
    - Header: `chrom`, `pos`, `variant_id`, `PC1`, `PC2`, ..., `PCk`
    - One row per marker retained for decomposition (`marker_mask=True`)
    - Values: marker loadings (`U`) used during residualisation
