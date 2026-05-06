@@ -1429,7 +1429,11 @@ def _write_outputs(args, info, samples, variants, lrr, corrected,
                 illumina_sample_sheet_path=getattr(args, "correct_illumina_sample_sheet", None),
                 illumina_sample_id_col=getattr(args, "correct_illumina_sample_id_col", "Sample_Group"),
                 precomputed_umap=precomputed_umap,
-                skip_umap=True,  # already computed above; use precomputed_umap
+                # skip_umap=True because UMAP was attempted above; if it
+                # succeeded, precomputed_umap is set and will be used; if it
+                # failed, precomputed_umap is None and the report will also
+                # skip UMAP (no double-computation attempt).
+                skip_umap=True,
             )
             logger.info("Wrote interactive report: %s", report_path)
             logger.info("Wrote sample metrics TSV: %s", metrics_tsv_path)
@@ -1480,9 +1484,6 @@ def _write_outputs(args, info, samples, variants, lrr, corrected,
 
             _consolidated_path = Path(f"{svd_prefix}.sample_summary.tsv")
             _summary_metrics = pre_metrics if pre_metrics is not None else {}
-            if not _summary_metrics:
-                # pre_metrics not computed (lrr was None); load from metrics TSV if it exists
-                pass
             if _summary_metrics:
                 u1_out = precomputed_umap[0] if precomputed_umap else None
                 u2_out = precomputed_umap[1] if precomputed_umap else None
