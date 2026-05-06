@@ -1087,6 +1087,85 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Enable verbose logging.",
     )
 
+    # ----------------------------------------------------------------
+    # diagnostic-report sub-command
+    # ----------------------------------------------------------------
+    diag = sub.add_parser(
+        "diagnostic-report",
+        help=(
+            "Regenerate the interactive LRR correction diagnostic HTML report "
+            "from sidecar files written by 'correct'.  Does not require "
+            "reloading the original BCF/VCF or LRR matrix."
+        ),
+    )
+    diag.add_argument(
+        "--svd-prefix",
+        type=Path,
+        required=True,
+        dest="svd_prefix",
+        help=(
+            "SVD output prefix used when running 'correct' "
+            "(i.e. the value of --svd-output-prefix, defaulting to "
+            "<output>.svd).  The following sidecar files are expected: "
+            "<prefix>.correction_info.json, <prefix>.sample_pcs.tsv, "
+            "<prefix>.singular_values.tsv, <prefix>.sample_metrics.tsv.  "
+            "Optional: <prefix>.umap.tsv (precomputed UMAP coordinates)."
+        ),
+    )
+    diag.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        required=True,
+        help="Output HTML file path for the regenerated report.",
+    )
+    diag.add_argument(
+        "--sample-sheet",
+        type=Path,
+        default=None,
+        dest="correct_sample_sheet",
+        help=(
+            "Optional path to compiled_sample_sheet.tsv.  When provided, "
+            "columns are embedded as colour-overlay options in the report."
+        ),
+    )
+    diag.add_argument(
+        "--illumina-sample-sheet",
+        type=Path,
+        default=None,
+        dest="correct_illumina_sample_sheet",
+        help=(
+            "Optional path to an Illumina-format SampleSheet.csv.  "
+            "Columns from the [Data] section are added alongside any "
+            "columns from --sample-sheet."
+        ),
+    )
+    diag.add_argument(
+        "--illumina-sample-id-col",
+        type=str,
+        default="Sample_Group",
+        dest="correct_illumina_sample_id_col",
+        help=(
+            "Column in the Illumina SampleSheet.csv [Data] section whose "
+            "values match the sample IDs (default: 'Sample_Group')."
+        ),
+    )
+    diag.add_argument(
+        "--skip-umap",
+        action="store_true",
+        dest="skip_umap",
+        help=(
+            "Skip UMAP projection in the report even if the umap.tsv "
+            "sidecar is available."
+        ),
+    )
+    diag.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging.",
+    )
+
     return parser
 
 
@@ -1119,6 +1198,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "report":
         return _run_report(args)
+
+    if args.command == "diagnostic-report":
+        return _run_diagnostic_report(args)
 
     parser.print_help()
     return 1
@@ -1253,6 +1335,8 @@ def _write_outputs(args, info, samples, variants, lrr, corrected,
                    chromosomes, upstream_qc_mask, audit,
                    post_metrics=None):
     """Shared helper: write SVD text outputs, report, and audit trail."""
+    import json as _json
+
     svd_prefix = args.svd_output_prefix or Path(f"{args.output}.svd")
     svd_paths = _write_svd_text_outputs(
         svd_prefix,
@@ -1266,18 +1350,76 @@ def _write_outputs(args, info, samples, variants, lrr, corrected,
     if "loadings" in svd_paths:
         logger.info("Wrote loadings: %s", svd_paths["loadings"])
 
+    # Write correction_info.json sidecar (enables standalone report regeneration)
+    _hq_mask_raw = info.get("hq_sample_mask")
+    if _hq_mask_raw is not None:
+        hq_mask_arr = np.asarray(_hq_mask_raw, dtype=bool)
+        correction_info = {
+            "k": int(info["k"]),
+            "n_hq_samples": int(info["n_hq_samples"]),
+            "n_markers_used": int(info["n_markers_used"]),
+            "hq_sample_mask": hq_mask_arr.tolist(),
+        }
+        info_json_path = Path(f"{svd_prefix}.correction_info.json")
+        with info_json_path.open("w", encoding="utf-8") as fh:
+            _json.dump(correction_info, fh)
+        logger.info("Wrote correction info JSON: %s", info_json_path)
+    else:
+        hq_mask_arr = np.ones(len(samples), dtype=bool)
+        logger.warning(
+            "hq_sample_mask not found in correction info; "
+            "skipping correction_info.json sidecar."
+        )
+
     # Generate interactive HTML diagnostic report
+    pre_metrics = None
+    precomputed_umap: tuple[list, list] | None = None
+
     if not getattr(args, "no_interactive_report", False):
-        from array_lrr_gwas.interactive_report import generate_report
+        from array_lrr_gwas.interactive_report import (
+            compute_umap,
+            generate_report,
+            write_umap_tsv,
+            write_consolidated_sample_tsv,
+        )
 
         report_path = Path(f"{args.output}.diagnostic_report.html")
         metrics_tsv_path = Path(f"{svd_prefix}.sample_metrics.tsv")
+
+        # Compute pre-correction metrics once so we can reuse them for both
+        # the report and the consolidated sample TSV
+        from array_lrr_gwas.interactive_report import compute_sample_metrics
+        if lrr is not None:
+            pre_metrics = compute_sample_metrics(
+                lrr, samples, chromosomes=chromosomes,
+                upstream_qc_mask=upstream_qc_mask,
+            )
+
+        # Compute UMAP once (reused in the report and the consolidated TSV)
+        singular_values = np.asarray(info["singular_values"])
+        sample_scores = np.asarray(info["sample_scores"])
+        k_mp = int(info["k"])
+        try:
+            u1, u2 = compute_umap(sample_scores, singular_values, k_mp)
+            precomputed_umap = (u1, u2)
+            umap_tsv_path = Path(f"{svd_prefix}.umap.tsv")
+            write_umap_tsv(samples, u1, u2, umap_tsv_path)
+            logger.info("Wrote UMAP coordinates: %s", umap_tsv_path)
+        except ImportError:
+            logger.warning(
+                "umap-learn not installed; skipping UMAP output. "
+                "Install with: pip install umap-learn"
+            )
+        except Exception:
+            logger.warning("UMAP computation failed; skipping.", exc_info=True)
+
         try:
             generate_report(
                 info=info,
                 samples=samples,
                 lrr=lrr,
                 corrected_lrr=corrected,
+                pre_metrics=pre_metrics,
                 post_metrics=post_metrics,
                 chromosomes=chromosomes,
                 upstream_qc_mask=upstream_qc_mask,
@@ -1286,6 +1428,8 @@ def _write_outputs(args, info, samples, variants, lrr, corrected,
                 sample_sheet_path=getattr(args, "correct_sample_sheet", None),
                 illumina_sample_sheet_path=getattr(args, "correct_illumina_sample_sheet", None),
                 illumina_sample_id_col=getattr(args, "correct_illumina_sample_id_col", "Sample_Group"),
+                precomputed_umap=precomputed_umap,
+                skip_umap=True,  # already computed above; use precomputed_umap
             )
             logger.info("Wrote interactive report: %s", report_path)
             logger.info("Wrote sample metrics TSV: %s", metrics_tsv_path)
@@ -1295,6 +1439,126 @@ def _write_outputs(args, info, samples, variants, lrr, corrected,
                 "Install plotly and umap-learn for full support.",
                 exc_info=True,
             )
+
+        # Write consolidated per-sample TSV
+        try:
+            from array_lrr_gwas.interactive_report import (
+                _parse_sample_sheet_columns,
+                _merge_sheet_data,
+            )
+            _sheet_data = None
+            _sample_sheet = getattr(args, "correct_sample_sheet", None)
+            _illumina_sheet = getattr(args, "correct_illumina_sample_sheet", None)
+            _illumina_id_col = getattr(args, "correct_illumina_sample_id_col", "Sample_Group")
+            if _sample_sheet is not None:
+                try:
+                    _compiled = _parse_sample_sheet_columns(_sample_sheet, samples)
+                    if _illumina_sheet is not None:
+                        _illum = _parse_sample_sheet_columns(
+                            _illumina_sheet, samples, sample_id_col=_illumina_id_col
+                        )
+                        _sheet_data = _merge_sheet_data(_compiled, _illum)
+                    else:
+                        _sheet_data = _compiled
+                except Exception:
+                    logger.warning(
+                        "Failed to parse sample sheet for consolidated TSV; "
+                        "sheet columns will be omitted.",
+                        exc_info=True,
+                    )
+            elif _illumina_sheet is not None:
+                try:
+                    _sheet_data = _parse_sample_sheet_columns(
+                        _illumina_sheet, samples, sample_id_col=_illumina_id_col
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to parse Illumina sheet for consolidated TSV; "
+                        "sheet columns will be omitted.",
+                        exc_info=True,
+                    )
+
+            _consolidated_path = Path(f"{svd_prefix}.sample_summary.tsv")
+            _summary_metrics = pre_metrics if pre_metrics is not None else {}
+            if not _summary_metrics:
+                # pre_metrics not computed (lrr was None); load from metrics TSV if it exists
+                pass
+            if _summary_metrics:
+                u1_out = precomputed_umap[0] if precomputed_umap else None
+                u2_out = precomputed_umap[1] if precomputed_umap else None
+                write_consolidated_sample_tsv(
+                    samples,
+                    _summary_metrics,
+                    hq_mask_arr,
+                    _consolidated_path,
+                    post_metrics=post_metrics,
+                    umap1=u1_out,
+                    umap2=u2_out,
+                    sheet_data=_sheet_data,
+                )
+                logger.info("Wrote consolidated sample summary: %s", _consolidated_path)
+        except Exception:
+            logger.warning(
+                "Failed to write consolidated sample TSV.",
+                exc_info=True,
+            )
+
+    else:
+        # Even when the interactive report is skipped, write the sidecar files
+        # so that the report can be regenerated later with diagnostic-report.
+        from array_lrr_gwas.interactive_report import (
+            compute_sample_metrics,
+            compute_umap,
+            write_sample_metrics_tsv,
+            write_umap_tsv,
+            write_consolidated_sample_tsv,
+        )
+        metrics_tsv_path = Path(f"{svd_prefix}.sample_metrics.tsv")
+        if lrr is not None:
+            pre_metrics = compute_sample_metrics(
+                lrr, samples, chromosomes=chromosomes,
+                upstream_qc_mask=upstream_qc_mask,
+            )
+            write_sample_metrics_tsv(pre_metrics, metrics_tsv_path, post_metrics=post_metrics)
+            logger.info("Wrote sample metrics TSV: %s", metrics_tsv_path)
+
+        singular_values = np.asarray(info["singular_values"])
+        sample_scores = np.asarray(info["sample_scores"])
+        k_mp = int(info["k"])
+        try:
+            u1, u2 = compute_umap(sample_scores, singular_values, k_mp)
+            precomputed_umap = (u1, u2)
+            umap_tsv_path = Path(f"{svd_prefix}.umap.tsv")
+            write_umap_tsv(samples, u1, u2, umap_tsv_path)
+            logger.info("Wrote UMAP coordinates: %s", umap_tsv_path)
+        except ImportError:
+            logger.warning(
+                "umap-learn not installed; skipping UMAP output. "
+                "Install with: pip install umap-learn"
+            )
+        except Exception:
+            logger.warning("UMAP computation failed; skipping.", exc_info=True)
+
+        if pre_metrics:
+            try:
+                _consolidated_path = Path(f"{svd_prefix}.sample_summary.tsv")
+                u1_out = precomputed_umap[0] if precomputed_umap else None
+                u2_out = precomputed_umap[1] if precomputed_umap else None
+                write_consolidated_sample_tsv(
+                    samples,
+                    pre_metrics,
+                    hq_mask_arr,
+                    _consolidated_path,
+                    post_metrics=post_metrics,
+                    umap1=u1_out,
+                    umap2=u2_out,
+                )
+                logger.info("Wrote consolidated sample summary: %s", _consolidated_path)
+            except Exception:
+                logger.warning(
+                    "Failed to write consolidated sample TSV.",
+                    exc_info=True,
+                )
 
     # Write audit trail if requested
     audit_dir = getattr(args, "audit_dir", None)
@@ -3627,6 +3891,50 @@ def _run_report(args: argparse.Namespace) -> int:
     except ValueError as exc:
         logger.error("%s", exc)
         return 1
+    logger.info("Done.")
+    return 0
+
+
+def _run_diagnostic_report(args: argparse.Namespace) -> int:
+    """Execute the ``diagnostic-report`` sub-command."""
+    from array_lrr_gwas.interactive_report import generate_report_from_sidecars
+
+    svd_prefix = args.svd_prefix
+    output_path = args.output
+
+    # Validate that the required sidecar files exist.
+    required = [
+        Path(f"{svd_prefix}.correction_info.json"),
+        Path(f"{svd_prefix}.sample_pcs.tsv"),
+        Path(f"{svd_prefix}.singular_values.tsv"),
+        Path(f"{svd_prefix}.sample_metrics.tsv"),
+    ]
+    missing = [str(p) for p in required if not p.exists()]
+    if missing:
+        logger.error(
+            "Required sidecar file(s) not found.  "
+            "Re-run 'correct' to generate them:\n  %s",
+            "\n  ".join(missing),
+        )
+        return 1
+
+    try:
+        out = generate_report_from_sidecars(
+            svd_prefix,
+            output_path,
+            sample_sheet_path=getattr(args, "correct_sample_sheet", None),
+            illumina_sample_sheet_path=getattr(args, "correct_illumina_sample_sheet", None),
+            illumina_sample_id_col=getattr(args, "correct_illumina_sample_id_col", "Sample_Group"),
+            skip_umap=getattr(args, "skip_umap", False),
+        )
+        logger.info("Diagnostic report written to %s", out)
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        return 1
+    except Exception as exc:
+        logger.error("Failed to generate diagnostic report: %s", exc, exc_info=True)
+        return 1
+
     logger.info("Done.")
     return 0
 
